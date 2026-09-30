@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+bytes=$(wc -c | tr -d ' ')
+printf '{"bytes": %s}\n' "$bytes"
