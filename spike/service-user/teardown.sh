@@ -73,11 +73,15 @@ fi
 echo "== linger"
 if [[ -e "/var/lib/systemd/linger/$SVC" ]]; then
   if [[ -n "$svc_uid" ]]; then
-    loginctl disable-linger "$SVC" || warn "could not disable linger for $SVC"
+    if loginctl disable-linger "$SVC"; then
+      echo "disabled linger for $SVC"
+    else
+      warn "could not disable linger for $SVC"
+    fi
   else
     rm -f "/var/lib/systemd/linger/$SVC"
+    echo "removed the linger file of $SVC"
   fi
-  echo "disabled linger for $SVC"
 else
   echo "linger is not enabled for $SVC"
 fi
@@ -115,8 +119,11 @@ if [[ -f "$ACL_BAK" ]]; then
 else
   home_acl=$(getfacl -p "/home/$AGENT")
   if [[ -n "$svc_uid" ]] && grep -q "^user:${SVC}:" <<<"$home_acl"; then
-    setfacl -x "u:${SVC}" "/home/$AGENT" || warn "could not remove the ACL entry of $SVC from /home/$AGENT"
-    echo "no backup at $ACL_BAK; removed the ACL entry of $SVC from /home/$AGENT"
+    if setfacl -x "u:${SVC}" "/home/$AGENT"; then
+      echo "no backup at $ACL_BAK; removed the ACL entry of $SVC from /home/$AGENT"
+    else
+      warn "could not remove the ACL entry of $SVC from /home/$AGENT"
+    fi
   else
     echo "no backup at $ACL_BAK and no ACL entry of $SVC on /home/$AGENT"
   fi
@@ -128,8 +135,11 @@ if [[ -L "$TREE" ]]; then
   rm -f "$TREE"
   echo "removed the symlink $TREE"
 elif [[ -e "$TREE" ]]; then
-  rm -rf --one-file-system "$TREE" || warn "could not remove $TREE"
-  echo "removed $TREE"
+  if rm -rf --one-file-system "$TREE"; then
+    echo "removed $TREE"
+  else
+    warn "could not remove $TREE"
+  fi
 else
   echo "$TREE does not exist"
 fi
@@ -152,16 +162,22 @@ for u in "$SVC" "$OTHER"; do
     echo "user $u does not exist"
   fi
   if [[ -d "/home/$u" ]] && ! id -u "$u" >/dev/null 2>&1; then
-    rm -rf --one-file-system "/home/${u:?}" || warn "could not remove /home/$u"
-    echo "removed /home/$u"
+    if rm -rf --one-file-system "/home/${u:?}"; then
+      echo "removed /home/$u"
+    else
+      warn "could not remove /home/$u"
+    fi
   fi
   if getent group "$u" >/dev/null && ! id -u "$u" >/dev/null 2>&1; then
     groupdel "$u" || warn "could not delete group $u"
   fi
 done
 if getent group "$GRP" >/dev/null; then
-  groupdel "$GRP" || warn "could not delete group $GRP"
-  echo "deleted group $GRP"
+  if groupdel "$GRP"; then
+    echo "deleted group $GRP"
+  else
+    warn "could not delete group $GRP"
+  fi
 else
   echo "group $GRP does not exist"
 fi

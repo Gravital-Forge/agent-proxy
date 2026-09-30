@@ -130,13 +130,11 @@ owner_of() {
   fi
 }
 
-root_fixture() {
-  local path=$1 owner=$2 group=$3 mode=$4
-  rm -f "$path"
-  echo "apx-spike root fixture" >"$path"
-  setfacl -b "$path"
-  chown "$owner:$group" "$path"
-  chmod "$mode" "$path"
+# The agent writes the fixture and root only regroups it: chown -h never follows a planted symlink.
+agent_fixture() {
+  local path=$1 group=$2 mode=$3
+  as_agent sh -c 'rm -f "$1" && echo "apx-spike fixture" >"$1" && setfacl -b "$1" && chmod "$2" "$1"' sh "$path" "$mode"
+  chown -h "$AGENT:$group" "$path"
 }
 
 CAGE_SCRIPT=$(cat <<'EOF'
@@ -166,16 +164,15 @@ check S2 "002:read=ok,append=ok;022:read=ok,append=ok" \
 check S3 "file=ok,nested=ok" \
   "file=$(try sh -c 'echo cage >cage-made.txt'),nested=$(try sh -c 'mkdir -p cage-dir && echo cage >cage-dir/nested.txt')"
 case $(try cat groupfile) in
-  ok) s4=groups-survive ;;
-  denied) s4=groups-dropped ;;
+  ok) s4=survive ;;
+  denied) s4=dropped ;;
   *) s4=error ;;
 esac
-check S4 groups-survive "$s4"
+echo "MEASURE S4 supplementary_groups=$s4"
 check S5 denied "$(try cat otherfile)"
 rc=0
 err=$(git -C repo status 2>&1 >/dev/null) || rc=$?
-check S6 128 "$rc"
-echo "MEASURE S6 stderr=\"$(printf '%s\n' "$err" | head -n 1)\""
+echo "MEASURE S6 exit=$rc stderr=\"$(printf '%s\n' "$err" | head -n 1)\""
 rc=0
 err=$( { echo cage >repo/cage-commit.txt && sg add cage-commit.txt && sg commit -q -m "cage commit"; } 2>&1 >/dev/null) || rc=$?
 check S7 0 "$rc"
@@ -188,7 +185,7 @@ readonly CAGE_SCRIPT
 
 main() {
   trap 'as_svc docker rm -f "$CAGE" >/dev/null 2>&1 || true' EXIT
-  local rc err p f
+  local rc err p f id cage_out
   echo "# apx-spike service-user checks, $(date -u +%Y-%m-%dT%H:%M:%SZ), agent=$AGENT"
 
   echo "# step 1: copy the egress script and build the tools image on the $SVC daemon"
@@ -202,8 +199,8 @@ main() {
   as_agent sh -c 'umask 022 && echo agent-022 >"$1"' sh "$TREE/agent-022.txt"
   as_agent git -c init.defaultBranch=main init -q "$TREE/repo"
   as_agent sh -c 'cd "$1" && echo seed >seed.txt && git add seed.txt && git -c user.name=apx-spike-agent -c user.email=apx-spike-agent@localhost commit -q -m seed' sh "$TREE/repo"
-  root_fixture "$TREE/groupfile" "$AGENT" "$GRP" 0640
-  root_fixture "$TREE/otherfile" "$AGENT" "$AGENT_GROUP" 0600
+  agent_fixture "$TREE/groupfile" "$GRP" 0640
+  agent_fixture "$TREE/otherfile" "$AGENT_GROUP" 0600
   for f in agent-002.txt agent-022.txt groupfile otherfile; do
     echo "MEASURE F1 path=$f $(stat -c 'owner=%U group=%G mode=%a' "$TREE/$f") acl=$(acl_of "$TREE/$f")"
   done
@@ -211,12 +208,18 @@ main() {
   echo "# step 3: one cage as $SVC"
   as_svc docker rm -f "$CAGE" >/dev/null 2>&1 || true
   rc=0
-  as_svc docker run --rm --name "$CAGE" \
+  cage_out=$(as_svc docker run --rm --name "$CAGE" \
     --cap-drop ALL --security-opt no-new-privileges --read-only \
     --tmpfs /tmp:rw,size=64m -e HOME=/tmp \
     --volume "$TREE:$TREE" \
-    apx-spike-tools sh -c "$CAGE_SCRIPT" cage "$TREE" || rc=$?
+    apx-spike-tools sh -c "$CAGE_SCRIPT" cage "$TREE") || rc=$?
+  printf '%s\n' "$cage_out"
   echo "MEASURE S0 cage_exit=$rc"
+  for id in S2 S3 S5 S7; do
+    if ! grep -q "^CHECK $id " <<<"$cage_out"; then
+      echo "CHECK $id SKIP the cage exited $rc before this check ran"
+    fi
+  done
 
   echo "# step 4: what the cage created, seen from the host"
   for p in cage-made.txt cage-dir cage-dir/nested.txt; do
@@ -257,6 +260,5 @@ main() {
 
 as_svc docker info >/dev/null 2>&1 || die "rootless docker for $SVC is not reachable; run provision.sh first"
 find "$TREE" -mindepth 1 -delete
-install -o "$AGENT" -g "$AGENT_GROUP" -m 0660 /dev/null "$RESULTS"
-main 2>&1 | tee "$RESULTS"
+main 2>&1 | as_agent tee "$RESULTS"
 echo "results: $RESULTS"

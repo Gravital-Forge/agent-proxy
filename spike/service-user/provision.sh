@@ -47,6 +47,11 @@ as_svc() {
     "$@"
 }
 
+as_agent() {
+  sudo -u "$AGENT" env --chdir="/home/$AGENT" HOME="/home/$AGENT" \
+    PATH=/usr/bin:/bin:/usr/sbin:/sbin "$@"
+}
+
 add_subids() {
   local file=$1 flag=$2 start
   if grep -q "^${SVC}:" "$file"; then
@@ -130,18 +135,20 @@ else
 fi
 
 echo "== step 6: scratch tree $TREE"
+# The agent can swap this path for a symlink, so the agent's own uid changes it, never root.
 [[ ! -L "$TREE" ]] || die "$TREE is a symlink; remove it and re-run"
 if [[ -d "$TREE" ]]; then
+  [[ "$(stat -c %U "$TREE")" == "$AGENT" ]] || die "$TREE is not owned by $AGENT"
   echo "$TREE exists"
 elif [[ -e "$TREE" ]]; then
   die "$TREE exists and is not a directory"
 else
-  mkdir "$TREE"
+  as_agent mkdir "$TREE"
   echo "created $TREE"
 fi
-chown "$AGENT:$AGENT_GROUP" "$TREE"
-chmod 2770 "$TREE"
-setfacl -m "u:${SVC}:rwx,d:u:${SVC}:rwx,d:u:${AGENT}:rwx" "$TREE"
+as_agent chgrp "$AGENT_GROUP" "$TREE"
+as_agent chmod 2770 "$TREE"
+as_agent setfacl -m "u:${SVC}:rwx,d:u:${SVC}:rwx,d:u:${AGENT}:rwx" "$TREE"
 getfacl -p "$TREE"
 if as_svc test -w "$TREE"; then
   echo "$SVC can write $TREE"
