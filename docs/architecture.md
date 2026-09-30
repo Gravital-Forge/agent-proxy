@@ -23,8 +23,8 @@ The core is the uv package in `core/agent-proxy/`, placed as `docs/design.md` se
   `Instance` from `mcp.py`, serves its app on a loopback port, and drives the MCP surface over HTTP
   with a FastMCP client.
 - `core/agent-proxy/tests/test-plugin/` holds the source of the test plugin image. The test plugin
-  holds four actions, so the tests reach both action kinds, a call held for a set time, and a script
-  that fails.
+  holds an action for each thing the tests reach: both action kinds, a call held for a set time, and
+  a script that fails.
 
 ## Modules
 
@@ -317,10 +317,9 @@ line under "Audit".
 
 `CallGateway` is the call path, and it is synchronous. `list_tools` takes the request's
 `Authorization` header, verifies its bearer token, and returns one `ToolSpec` per grant of the
-token's scope in the config in force, sorted by name. A tool's name is `<plugin>_<action>`, and its
-input schema is the action's `input_schema`. A listing does not record the token's use. A token that
-does not verify, a scope that the config in force does not define, and a token store that cannot be
-read each list no tools.
+token's scope in the config in force, sorted by name. A tool's input schema is the action's
+`input_schema`. A listing does not record the token's use. A token that does not verify, a scope
+that the config in force does not define, and a token store that cannot be read each list no tools.
 
 `CallGateway.call` runs one call and audits it in one line. It authenticates the token, which
 records its use. It then holds the snapshot in force through `LiveConfig.use`, finds the grant that
@@ -355,9 +354,10 @@ Docker client.
 `Instance.start` opens the token store, the credential store, and the audit writer under the state
 directory. It then starts the live config with `EgressProxies` over `egress/`, the control server on
 `control.sock`, and the overflow sweeper, in that order. A step that fails closes what the steps
-before it started, and then its error propagates. The calls of one instance share one `CageLimiter`.
-`Instance.app` is the app that `build_app` returns. `Instance.close` closes the control socket,
-stops the sweeper, and closes the audit writer.
+before it started, except that the egress proxies that `LiveConfig.start` made ready stay, and then
+its error propagates. The calls of one instance share one `CageLimiter`. `Instance.app` is the app
+that `build_app` returns. `Instance.close` closes the control socket, stops the sweeper, and closes
+the audit writer. The egress proxies stay, and the next `LiveConfig.start` keeps or prunes them.
 
 `serve` in `cli.py` runs the app under uvicorn through `_Server`. `_Server` routes SIGINT and
 SIGTERM to uvicorn's shutdown on the main thread, restores the previous handlers when the server

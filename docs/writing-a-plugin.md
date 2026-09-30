@@ -106,9 +106,9 @@ exempt, and go into argv as the input gives them.
 
 ## How an action runs
 
-An agent sees each action that its token's scope grants as the MCP tool `<plugin>_<action>`, with
-the manifest's `input_schema` as the tool's input schema. `docs/design.md` gives the surface under
-"Surface".
+An agent sees each action that its token's scope grants as an MCP tool, with the manifest's
+`input_schema` as the tool's input schema. `docs/design.md` gives the surface, and the tool's name,
+under "Surface".
 
 The proxy runs each call in a new cage built from the plugin's image. `docs/architecture.md` gives
 the cage under `runner.py`, and `docs/design.md` gives it under "The cage". The cage's entrypoint
