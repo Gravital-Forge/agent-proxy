@@ -104,7 +104,6 @@ SNAPSHOT = Snapshot(
 )
 ECHO_OUTCOME = Outcome(
     content={"exit_code": 0, "stdout": {"text": "hello\n"}},
-    script_failed=False,
     exit_code=0,
     duration_ms=42,
     stdout_bytes=6,
@@ -113,7 +112,6 @@ ECHO_OUTCOME = Outcome(
 )
 FAILED_SCRIPT = Outcome(
     content={"exit_code": 3, "stderr": {"text": "boom\n"}},
-    script_failed=True,
     exit_code=3,
     duration_ms=7,
     stdout_bytes=0,
@@ -353,10 +351,10 @@ def test_a_failed_audit_write_reaches_the_client_as_a_prefixed_tool_error(
     assert AUDIT_REFUSAL.fullmatch(message.removeprefix(REFUSAL_PREFIX))
 
 
-def test_a_failed_script_is_an_error_result_carrying_its_content(
+def test_a_failed_script_is_a_normal_result_carrying_its_content(
     served: Served,
 ) -> None:
-    """A failed script is an error result with structured content and its JSON text."""
+    """A failed script is a normal result with structured content and its JSON text."""
     served.runner.result = FAILED_SCRIPT
 
     result = _call(
@@ -367,7 +365,7 @@ def test_a_failed_script_is_an_error_result_carrying_its_content(
         raise_on_error=False,
     )
 
-    assert result.is_error is True
+    assert result.is_error is False
     assert result.structured_content == FAILED_SCRIPT.content
     [text] = result.content
     assert text.text == _compact(FAILED_SCRIPT.content)

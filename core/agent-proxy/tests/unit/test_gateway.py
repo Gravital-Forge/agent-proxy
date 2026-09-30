@@ -20,7 +20,6 @@ from agent_proxy.mcp import (
     REFUSAL_PREFIX,
     CallGateway,
     CallRefusedError,
-    Reply,
     ToolSpec,
 )
 from agent_proxy.plugins import parse_manifest
@@ -106,7 +105,6 @@ SNAPSHOT = Snapshot(
 )
 ECHO_OUTCOME = Outcome(
     content={"exit_code": 0, "stdout": {"text": "hello\n"}},
-    script_failed=False,
     exit_code=0,
     duration_ms=42,
     stdout_bytes=6,
@@ -115,7 +113,6 @@ ECHO_OUTCOME = Outcome(
 )
 FAILED_SCRIPT = Outcome(
     content={"exit_code": 3, "stderr": {"text": "boom\n"}},
-    script_failed=True,
     exit_code=3,
     duration_ms=7,
     stdout_bytes=0,
@@ -436,10 +433,10 @@ def test_a_runner_refusal_surfaces_its_own_text(
 
 
 def test_a_granted_call_returns_the_outcomes_content(harness: Harness) -> None:
-    """The reply carries the outcome's content and is not an error."""
+    """The reply is the outcome's content."""
     reply = harness.gateway.call(_bearer(harness.token), "tools_echo", ECHO_ARGUMENTS)
 
-    assert reply == Reply(ECHO_OUTCOME.content, is_error=False)
+    assert reply == ECHO_OUTCOME.content
 
 
 def test_a_granted_call_gives_the_runner_its_cage_call(harness: Harness) -> None:
@@ -484,15 +481,15 @@ def test_a_refused_call_still_sets_last_used_at(harness: Harness) -> None:
     assert _last_used(harness) == LATER
 
 
-def test_a_failed_script_returns_an_error_reply_with_its_content(
+def test_a_failed_script_returns_its_content_as_a_normal_reply(
     harness: Harness,
 ) -> None:
-    """A failed script is an error reply, not a refusal."""
+    """A failed script's reply is its command-shaped content, not a refusal."""
     harness.runner.result = FAILED_SCRIPT
 
     reply = harness.gateway.call(_bearer(harness.token), "tools_count_bytes", {})
 
-    assert reply == Reply(FAILED_SCRIPT.content, is_error=True)
+    assert reply == FAILED_SCRIPT.content
 
 
 def test_the_runner_runs_while_the_snapshot_is_in_use(harness: Harness) -> None:
@@ -608,7 +605,7 @@ def test_a_failed_audit_write_withholds_the_result_and_the_next_call_succeeds(
 
     reply = harness.gateway.call(bearer, "tools_echo", ECHO_ARGUMENTS)
 
-    assert reply == Reply(ECHO_OUTCOME.content, is_error=False)
+    assert reply == ECHO_OUTCOME.content
     second_id = harness.runner.calls[1].call_id
     log = (harness.audit_dir / "audit.log").read_text(encoding="utf-8")
     lines = [json.loads(line) for line in log.splitlines()]

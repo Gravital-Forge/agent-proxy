@@ -166,9 +166,8 @@ a fresh ID that matches `CALL_ID_PATTERN`, the form that names the file.
 `command_content` forms a command's result from the exit code and the two streams. An inline stream
 appears as text, decoded as UTF-8 with each bad byte replaced. An overflowed stream appears as its
 file and size, and the result then carries `truncated`. `script_content` forms a script's result by
-the rule `docs/writing-a-plugin.md` gives under "How an action runs", and reports whether the script
-failed. A failed script's result is the command result. `docs/design.md` gives the result forms and
-the cap under "Results".
+the rule `docs/writing-a-plugin.md` gives under "How an action runs". A failed script's result is
+the command result. `docs/design.md` gives the result forms and the cap under "Results".
 
 `sweep_overflow` removes each entry directly in a directory that is not a directory itself and that
 was last modified more than `OVERFLOW_MAX_AGE` before the time it is given. It judges and removes a
@@ -256,9 +255,8 @@ stops reading its input is not a failure in itself.
 
 The timeout is the grant's, or else the action's. It runs from the start, and covers the input and
 the wait for the exit. After the exit, the run reads stdout and stderr from the cage's log through
-`capture_stream`, and forms the result in `results.py`. The `Outcome` holds the result, whether a
-script failed, the exit code, the duration in milliseconds, the size of each stream, and whether a
-stream overflowed.
+`capture_stream`, and forms the result in `results.py`. The `Outcome` holds the result, the exit
+code, the duration in milliseconds, the size of each stream, and whether a stream overflowed.
 
 Every refusal and failure that `runner.py` raises itself is a `RunnerError`. A create, an attach of
 stdin, or a start that fails raises `CageStartError`. A cage past its timeout raises
@@ -323,9 +321,9 @@ that the config in force does not define, and a token store that cannot be read 
 
 `CallGateway.call` runs one call and audits it in one line. It authenticates the token, which
 records its use. It then holds the snapshot in force through `LiveConfig.use`, finds the grant that
-the tool names, and runs the cage through `CageRunner`. It returns a `Reply`, which holds the
-result's content and whether the result is an error result. A failed script's reply is the command
-result, marked as an error result. No other result that a cage returns is an error result.
+the tool names, and runs the cage through `CageRunner`. Its reply holds the result's content. A
+failed script's reply is the command result, as a normal result. The only error results are
+refusals.
 
 Every refusal is a `CallRefusedError`, whose message is the refusal. A bad token, a token store that
 cannot be read, a scope that the config in force does not define, a tool that the scope does not
@@ -337,9 +335,9 @@ is checked, and writes no line.
 `ScopedTools` and `ProxyTool` connect the gateway to FastMCP. `ScopedTools` is a FastMCP `Provider`.
 It lists the tools of each request's bearer token, and resolves every tool name to a `ProxyTool`, so
 a call of a tool that the token does not list still reaches the gateway, which refuses and audits
-it. `ProxyTool.run` hands the call to the gateway on a worker thread. It returns the reply as one
-compact JSON text block and as structured content, with the reply's error flag. It turns a
-`CallRefusedError` into a FastMCP `ToolError` whose text is `REFUSAL_PREFIX`, which is
+it. `ProxyTool.run` hands the call to the gateway on a worker thread. It returns the reply as a
+normal result, which holds one compact JSON text block and the same content as structured content.
+It turns a `CallRefusedError` into a FastMCP `ToolError` whose text is `REFUSAL_PREFIX`, which is
 `agent-proxy refused: `, followed by the refusal. An MCP client receives that as an error result.
 The audit line's `refusal` field holds the refusal without the prefix.
 

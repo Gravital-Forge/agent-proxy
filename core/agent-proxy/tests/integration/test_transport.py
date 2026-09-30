@@ -318,15 +318,15 @@ def test_a_revoked_token_is_refused_after_a_granted_call(instance: _Instance) ->
     )
 
 
-def test_a_failed_script_is_an_error_result_with_its_overflow_file(
+def test_a_failed_script_is_a_normal_result_with_its_overflow_file(
     instance: _Instance,
 ) -> None:
-    """test_fail is an error result, unprefixed, whose stderr went to a file."""
+    """test_fail is a normal result, unprefixed, whose stderr went to a file."""
     result = _call(
         instance.url, instance.full_token, "test_fail", {}, raise_on_error=False
     )
 
-    assert result.is_error is True
+    assert result.is_error is False
     [text] = result.content
     assert not text.text.startswith(PREFIX)
     content = result.structured_content

@@ -62,14 +62,6 @@ class ToolSpec:
 
 
 @dataclass(frozen=True)
-class Reply:
-    """A call's result, and whether it is an error result."""
-
-    content: Mapping[str, object]
-    is_error: bool
-
-
-@dataclass(frozen=True)
 class _Call:
     """One tools/call as received, with its ID and its start."""
 
@@ -165,8 +157,8 @@ class CallGateway:
 
     def call(
         self, authorization: str | None, tool: str, arguments: Mapping[str, object]
-    ) -> Reply:
-        """Run one call of tool with arguments, audit it, and return its reply.
+    ) -> Mapping[str, object]:
+        """Run one call of tool with arguments, audit it, and return its content.
 
         Raises:
             CallRefusedError: the call is refused, or its audit line cannot be
@@ -190,7 +182,7 @@ class CallGateway:
         except ProxyError as error:
             self._refuse(call, token, error)
         self._write(call.outcome_line(token, outcome))
-        return Reply(outcome.content, is_error=outcome.script_failed)
+        return outcome.content
 
     def _authenticate(self, authorization: str | None) -> TokenRecord:
         """Return the record of the call's token, recording its use.
@@ -306,11 +298,10 @@ class ProxyTool(Tool):
             )
         except CallRefusedError as error:
             raise ToolError(REFUSAL_PREFIX + str(error)) from error
-        content = dict(reply.content)
+        content = dict(reply)
         return ToolResult(
             content=json.dumps(content, separators=(",", ":")),
             structured_content=content,
-            is_error=reply.is_error,
         )
 
 

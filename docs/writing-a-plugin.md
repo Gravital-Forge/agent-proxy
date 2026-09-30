@@ -122,7 +122,7 @@ The root filesystem is read-only. Write scratch files under `/tmp`, a small tmpf
 
 A script succeeds when it exits 0 and prints on stdout one JSON object that its `output_schema`
 validates. That stdout must decode as the manifest must, by the rules under "The manifest". The call
-then returns that object. Otherwise the script has failed. The call then returns an MCP error result
+then returns that object. Otherwise the script has failed. The call then returns a normal result
 that holds what a command action returns: the exit code, stdout, and stderr. A stdout over the
 output cap goes to an overflow file, so a script whose output passes the cap fails. `docs/design.md`
 gives the cap and the result forms under "Results".

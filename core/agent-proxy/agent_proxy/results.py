@@ -273,8 +273,8 @@ def script_content(
     exit_code: int,
     stdout: CapturedStream,
     stderr: CapturedStream,
-) -> tuple[dict[str, object], bool]:
-    """Return a script's result and whether the script failed.
+) -> dict[str, object]:
+    """Return a script's result.
 
     A script succeeds when it exits 0 and its inline stdout is a JSON object
     valid against output_schema; its result is then that object. A failed
@@ -282,8 +282,8 @@ def script_content(
     """
     output = _script_output(output_schema, exit_code, stdout)
     if output is None:
-        return command_content(exit_code, stdout, stderr), True
-    return output, False
+        return command_content(exit_code, stdout, stderr)
+    return output
 
 
 def _script_output(

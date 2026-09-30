@@ -298,7 +298,6 @@ def test_a_script_receives_its_input_on_stdin(cages: _Cages) -> None:
 
     outcome = cages.run(COUNT, arguments, _grant())
 
-    assert outcome.script_failed is False
     assert outcome.content == {"bytes": len(compact.encode())}
 
 

@@ -488,7 +488,7 @@ def test_script_content_returns_a_valid_output_object() -> None:
     """A zero exit with a schema-valid JSON object on stdout returns that object."""
     result = script_content(OUTPUT_SCHEMA, 0, _inline(b'{"sha": "abc"}'), _inline(b""))
 
-    assert result == ({"sha": "abc"}, False)
+    assert result == {"sha": "abc"}
 
 
 def test_script_content_validates_against_draft_2020_12() -> None:
@@ -500,7 +500,7 @@ def test_script_content_validates_against_draft_2020_12() -> None:
 
     result = script_content(schema, 0, _inline(b'{"tags": ["a"]}'), _inline(b""))
 
-    assert result == ({"tags": ["a"]}, False)
+    assert result == {"tags": ["a"]}
 
 
 FAILED_SCRIPTS = [
@@ -521,9 +521,9 @@ FAILED_SCRIPTS = [
 def test_script_content_returns_the_command_result_for_a_failed_script(
     exit_code: int, stdout: CapturedStream
 ) -> None:
-    """A failed script returns the command-shaped result and the failure flag."""
+    """A failed script returns the command-shaped result."""
     stderr = _inline(b"trace")
 
     result = script_content(OUTPUT_SCHEMA, exit_code, stdout, stderr)
 
-    assert result == (command_content(exit_code, stdout, stderr), True)
+    assert result == command_content(exit_code, stdout, stderr)
