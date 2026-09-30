@@ -19,8 +19,12 @@ The core is the uv package in `core/agent-proxy/`, placed as `docs/design.md` se
   the plugin by digest. For the cage tests, it also builds the test plugin locally under its own
   tag, and creates an internal network that each of their cages joins. For the egress tests, it
   builds the probe image from `core/agent-proxy/tests/egress-probe/`, the pinned Alpine base with
-  curl added, and every egress test cage runs that image.
-- `core/agent-proxy/tests/test-plugin/` holds the source of the test plugin image.
+  curl added, and every egress test cage runs that image. `test_transport.py` there starts an
+  `Instance` from `mcp.py`, serves its app on a loopback port, and drives the MCP surface over HTTP
+  with a FastMCP client.
+- `core/agent-proxy/tests/test-plugin/` holds the source of the test plugin image. The test plugin
+  holds four actions, so the tests reach both action kinds, a call held for a set time, and a script
+  that fails.
 
 ## Modules
 
@@ -86,8 +90,11 @@ breaks `NAME_PATTERN` with `InvalidNameError`, and a name the store does not hol
 only its SHA-256 digest with the name, scope, and optional expiry, and returns the token. The caller
 sees the token once, and the store cannot produce it again. `verify` compares the presented token's
 digest with every stored digest in constant time, and returns the record of a match that has not
-expired. `records` lists the stored tokens, and `revoke` deletes one. `docs/design.md` gives the
-token model under "Tokens".
+expired. `verify` writes nothing. `authenticate` matches as `verify` does, and on a match writes the
+token's last-used time and returns the record with that time. The match and the write are one
+`BEGIN IMMEDIATE` transaction, so the store holds its write lock from before the match. A store file
+that cannot be read makes `verify` and `authenticate` raise `TokenStoreError`. `records` lists the
+stored tokens, and `revoke` deletes one. `docs/design.md` gives the token model under "Tokens".
 
 The store reads the clock through the `now` callable it takes, so tests pass a fixed clock.
 
@@ -95,9 +102,14 @@ The store reads the clock through the `now` callable it takes, so tests pass a f
 
 `AuditRecord` holds the fields of one call. `AuditWriter` appends each record to `audit.log` as one
 JSON line, and rotates the file by size; `AUDIT_MAX_BYTES` and `AUDIT_BACKUP_COUNT` set the limits.
-A write that fails raises its error to the caller and prints nothing. `tail` returns the newest
-lines in write order, and reads the rotated files only while it needs more lines. `docs/design.md`
-gives what a record holds and what it never holds under "Audit".
+Each write opens the log with `O_APPEND`, appends the line with `os.write`, and closes the log, so
+no file stays open between writes. Writes from several threads take turns. A write that fails part
+way truncates the log back to its size before the line, so the log holds no byte of that line. When
+that truncation also fails, the writer latches: `available` turns false, and every later write
+fails. Every failure raises `AuditError` to the caller and prints nothing. When the writer opens, it
+cuts a regular-file log back to just after its last newline, so a fragment never prefixes a later
+line. `tail` returns the newest lines in write order, and reads the rotated files only while it
+needs more lines. `docs/design.md` gives what a record holds and what it never holds under "Audit".
 
 ### `schemas/manifest.schema.json`
 
@@ -281,7 +293,9 @@ the snapshot in force.
 assignment, one reload at a time. A build or an ensure that fails raises, and the snapshot in force
 stays. A prune keeps each domain list that the snapshot in force or a snapshot in use names. A
 reload prunes after it ends, whether it succeeded or failed. The last use of a snapshot no longer in
-force also prunes when it ends. `docs/design.md` gives the reload decisions under "Config".
+force also starts a prune when it ends. That prune runs on a daemon thread named `egress-prune` once
+no reload holds the reload lock, and the use returns without waiting for it. `docs/design.md` gives
+the reload decisions under "Config".
 
 `ControlServer` serves reload requests for a `LiveConfig` on a Unix socket, from a daemon thread. It
 binds the socket, sets its mode to `0o600`, and only then listens. It replaces a socket left at the
@@ -294,12 +308,68 @@ for the reply, and returns it as a `ReloadReply`. A socket with nothing listenin
 no reply in time, a connection that closes with no reply, and a reply of another form each raise
 `ControlError`, which names the socket path.
 
+### `mcp.py`
+
+This module is the MCP surface: the call path, its glue to FastMCP, and the instance that serves it.
+`docs/design.md` gives the surface under "Surface", the result forms under "Results", and the audit
+line under "Audit".
+
+`CallGateway` is the call path, and it is synchronous. `list_tools` takes the request's
+`Authorization` header, verifies its bearer token, and returns one `ToolSpec` per grant of the
+token's scope in the config in force, sorted by name. A tool's name is `<plugin>_<action>`, and its
+input schema is the action's `input_schema`. A listing does not record the token's use. A token that
+does not verify, a scope that the config in force does not define, and a token store that cannot be
+read each list no tools.
+
+`CallGateway.call` runs one call and audits it in one line. It authenticates the token, which
+records its use. It then holds the snapshot in force through `LiveConfig.use`, finds the grant that
+the tool names, and runs the cage through `CageRunner`. It returns a `Reply`, which holds the
+result's content and whether the result is an error result. A failed script's reply is the command
+result, marked as an error result. No other result that a cage returns is an error result.
+
+Every refusal is a `CallRefusedError`, whose message is the refusal. A bad token, a token store that
+cannot be read, a scope that the config in force does not define, a tool that the scope does not
+grant, and each error that the runner raises are refusals. The audit line of a refused call holds
+that message in its `refusal` field. A call whose audit line cannot be written is refused, and its
+result is withheld. While the audit writer is not `available`, each call is refused before its token
+is checked, and writes no line.
+
+`ScopedTools` and `ProxyTool` connect the gateway to FastMCP. `ScopedTools` is a FastMCP `Provider`.
+It lists the tools of each request's bearer token, and resolves every tool name to a `ProxyTool`, so
+a call of a tool that the token does not list still reaches the gateway, which refuses and audits
+it. `ProxyTool.run` hands the call to the gateway on a worker thread. It returns the reply as one
+compact JSON text block and as structured content, with the reply's error flag. It turns a
+`CallRefusedError` into a FastMCP `ToolError` whose text is `REFUSAL_PREFIX`, which is
+`agent-proxy refused: `, followed by the refusal. An MCP client receives that as an error result.
+The audit line's `refusal` field holds the refusal without the prefix.
+
+`build_app` returns the ASGI app that serves the gateway's tools over MCP's Streamable HTTP
+transport at `/mcp`. The app gives each input schema as the manifest gives it, and masks the detail
+of each error that is not a refusal.
+
+`snapshot_builder` returns the build that `LiveConfig.start` and each reload call. Each build reads
+the config file, reads the credential names afresh, and loads each plugin's manifest through the
+Docker client.
+
+`Instance.start` opens the token store, the credential store, and the audit writer under the state
+directory. It then starts the live config with `EgressProxies` over `egress/`, the control server on
+`control.sock`, and the overflow sweeper, in that order. A step that fails closes what the steps
+before it started, and then its error propagates. The calls of one instance share one `CageLimiter`.
+`Instance.app` is the app that `build_app` returns. `Instance.close` closes the control socket,
+stops the sweeper, and closes the audit writer.
+
+`serve` in `cli.py` runs the app under uvicorn through `_Server`. `_Server` routes SIGINT and
+SIGTERM to uvicorn's shutdown on the main thread, restores the previous handlers when the server
+stops, and re-raises neither signal. `serve` then closes the instance, and the command exits 0.
+
 ### `cli.py`
 
 This module is the admin command, and it is the one module that reads the environment. It opens each
 store under the state directory, and hands the credential store's names to `load_config`. It opens
-the Docker client for `manifest check`, and calls `request_reload` for `reload`. No store imports
-another; within the package, the stores import only `config.py` and `errors.py`.
+the Docker client for `manifest check` and `serve`, and calls `request_reload` for `reload`. For
+`serve --host HOST --port PORT`, it starts an `Instance` from `mcp.py` and serves its app on that
+address. No store imports another; within the package, the stores import only `config.py` and
+`errors.py`.
 
 ## Where state lives
 
@@ -314,18 +384,20 @@ does not change its mode. The command keeps its state beneath it:
   `0o700`, and writes each credential file with mode `0o600`.
 - `audit/` holds `audit.log` and its rotated files, `audit.log.1` onward. The writer creates the
   directory and narrows it to mode `0o700`. `tail` reads a missing directory or log as no lines.
-- `control.sock` is the control socket. `reload` connects to it. A `ControlServer` from `reload.py`
-  serves a socket at the path it is given, with mode `0o600`.
+- `control.sock` is the control socket. `serve` binds it, and `reload` connects to it. A
+  `ControlServer` from `reload.py` serves a socket at the path it is given, with mode `0o600`.
+- `egress/` is the config root that `serve` gives `EgressProxies`. The paragraph on `EgressProxies`
+  below gives what it keeps there.
 
-`AGENT_PROXY_CONFIG` names the config file. Only `token mint` reads it. `docs/design.md` gives where
-the file comes from under "Config".
+`AGENT_PROXY_CONFIG` names the config file. `token mint` and `serve` read it. `docs/design.md` gives
+where the file comes from under "Config".
 
 An unset `AGENT_PROXY_STATE_DIR` or `AGENT_PROXY_CONFIG`, or a state directory that does not exist,
 is a refusal that names the variable.
 
-`manifest check` reaches the Docker daemon through `DOCKER_HOST`, which the Docker SDK reads from
-the environment. With `DOCKER_HOST` unset, the SDK uses its default socket. A daemon it cannot reach
-is a refusal that names `DOCKER_HOST` and its value, or says that it is unset.
+`manifest check` and `serve` reach the Docker daemon through `DOCKER_HOST`, which the Docker SDK
+reads from the environment. With `DOCKER_HOST` unset, the SDK uses its default socket. A daemon it
+cannot reach is a refusal that names `DOCKER_HOST` and its value, or says that it is unset.
 
 The cage runner mounts credential files from the credential store's directory, as `runner.py` gives
 above. It writes each overflow file under the config's `overflow_dir`, in the agent's tree, and the
@@ -357,6 +429,9 @@ The `agent-proxy` command is `agent_proxy.cli:run`. It takes a noun and a verb:
 - `reload` connects to `control.sock` beneath the state directory and asks the server there to
   reload its config. It prints `reloaded` when the new config is in force. When the server refuses,
   the command prints each error it sent as a refusal.
+- `serve --host HOST --port PORT` starts the instance and serves its MCP surface at `/mcp` on that
+  address until SIGINT or SIGTERM, then closes the instance and exits 0. `PORT` is an integer from 1
+  to 65535.
 
 A listing prints a header row, then one tab-separated row per entry, with `-` for a time that is not
 set.
