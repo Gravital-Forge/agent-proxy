@@ -1,14 +1,16 @@
 import contextlib
+import secrets
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import docker
 import docker.errors
 import pytest
 from docker import DockerClient
+from docker.models.containers import Container
 
-from agent_proxy import plugins
+from agent_proxy import plugins, runner
 
 TEST_LABELS = {"agent-proxy.test": "1"}
 REGISTRY_IMAGE = (
@@ -19,6 +21,10 @@ PLUGIN_NAME = "apx-test-plugin"
 PLUGIN_TAG = "it"
 PUSH_ATTEMPTS = 30
 PUSH_RETRY_SECONDS = 0.5
+RUNNER_IMAGE_TAG = f"{PLUGIN_NAME}:runner"
+# The extra label gives this build its own image ID, apart from the image the
+# pinned_plugin fixture force-removes by ID.
+RUNNER_IMAGE_LABELS = TEST_LABELS | {"agent-proxy.test.fixture": "runner"}
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
@@ -30,8 +36,9 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _label_describe_containers(monkeypatch: pytest.MonkeyPatch) -> None:
+def _label_containers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(plugins, "CONTAINER_LABELS", TEST_LABELS)
+    monkeypatch.setattr(runner, "CONTAINER_LABELS", TEST_LABELS)
 
 
 @pytest.fixture(scope="session")
@@ -60,6 +67,52 @@ def registry(docker_client: DockerClient) -> Iterator[str]:
         yield f"localhost:{host_port}"
     finally:
         container.remove(force=True)
+
+
+@pytest.fixture
+def labelled_containers(
+    docker_client: DockerClient,
+) -> Callable[[], list[Container]]:
+    """A lister of the labelled containers, the session registry excluded."""
+
+    def listed() -> list[Container]:
+        return [
+            container
+            for container in docker_client.containers.list(
+                all=True, filters={"label": "agent-proxy.test=1"}
+            )
+            if container.attrs["Config"]["Image"] != REGISTRY_IMAGE
+        ]
+
+    return listed
+
+
+@pytest.fixture(scope="session")
+def runner_image(docker_client: DockerClient) -> Iterator[str]:
+    """The tag of the test plugin image, built locally for the cage tests."""
+    image, _ = docker_client.images.build(
+        path=str(PLUGIN_DIR),
+        tag=RUNNER_IMAGE_TAG,
+        labels=RUNNER_IMAGE_LABELS,
+        rm=True,
+        forcerm=True,
+    )
+    try:
+        yield RUNNER_IMAGE_TAG
+    finally:
+        docker_client.images.remove(image.id, force=True)
+
+
+@pytest.fixture(scope="session")
+def cage_network(docker_client: DockerClient) -> Iterator[str]:
+    """The name of the internal network every cage in these tests joins."""
+    network = docker_client.networks.create(
+        f"apx-it-cages-{secrets.token_hex(4)}", internal=True, labels=TEST_LABELS
+    )
+    try:
+        yield network.name
+    finally:
+        network.remove()
 
 
 @pytest.fixture
