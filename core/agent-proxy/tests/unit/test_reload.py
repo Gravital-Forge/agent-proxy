@@ -523,10 +523,13 @@ def test_a_retired_use_waits_for_a_reload_in_flight_then_prunes(
 
     in_flight_call.result()
     assert second_reload.result() is new
-    assert egress.calls == [
+    # The second reload's prune may still see the old snapshot in use if the
+    # call thread had not woken yet, so only the call's own prune is exact.
+    assert len(egress.calls) == 5
+    assert egress.calls[:3] == [
         ("ensure", {NEW_DOMAINS}),
         ("prune", {OLD_DOMAINS, NEW_DOMAINS}),
         ("ensure", {NEW_DOMAINS}),
-        ("prune", {NEW_DOMAINS}),
-        ("prune", {NEW_DOMAINS}),
     ]
+    assert egress.calls[3][0] == "prune"
+    assert egress.calls[4] == ("prune", {NEW_DOMAINS})
