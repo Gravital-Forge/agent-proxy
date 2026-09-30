@@ -1,5 +1,8 @@
-"""Snapshots of the config in force, and the reference a reload swaps."""
+"""Snapshots of the config in force, the reference a reload swaps, and its socket."""
 
+import json
+import socket
+import socketserver
 import threading
 from collections.abc import Callable, Iterator, Mapping, Set
 from dataclasses import dataclass
@@ -9,6 +12,14 @@ from types import MappingProxyType
 from agent_proxy.config import ConfigError, InstanceConfig, load_config
 from agent_proxy.errors import ProxyError
 from agent_proxy.plugins import Manifest
+
+CONTROL_SOCKET_NAME = "control.sock"
+# A reload may pull plugin images, so the reply can take minutes.
+RELOAD_REPLY_TIMEOUT_SECONDS = 600
+_RELOAD_REQUEST = "reload"
+_REQUEST_LIMIT_BYTES = 64
+_SOCKET_MODE = 0o600
+_REPLY_FORM = '{"ok": true, "warnings": [...]} or {"ok": false, "errors": [...]}'
 
 
 @dataclass(frozen=True)
@@ -119,3 +130,171 @@ class LiveConfig:
             snapshot = build()
             self._current = snapshot
         return snapshot
+
+
+class ControlError(ProxyError):
+    """The control socket cannot be bound or reached, or its reply cannot be read."""
+
+
+@dataclass(frozen=True)
+class ReloadReply:
+    """What the serving process replied to a reload request."""
+
+    ok: bool
+    warnings: tuple[str, ...]
+    errors: tuple[str, ...]
+
+
+class ControlServer:
+    """Serves reload requests for a LiveConfig on a Unix socket."""
+
+    def __init__(
+        self, socket_path: Path, live: LiveConfig, build: Callable[[], Snapshot]
+    ) -> None:
+        """Hold the socket path, the config to reload, and how to build a snapshot."""
+        self._socket_path = socket_path
+        self._live = live
+        self._build = build
+        self._server = socketserver.UnixStreamServer(
+            str(socket_path), _request_handler(self._answer), bind_and_activate=False
+        )
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, name="control-socket", daemon=True
+        )
+
+    def start(self) -> None:
+        """Bind the socket owner-only and serve on a daemon thread until close.
+
+        A socket already at the path is replaced.
+
+        Raises:
+            ControlError: the path holds something other than a socket, or the
+                socket cannot be bound there.
+        """
+        try:
+            _bind_owner_only(self._server, self._socket_path)
+        except ControlError:
+            self._server.server_close()
+            raise
+        self._thread.start()
+
+    def close(self) -> None:
+        """Stop serving, close the socket, and remove its file.
+
+        Call it only after start has returned.
+        """
+        self._server.shutdown()
+        self._server.server_close()
+        self._socket_path.unlink(missing_ok=True)
+
+    def _answer(self, request: str) -> dict[str, object]:
+        if request != _RELOAD_REQUEST:
+            return {
+                "ok": False,
+                "errors": [
+                    f"unknown request {request!r}; expected {_RELOAD_REQUEST!r}"
+                ],
+            }
+        try:
+            snapshot = self._live.reload(self._build)
+        except ConfigError as error:
+            return {"ok": False, "errors": list(error.errors)}
+        except ProxyError as error:
+            return {"ok": False, "errors": [str(error)]}
+        return {"ok": True, "warnings": list(snapshot.warnings)}
+
+
+def _request_handler(
+    answer: Callable[[str], dict[str, object]],
+) -> type[socketserver.StreamRequestHandler]:
+    class RequestHandler(socketserver.StreamRequestHandler):
+        def handle(self) -> None:
+            """Read one request line and write the one-line JSON reply."""
+            line = self.rfile.readline(_REQUEST_LIMIT_BYTES)
+            request = line.decode("utf-8", errors="replace").removesuffix("\n")
+            reply = json.dumps(answer(request))
+            self.wfile.write(f"{reply}\n".encode())
+
+    return RequestHandler
+
+
+def _bind_owner_only(server: socketserver.UnixStreamServer, path: Path) -> None:
+    if path.is_socket():
+        path.unlink()
+    elif path.exists(follow_symlinks=False):
+        raise ControlError(
+            f"control socket {str(path)!r} is taken by something other than a"
+            " socket; expected a socket or nothing at that path"
+        )
+    try:
+        server.server_bind()
+        # Listening starts only after the mode is set, so no connection is
+        # accepted while the socket still has the umask's mode.
+        path.chmod(_SOCKET_MODE)
+        server.server_activate()
+    except OSError as exc:
+        raise ControlError(
+            f"control socket {str(path)!r} cannot be bound: {exc.strerror}"
+        ) from exc
+
+
+def request_reload(socket_path: Path) -> ReloadReply:
+    """Ask the process serving socket_path to reload its config.
+
+    Returns:
+        The reply: ok with the new snapshot's warnings, or not ok with one
+        error per failure.
+
+    Raises:
+        ControlError: nothing listens on socket_path, the connection closes
+            with no reply, the reply is not the reply JSON line, or it does not
+            arrive within RELOAD_REPLY_TIMEOUT_SECONDS. It names socket_path.
+    """
+    source = f"control socket {str(socket_path)!r}"
+    line = _exchange(socket_path, source)
+    return _parse_reply(line, source)
+
+
+def _exchange(socket_path: Path, source: str) -> bytes:
+    """Send the reload request and return the reply line."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(RELOAD_REPLY_TIMEOUT_SECONDS)
+        try:
+            connection.connect(str(socket_path))
+            connection.sendall(f"{_RELOAD_REQUEST}\n".encode())
+            with connection.makefile("rb") as replies:
+                line = replies.readline()
+        except (FileNotFoundError, ConnectionRefusedError) as exc:
+            raise ControlError(
+                f"{source}: nothing is listening: {exc.strerror}"
+            ) from exc
+        except TimeoutError as exc:
+            raise ControlError(
+                f"{source}: no reply within {RELOAD_REPLY_TIMEOUT_SECONDS} seconds"
+            ) from exc
+        except (BrokenPipeError, ConnectionResetError) as exc:
+            raise ControlError(
+                f"{source}: the connection closed with no reply"
+            ) from exc
+    if not line:
+        raise ControlError(f"{source}: the connection closed with no reply")
+    return line
+
+
+def _parse_reply(line: bytes, source: str) -> ReloadReply:
+    try:
+        reply = json.loads(line.decode("utf-8"))
+    except ValueError as exc:
+        raise ControlError(
+            f"{source}: reply {line!r} is not JSON; expected {_REPLY_FORM}"
+        ) from exc
+    match reply:
+        case {"ok": True, "warnings": list() as warnings} if all(
+            isinstance(warning, str) for warning in warnings
+        ):
+            return ReloadReply(ok=True, warnings=tuple(warnings), errors=())
+        case {"ok": False, "errors": list() as errors} if all(
+            isinstance(error, str) for error in errors
+        ):
+            return ReloadReply(ok=False, warnings=(), errors=tuple(errors))
+    raise ControlError(f"{source}: reply {line!r} is not {_REPLY_FORM}")

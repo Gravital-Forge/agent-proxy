@@ -1,10 +1,15 @@
+import contextlib
 import hashlib
 import io
 import json
+import shutil
 import stat
 import sys
+import tempfile
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
 from unittest import mock
 
 import docker.errors
@@ -14,6 +19,8 @@ import yaml
 from agent_proxy.audit import AuditRecord, AuditWriter
 from agent_proxy.auth import TokenStore
 from agent_proxy.cli import main, run
+from agent_proxy.config import ConfigError, load_config
+from agent_proxy.reload import CONTROL_SOCKET_NAME, ControlServer, LiveConfig, Snapshot
 
 PREFIX = "agent-proxy: "
 TOKEN_HEADER = "NAME\tSCOPE\tCREATED\tLAST_USED\tEXPIRES"
@@ -115,6 +122,40 @@ def _docker_describing(
     container.logs.return_value = stdout
     monkeypatch.setattr("agent_proxy.cli.docker.from_env", lambda: client)
     return client
+
+
+@pytest.fixture
+def socket_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """Point the state variable at a short directory; AF_UNIX paths cap at 107 bytes."""
+    state_dir = Path(tempfile.mkdtemp(dir="/tmp"))
+    monkeypatch.setenv("AGENT_PROXY_STATE_DIR", str(state_dir))
+    yield state_dir
+    shutil.rmtree(state_dir)
+
+
+def _snapshot(tmp_path: Path, warnings: tuple[str, ...] = ()) -> Snapshot:
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(CONFIG), encoding="utf-8")
+    return Snapshot(
+        config=load_config(path, frozenset()),
+        manifests=MappingProxyType({}),
+        warnings=warnings,
+    )
+
+
+@contextlib.contextmanager
+def _control_server(
+    state_dir: Path, tmp_path: Path, build: Callable[[], Snapshot]
+) -> Iterator[None]:
+    """Serve reloads on the state directory's control socket."""
+    server = ControlServer(
+        state_dir / CONTROL_SOCKET_NAME, LiveConfig(_snapshot(tmp_path)), build
+    )
+    server.start()
+    try:
+        yield
+    finally:
+        server.close()
 
 
 def test_token_mint_prints_the_token_alone(
@@ -551,6 +592,56 @@ def test_manifest_check_says_docker_host_is_unset_when_the_default_is_unreachabl
     assert "None" not in captured.err
 
 
+def test_reload_prints_the_warning_lines_and_reloaded(
+    socket_state: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An accepted reload prints each warning on stderr and reloaded on stdout."""
+    warnings = (
+        "plugins.git.actions.raw: declares pass-through args",
+        "plugins.fs.actions.raw: declares pass-through args",
+    )
+    new = _snapshot(tmp_path, warnings)
+
+    with _control_server(socket_state, tmp_path, lambda: new):
+        status = main(["reload"])
+
+    captured = capsys.readouterr()
+    assert status == 0
+    assert captured.out == "reloaded\n"
+    assert captured.err == "".join(f"{PREFIX}warning: {line}\n" for line in warnings)
+
+
+def test_reload_refused_prints_one_refusal_line_per_error(
+    socket_state: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A reload the proxy refuses exits 1 with each error as a refusal line."""
+    errors = ("config file 'a.yaml': first", "config file 'a.yaml': second")
+
+    def refuse() -> Snapshot:
+        raise ConfigError(*errors)
+
+    with _control_server(socket_state, tmp_path, refuse):
+        status = main(["reload"])
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert captured.out == ""
+    assert captured.err == "".join(f"{PREFIX}{line}\n" for line in errors)
+
+
+def test_reload_with_nothing_listening_exits_1_naming_the_socket(
+    socket_state: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No control socket is one refusal line naming its path, with no traceback."""
+    status = main(["reload"])
+
+    err = capsys.readouterr().err
+    assert status == 1
+    _assert_refusal(err)
+    assert len(err.splitlines()) == 1
+    assert repr(str(socket_state / CONTROL_SOCKET_NAME)) in err
+
+
 def test_no_command_is_a_usage_error() -> None:
     """A bare invocation exits 2 through argparse."""
     with pytest.raises(SystemExit) as excinfo:
@@ -566,7 +657,7 @@ def test_help_lists_the_command_groups(capsys: pytest.CaptureFixture[str]) -> No
 
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    for noun in ("token", "credential", "audit", "manifest"):
+    for noun in ("token", "credential", "audit", "manifest", "reload"):
         assert noun in out
 
 

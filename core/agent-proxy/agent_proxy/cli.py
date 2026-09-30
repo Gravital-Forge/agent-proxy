@@ -1,4 +1,4 @@
-"""The agent-proxy admin command: tokens, credentials, the audit log, manifests."""
+"""The agent-proxy admin command: tokens, credentials, audit, manifests, reload."""
 
 import argparse
 import os
@@ -17,6 +17,7 @@ from agent_proxy.config import ConfigError, load_config, parse_duration
 from agent_proxy.credentials import CredentialStore
 from agent_proxy.errors import ProxyError
 from agent_proxy.plugins import ManifestError, check_image
+from agent_proxy.reload import CONTROL_SOCKET_NAME, request_reload
 
 STATE_DIR_VARIABLE = "AGENT_PROXY_STATE_DIR"
 CONFIG_VARIABLE = "AGENT_PROXY_CONFIG"
@@ -36,6 +37,15 @@ class DockerUnreachableError(ProxyError):
     """The Docker daemon the environment names cannot be reached."""
 
 
+class ReloadRefusedError(ProxyError):
+    """The serving process refused a reload."""
+
+    def __init__(self, *errors: str) -> None:
+        """Hold one message per failure; str() prints them one per line."""
+        self.errors = errors
+        super().__init__("\n".join(errors))
+
+
 def run() -> None:
     """Run the admin command on the process arguments and exit with its status."""
     sys.exit(main())
@@ -50,7 +60,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         args.handler(args)
-    except (ConfigError, ManifestError) as error:
+    except (ConfigError, ManifestError, ReloadRefusedError) as error:
         _report_refusal(error.errors)
         return 1
     except ProxyError as error:
@@ -68,7 +78,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-proxy",
         description="Administer the tokens, credentials, and audit log of one"
-        " proxy instance, and check plugin manifests.",
+        " proxy instance, check plugin manifests, and reload its config.",
     )
     nouns = parser.add_subparsers(dest="noun", required=True)
     _add_token_commands(
@@ -81,6 +91,10 @@ def _parser() -> argparse.ArgumentParser:
     _add_manifest_commands(
         nouns.add_parser("manifest", help="check a plugin image's manifest")
     )
+    reload_parser = nouns.add_parser(
+        "reload", help="ask the running proxy to reload its config"
+    )
+    reload_parser.set_defaults(handler=_reload)
     return parser
 
 
@@ -205,6 +219,15 @@ def _check_manifest(args: argparse.Namespace) -> None:
     for warning in manifest.warnings():
         print(f"agent-proxy: warning: {warning}", file=sys.stderr)
     print(f"manifest ok: {args.image} declares {len(manifest.actions)} actions")
+
+
+def _reload(args: argparse.Namespace) -> None:
+    reply = request_reload(_state_dir() / CONTROL_SOCKET_NAME)
+    if not reply.ok:
+        raise ReloadRefusedError(*reply.errors)
+    for warning in reply.warnings:
+        print(f"agent-proxy: warning: {warning}", file=sys.stderr)
+    print("reloaded")
 
 
 def _state_dir() -> Path:
