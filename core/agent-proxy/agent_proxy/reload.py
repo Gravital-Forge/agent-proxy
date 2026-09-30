@@ -246,9 +246,10 @@ def request_reload(socket_path: Path) -> ReloadReply:
         error per failure.
 
     Raises:
-        ControlError: nothing listens on socket_path, the connection closes
-            with no reply, the reply is not the reply JSON line, or it does not
-            arrive within RELOAD_REPLY_TIMEOUT_SECONDS. It names socket_path.
+        ControlError: nothing listens on socket_path or it cannot be reached,
+            the connection closes with no reply, the reply is not the reply
+            JSON line, or it does not arrive within
+            RELOAD_REPLY_TIMEOUT_SECONDS. It names socket_path.
     """
     source = f"control socket {str(socket_path)!r}"
     line = _exchange(socket_path, source)
@@ -275,6 +276,10 @@ def _exchange(socket_path: Path, source: str) -> bytes:
         except (BrokenPipeError, ConnectionResetError) as exc:
             raise ControlError(
                 f"{source}: the connection closed with no reply"
+            ) from exc
+        except OSError as exc:
+            raise ControlError(
+                f"{source} cannot be reached: {exc.strerror or exc}"
             ) from exc
     if not line:
         raise ControlError(f"{source}: the connection closed with no reply")

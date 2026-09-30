@@ -301,6 +301,16 @@ def test_request_reload_refuses_a_socket_nothing_listens_on(socket_path: Path) -
         request_reload(socket_path)
 
 
+def test_request_reload_refuses_a_socket_path_it_cannot_connect_to(
+    socket_path: Path,
+) -> None:
+    """Any other connect failure, here a path over the AF_UNIX cap, is refused."""
+    too_long = socket_path.parent / ("x" * 200) / CONTROL_SOCKET_NAME
+
+    with _refusal_naming(too_long):
+        request_reload(too_long)
+
+
 def test_request_reload_refuses_a_connection_closed_with_no_reply(
     socket_path: Path,
 ) -> None:
