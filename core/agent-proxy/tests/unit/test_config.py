@@ -6,7 +6,9 @@ import yaml
 from pydantic import ValidationError
 
 from agent_proxy.config import (
+    DOMAIN_PATTERN,
     GRANT_KEY_PATTERN,
+    PROXY_ENV_NAME,
     ConfigError,
     EnvMount,
     FileMount,
@@ -75,6 +77,18 @@ def _refusal(tmp_path: Path, document: object) -> ConfigError:
 def test_grant_key_pattern_joins_the_plugin_and_action_patterns() -> None:
     """A grant key is a plugin name and an action name joined by one dot."""
     assert GRANT_KEY_PATTERN == r"^[a-z][a-z0-9-]*\.[a-z][a-z0-9_]*$"
+
+
+def test_domain_pattern_admits_only_literal_host_names() -> None:
+    """A domain is two or more DNS labels of lowercase letters, digits, and hyphens."""
+    assert DOMAIN_PATTERN == (
+        r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
+    )
+
+
+def test_proxy_env_name_is_the_egress_proxy_s_variable() -> None:
+    """The variable a cage reaches its egress proxy through is HTTPS_PROXY."""
+    assert PROXY_ENV_NAME == "HTTPS_PROXY"
 
 
 def test_load_config_returns_the_validated_config(tmp_path: Path) -> None:
@@ -289,6 +303,16 @@ REFUSALS = [
     pytest.param(
         _with_grant(domains=[LONG_DOMAIN]), repr(LONG_DOMAIN), id="domain-over-253"
     ),
+    pytest.param(
+        _with_grant(domains=["github.com", "api.github.com", "github.com"]),
+        "git.clone.domains: 'github.com' is named more than once",
+        id="domain-named-twice",
+    ),
+    pytest.param(
+        _with_grant(credentials={"gh-token": {"env": "HTTPS_PROXY"}}),
+        "git.clone.credentials.gh-token.env must not be 'HTTPS_PROXY'",
+        id="credential-env-https-proxy",
+    ),
     pytest.param(_with_grant(timeout="0s"), "'0s'", id="timeout-0s"),
     pytest.param(
         _with_grant(timeout=120),
@@ -489,3 +513,51 @@ def test_load_config_reports_every_rule_failure_together(tmp_path: Path) -> None
     assert len(error.errors) == 2
     assert any("'/srv/other'" in message for message in error.errors)
     assert any("'npm-token'" in message for message in error.errors)
+
+
+def test_load_config_names_a_domain_named_three_times_once(tmp_path: Path) -> None:
+    """A repeated domain is one failure, however often the grant names it."""
+    error = _refusal(tmp_path, _with_grant(domains=["github.com"] * 3))
+
+    assert len(error.errors) == 1
+    assert "'github.com' is named more than once" in error.errors[0]
+
+
+def test_load_config_names_each_repeated_domain(tmp_path: Path) -> None:
+    """Two domains each named twice are two failures."""
+    error = _refusal(tmp_path, _with_grant(domains=["a.io", "b.io", "a.io", "b.io"]))
+
+    assert len(error.errors) == 2
+    assert any("'a.io' is named more than once" in m for m in error.errors)
+    assert any("'b.io' is named more than once" in m for m in error.errors)
+
+
+def test_load_config_accepts_one_domain_in_two_grants(tmp_path: Path) -> None:
+    """The repeated-domain rule holds within a grant, not across grants."""
+    document = _config(scopes=_scopes({"git.clone": _grant(), "git.fetch": _grant()}))
+
+    assert set(_load(tmp_path, document).scopes["dev"].grants) == {
+        "git.clone",
+        "git.fetch",
+    }
+
+
+def test_load_config_refuses_https_proxy_as_a_credential_env_in_any_grant(
+    tmp_path: Path,
+) -> None:
+    """The reserved name is refused in a grant of a later scope too."""
+    document = _config(
+        scopes={
+            "dev": {"grants": {"git.clone": _grant()}},
+            "ops": {
+                "grants": {
+                    "git.push": _grant(credentials={"gh-token": {"env": "HTTPS_PROXY"}})
+                }
+            },
+        }
+    )
+
+    error = _refusal(tmp_path, document)
+
+    assert len(error.errors) == 1
+    assert "scopes.ops.grants.git.push.credentials.gh-token.env" in error.errors[0]

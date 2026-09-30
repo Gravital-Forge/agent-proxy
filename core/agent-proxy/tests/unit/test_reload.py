@@ -1,8 +1,8 @@
 import dataclasses
 import functools
 import threading
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable, Collection, Iterable
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import timedelta
 from pathlib import Path
 from types import MappingProxyType
@@ -11,6 +11,8 @@ import pytest
 import yaml
 
 from agent_proxy.config import ConfigError, Grant, load_config
+from agent_proxy.egress import EgressError
+from agent_proxy.errors import ProxyError
 from agent_proxy.plugins import (
     CommandAction,
     Manifest,
@@ -24,6 +26,8 @@ GIT_IMAGE = "ghcr.io/example/git@sha256:" + "a" * 64
 FS_IMAGE = "ghcr.io/example/fs@sha256:" + "b" * 64
 CREDENTIAL_NAMES = frozenset({"gh-token"})
 WAIT_SECONDS = 5
+OLD_DOMAINS = ("example.com",)
+NEW_DOMAINS = ("example.org",)
 
 
 def _action(name: str, *, passthrough_args: bool = False) -> CommandAction:
@@ -95,6 +99,35 @@ def _snapshot(tmp_path: Path, timeout: str, name: str) -> Snapshot:
 
 def _clone_grant(snapshot: Snapshot) -> Grant:
     return snapshot.config.scopes["dev"].grants["git.clone"]
+
+
+def _egress_snapshot(tmp_path: Path, domains: tuple[str, ...], name: str) -> Snapshot:
+    grant = _grant() | {"domains": list(domains)}
+    path = _write(tmp_path, _config({"git.clone": grant}), name)
+    return build_snapshot(path, CREDENTIAL_NAMES, LOAD_BOTH)
+
+
+class RecordingEgress:
+    """Records each ensure and prune call with the lists it was given."""
+
+    def __init__(self, ensure_error: ProxyError | None = None) -> None:
+        """Start with no calls; ensure raises ensure_error after recording, if set."""
+        self.calls: list[tuple[str, set[tuple[str, ...]]]] = []
+        self._ensure_error = ensure_error
+
+    def ensure(self, lists: Iterable[Collection[str]]) -> None:
+        """Record the lists, then raise ensure_error if one was given."""
+        self.calls.append(("ensure", {tuple(domains) for domains in lists}))
+        if self._ensure_error is not None:
+            raise self._ensure_error
+
+    def prune(self, lists: Iterable[Collection[str]]) -> None:
+        """Record the lists."""
+        self.calls.append(("prune", {tuple(domains) for domains in lists}))
+
+
+class _CallFailedError(Exception):
+    """Raised by a test's call while it holds a snapshot."""
 
 
 def test_build_snapshot_holds_the_config_and_each_plugin_manifest(
@@ -240,37 +273,23 @@ def test_current_is_the_snapshot_live_config_was_given(tmp_path: Path) -> None:
     """A new LiveConfig puts its snapshot in force."""
     snapshot = _snapshot(tmp_path, "60s", "old.yaml")
 
-    assert LiveConfig(snapshot).current is snapshot
+    assert LiveConfig(snapshot, RecordingEgress()).current is snapshot
 
 
 def test_reload_puts_the_built_snapshot_in_force(tmp_path: Path) -> None:
     """Reload returns the snapshot it built, and current then returns it."""
-    live = LiveConfig(_snapshot(tmp_path, "60s", "old.yaml"))
+    live = LiveConfig(_snapshot(tmp_path, "60s", "old.yaml"), RecordingEgress())
     new = _snapshot(tmp_path, "120s", "new.yaml")
 
     assert live.reload(lambda: new) is new
     assert live.current is new
 
 
-def test_a_reload_of_an_invalid_file_raises_and_keeps_current(tmp_path: Path) -> None:
-    """A failed build leaves the snapshot before it in force."""
-    old = _snapshot(tmp_path, "60s", "old.yaml")
-    live = LiveConfig(old)
-    invalid = _write(tmp_path, _config({"git.rebase": _grant()}), "invalid.yaml")
-
-    with pytest.raises(ConfigError):
-        live.reload(
-            functools.partial(build_snapshot, invalid, CREDENTIAL_NAMES, LOAD_BOTH)
-        )
-
-    assert live.current is old
-
-
 def test_a_call_keeps_the_snapshot_it_started_with(tmp_path: Path) -> None:
     """A call in flight during a reload uses the old grant; a later call, the new."""
     old = _snapshot(tmp_path, "60s", "old.yaml")
     new = _snapshot(tmp_path, "120s", "new.yaml")
-    live = LiveConfig(old)
+    live = LiveConfig(old, RecordingEgress())
     taken = threading.Event()
     reloaded = threading.Event()
 
@@ -296,7 +315,7 @@ def test_reloads_run_one_at_a_time(tmp_path: Path) -> None:
     """A second reload does not start its build until the first reload returns."""
     old = _snapshot(tmp_path, "60s", "old.yaml")
     new = _snapshot(tmp_path, "120s", "new.yaml")
-    live = LiveConfig(old)
+    live = LiveConfig(old, RecordingEgress())
     first_started = threading.Event()
     release_first = threading.Event()
     second_started = threading.Event()
@@ -320,3 +339,197 @@ def test_reloads_run_one_at_a_time(tmp_path: Path) -> None:
     assert first.result() is old
     assert second.result() is new
     assert live.current is new
+
+
+def test_the_constructor_neither_ensures_nor_prunes(tmp_path: Path) -> None:
+    """A new LiveConfig leaves egress to start and reload."""
+    egress = RecordingEgress()
+
+    LiveConfig(_snapshot(tmp_path, "60s", "old.yaml"), egress)
+
+    assert egress.calls == []
+
+
+def test_start_ensures_then_prunes_the_first_snapshots_lists(tmp_path: Path) -> None:
+    """Start puts the built snapshot in force after ensuring and pruning its lists."""
+    first = _egress_snapshot(tmp_path, OLD_DOMAINS, "first.yaml")
+    egress = RecordingEgress()
+
+    live = LiveConfig.start(lambda: first, egress)
+
+    assert live.current is first
+    assert egress.calls == [("ensure", {OLD_DOMAINS}), ("prune", {OLD_DOMAINS})]
+
+
+def test_start_propagates_a_failed_ensure(tmp_path: Path) -> None:
+    """An ensure that raises stops start with its error."""
+    first = _egress_snapshot(tmp_path, OLD_DOMAINS, "first.yaml")
+    egress = RecordingEgress(ensure_error=EgressError("network refused"))
+
+    with pytest.raises(EgressError, match="network refused"):
+        LiveConfig.start(lambda: first, egress)
+
+
+def test_reload_ensures_the_new_lists_before_current_changes(tmp_path: Path) -> None:
+    """Inside ensure, current is still the old snapshot; the prune follows the swap."""
+    old = _egress_snapshot(tmp_path, OLD_DOMAINS, "old.yaml")
+    new = _egress_snapshot(tmp_path, NEW_DOMAINS, "new.yaml")
+    in_force_during_ensure: list[Snapshot] = []
+
+    class ObservingEgress(RecordingEgress):
+        def ensure(self, lists: Iterable[Collection[str]]) -> None:
+            """Note the snapshot in force, then record the call."""
+            in_force_during_ensure.append(live.current)
+            super().ensure(lists)
+
+    egress = ObservingEgress()
+    live = LiveConfig(old, egress)
+
+    live.reload(lambda: new)
+
+    (seen,) = in_force_during_ensure
+    assert seen is old
+    assert live.current is new
+    assert egress.calls == [("ensure", {NEW_DOMAINS}), ("prune", {NEW_DOMAINS})]
+
+
+def test_a_failed_build_keeps_current_and_still_prunes(tmp_path: Path) -> None:
+    """A refused build ensures nothing, and the prune keeps the lists in force."""
+    old = _egress_snapshot(tmp_path, OLD_DOMAINS, "old.yaml")
+    egress = RecordingEgress()
+    live = LiveConfig(old, egress)
+    invalid = _write(tmp_path, _config({"git.rebase": _grant()}), "invalid.yaml")
+
+    with pytest.raises(ConfigError):
+        live.reload(
+            functools.partial(build_snapshot, invalid, CREDENTIAL_NAMES, LOAD_BOTH)
+        )
+
+    assert live.current is old
+    assert egress.calls == [("prune", {OLD_DOMAINS})]
+
+
+def test_a_failed_ensure_keeps_current_and_still_prunes(tmp_path: Path) -> None:
+    """An ensure that raises refuses the reload; the prune drops the refused lists."""
+    old = _egress_snapshot(tmp_path, OLD_DOMAINS, "old.yaml")
+    new = _egress_snapshot(tmp_path, NEW_DOMAINS, "new.yaml")
+    egress = RecordingEgress(ensure_error=EgressError("proxy did not start"))
+    live = LiveConfig(old, egress)
+
+    with pytest.raises(EgressError, match="proxy did not start"):
+        live.reload(lambda: new)
+
+    assert live.current is old
+    assert egress.calls == [("ensure", {NEW_DOMAINS}), ("prune", {OLD_DOMAINS})]
+
+
+def test_the_prune_after_a_swap_keeps_a_list_only_a_snapshot_in_use_names(
+    tmp_path: Path,
+) -> None:
+    """A call holding the old snapshot keeps its list through the reload's prune."""
+    old = _egress_snapshot(tmp_path, OLD_DOMAINS, "old.yaml")
+    new = _egress_snapshot(tmp_path, NEW_DOMAINS, "new.yaml")
+    egress = RecordingEgress()
+    live = LiveConfig(old, egress)
+
+    with live.use() as held:
+        live.reload(lambda: new)
+
+        assert held is old
+        assert egress.calls == [
+            ("ensure", {NEW_DOMAINS}),
+            ("prune", {OLD_DOMAINS, NEW_DOMAINS}),
+        ]
+
+
+def test_the_last_use_of_a_retired_snapshot_prunes_its_list(tmp_path: Path) -> None:
+    """The list stays until its snapshot's last use exits, then a prune drops it."""
+    old = _egress_snapshot(tmp_path, OLD_DOMAINS, "old.yaml")
+    new = _egress_snapshot(tmp_path, NEW_DOMAINS, "new.yaml")
+    egress = RecordingEgress()
+    live = LiveConfig(old, egress)
+    after_reload = [("ensure", {NEW_DOMAINS}), ("prune", {OLD_DOMAINS, NEW_DOMAINS})]
+
+    with live.use():
+        with live.use():
+            live.reload(lambda: new)
+        assert egress.calls == after_reload
+
+    assert egress.calls == [*after_reload, ("prune", {NEW_DOMAINS})]
+
+
+def test_a_use_of_the_snapshot_in_force_never_prunes_on_exit(tmp_path: Path) -> None:
+    """Leaving a use of the snapshot in force makes no egress call."""
+    old = _egress_snapshot(tmp_path, OLD_DOMAINS, "old.yaml")
+    egress = RecordingEgress()
+    live = LiveConfig(old, egress)
+
+    with live.use() as held:
+        assert held is old
+
+    assert egress.calls == []
+
+
+def test_use_releases_its_snapshot_when_the_block_raises(tmp_path: Path) -> None:
+    """A block that raises still ends its use, so its retired list is pruned."""
+    old = _egress_snapshot(tmp_path, OLD_DOMAINS, "old.yaml")
+    new = _egress_snapshot(tmp_path, NEW_DOMAINS, "new.yaml")
+    egress = RecordingEgress()
+    live = LiveConfig(old, egress)
+
+    def failing_call() -> None:
+        with live.use():
+            live.reload(lambda: new)
+            raise _CallFailedError
+
+    with pytest.raises(_CallFailedError):
+        failing_call()
+
+    assert egress.calls[-1] == ("prune", {NEW_DOMAINS})
+
+
+def test_a_retired_use_waits_for_a_reload_in_flight_then_prunes(
+    tmp_path: Path,
+) -> None:
+    """The last use's exit blocks on a running reload rather than skip its prune."""
+    old = _egress_snapshot(tmp_path, OLD_DOMAINS, "old.yaml")
+    new = _egress_snapshot(tmp_path, NEW_DOMAINS, "new.yaml")
+    egress = RecordingEgress()
+    live = LiveConfig(old, egress)
+    held = threading.Event()
+    leave = threading.Event()
+    build_started = threading.Event()
+    release_build = threading.Event()
+
+    def call() -> None:
+        with live.use():
+            held.set()
+            leave.wait(WAIT_SECONDS)
+
+    def blocked_build() -> Snapshot:
+        build_started.set()
+        release_build.wait(WAIT_SECONDS)
+        return new
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        in_flight_call = pool.submit(call)
+        assert held.wait(WAIT_SECONDS)
+        live.reload(lambda: new)
+        second_reload = pool.submit(live.reload, blocked_build)
+        assert build_started.wait(WAIT_SECONDS)
+        leave.set()
+        assert wait([in_flight_call], timeout=0.2).not_done == {in_flight_call}
+        release_build.set()
+
+    in_flight_call.result()
+    assert second_reload.result() is new
+    # The second reload's prune may still see the old snapshot in use if the
+    # call thread had not woken yet, so only the call's own prune is exact.
+    assert len(egress.calls) == 5
+    assert egress.calls[:3] == [
+        ("ensure", {NEW_DOMAINS}),
+        ("prune", {OLD_DOMAINS, NEW_DOMAINS}),
+        ("ensure", {NEW_DOMAINS}),
+    ]
+    assert egress.calls[3][0] == "prune"
+    assert egress.calls[4] == ("prune", {NEW_DOMAINS})

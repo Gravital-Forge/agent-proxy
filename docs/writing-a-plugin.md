@@ -123,6 +123,16 @@ action returns: the exit code, stdout, and stderr. A stdout over the output cap 
 file, so a script whose output passes the cap fails. `docs/design.md` gives the cap and the result
 forms under "Results".
 
+The cage's network follows the grant's `domains`. `docs/design.md` gives the egress model under "The
+cage", and `docs/architecture.md` gives the network and its proxy under `egress.py`.
+
+- The cage reaches the web only through the proxy that `HTTPS_PROXY` names, so use a tool that
+  honours that variable. The proxy passes each host the grant names and refuses a host the grant
+  does not name.
+- The cage gets no proxy variable for plain HTTP.
+- A credential cannot take the environment name `HTTPS_PROXY`. The config refuses a grant that gives
+  one.
+
 ## Checking a manifest
 
 Build the image, then check it from `core/agent-proxy/`:

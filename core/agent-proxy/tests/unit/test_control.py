@@ -6,7 +6,7 @@ import socket
 import stat
 import tempfile
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from pathlib import Path
 from types import MappingProxyType
 
@@ -14,6 +14,7 @@ import pytest
 import yaml
 
 from agent_proxy.config import ConfigError, load_config
+from agent_proxy.egress import EgressError
 from agent_proxy.errors import ProxyError
 from agent_proxy.reload import (
     CONTROL_SOCKET_NAME,
@@ -34,6 +35,25 @@ CONFIG = {
     "plugins": {},
     "scopes": {"ci": {"grants": {}}},
 }
+
+
+class RecordingEgress:
+    """Records each ensure and prune call with the lists it was given."""
+
+    def __init__(self, ensure_error: ProxyError | None = None) -> None:
+        """Start with no calls; ensure raises ensure_error after recording, if set."""
+        self.calls: list[tuple[str, set[tuple[str, ...]]]] = []
+        self._ensure_error = ensure_error
+
+    def ensure(self, lists: Iterable[Collection[str]]) -> None:
+        """Record the lists, then raise ensure_error if one was given."""
+        self.calls.append(("ensure", {tuple(domains) for domains in lists}))
+        if self._ensure_error is not None:
+            raise self._ensure_error
+
+    def prune(self, lists: Iterable[Collection[str]]) -> None:
+        """Record the lists."""
+        self.calls.append(("prune", {tuple(domains) for domains in lists}))
 
 
 @pytest.fixture
@@ -120,7 +140,7 @@ def test_a_valid_reload_replies_ok_with_its_warnings_and_swaps_current(
 ) -> None:
     """A reload request puts the built snapshot in force and replies its warnings."""
     new = _snapshot(tmp_path, (WARNING,))
-    live = LiveConfig(_snapshot(tmp_path))
+    live = LiveConfig(_snapshot(tmp_path), RecordingEgress())
 
     with _serving(socket_path, live, lambda: new):
         reply = _ask(socket_path, b"reload\n")
@@ -134,7 +154,7 @@ def test_a_config_error_replies_every_error_and_keeps_current(
 ) -> None:
     """A refused build replies each failure, and the running config keeps serving."""
     old = _snapshot(tmp_path)
-    live = LiveConfig(old)
+    live = LiveConfig(old, RecordingEgress())
 
     with _serving(socket_path, live, _refuse_twice):
         reply = _ask(socket_path, b"reload\n")
@@ -151,7 +171,7 @@ def test_another_proxy_error_replies_its_message_as_the_one_error(
 ) -> None:
     """A ProxyError that is not a ConfigError is one error, and current is kept."""
     old = _snapshot(tmp_path)
-    live = LiveConfig(old)
+    live = LiveConfig(old, RecordingEgress())
 
     def unreachable() -> Snapshot:
         raise ProxyError("the Docker daemon is unreachable")
@@ -163,12 +183,27 @@ def test_another_proxy_error_replies_its_message_as_the_one_error(
     assert live.current is old
 
 
+def test_an_egress_error_replies_its_message_and_keeps_current(
+    tmp_path: Path, socket_path: Path
+) -> None:
+    """A reload whose ensure raises EgressError replies its message as the one error."""
+    old = _snapshot(tmp_path)
+    egress = RecordingEgress(ensure_error=EgressError("egress proxy did not start"))
+    live = LiveConfig(old, egress)
+
+    with _serving(socket_path, live, lambda: _snapshot(tmp_path, (WARNING,))):
+        reply = _ask(socket_path, b"reload\n")
+
+    assert reply == {"ok": False, "errors": ["egress proxy did not start"]}
+    assert live.current is old
+
+
 def test_an_unknown_request_is_refused_without_a_build(
     tmp_path: Path, socket_path: Path
 ) -> None:
     """A request line other than reload is refused by name, and nothing is built."""
     old = _snapshot(tmp_path)
-    live = LiveConfig(old)
+    live = LiveConfig(old, RecordingEgress())
     builds: list[None] = []
 
     def build() -> Snapshot:
@@ -189,7 +224,7 @@ def test_a_request_line_is_read_up_to_64_bytes(
     tmp_path: Path, socket_path: Path
 ) -> None:
     """The server stops reading at 64 bytes, so a line with no newline still ends."""
-    live = LiveConfig(_snapshot(tmp_path))
+    live = LiveConfig(_snapshot(tmp_path), RecordingEgress())
 
     with _serving(socket_path, live, _refuse_twice):
         reply = _ask(socket_path, b"x" * 64)
@@ -202,7 +237,7 @@ def test_a_request_line_is_read_up_to_64_bytes(
 
 def test_the_socket_is_owner_only(tmp_path: Path, socket_path: Path) -> None:
     """The bound socket has mode 0o600."""
-    live = LiveConfig(_snapshot(tmp_path))
+    live = LiveConfig(_snapshot(tmp_path), RecordingEgress())
 
     with _serving(socket_path, live, _refuse_twice):
         mode = socket_path.stat().st_mode
@@ -216,7 +251,7 @@ def test_a_stale_socket_is_replaced(tmp_path: Path, socket_path: Path) -> None:
     stale = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     stale.bind(str(socket_path))
     stale.close()
-    live = LiveConfig(_snapshot(tmp_path))
+    live = LiveConfig(_snapshot(tmp_path), RecordingEgress())
 
     with _serving(socket_path, live, lambda: _snapshot(tmp_path)):
         reply = request_reload(socket_path)
@@ -229,7 +264,9 @@ def test_a_path_that_is_not_a_socket_is_refused_and_kept(
 ) -> None:
     """Start refuses to replace a regular file, naming its path."""
     socket_path.write_text("keep", encoding="utf-8")
-    server = ControlServer(socket_path, LiveConfig(_snapshot(tmp_path)), _refuse_twice)
+    server = ControlServer(
+        socket_path, LiveConfig(_snapshot(tmp_path), RecordingEgress()), _refuse_twice
+    )
 
     with _refusal_naming(socket_path):
         server.start()
@@ -242,7 +279,9 @@ def test_a_socket_that_cannot_be_bound_is_refused(
 ) -> None:
     """Start refuses a path in a directory that does not exist, naming the path."""
     absent = socket_path.parent / "absent" / CONTROL_SOCKET_NAME
-    server = ControlServer(absent, LiveConfig(_snapshot(tmp_path)), _refuse_twice)
+    server = ControlServer(
+        absent, LiveConfig(_snapshot(tmp_path), RecordingEgress()), _refuse_twice
+    )
 
     with _refusal_naming(absent):
         server.start()
@@ -250,7 +289,7 @@ def test_a_socket_that_cannot_be_bound_is_refused(
 
 def test_close_removes_the_socket(tmp_path: Path, socket_path: Path) -> None:
     """After close, the socket file is gone."""
-    live = LiveConfig(_snapshot(tmp_path))
+    live = LiveConfig(_snapshot(tmp_path), RecordingEgress())
 
     with _serving(socket_path, live, _refuse_twice):
         assert socket_path.exists()
@@ -263,7 +302,7 @@ def test_request_reload_returns_the_warnings_of_a_valid_reload(
 ) -> None:
     """An ok reply becomes a ReloadReply holding its warnings."""
     new = _snapshot(tmp_path, (WARNING,))
-    live = LiveConfig(_snapshot(tmp_path))
+    live = LiveConfig(_snapshot(tmp_path), RecordingEgress())
 
     with _serving(socket_path, live, lambda: new):
         reply = request_reload(socket_path)
@@ -275,7 +314,7 @@ def test_request_reload_returns_the_errors_of_a_refused_reload(
     tmp_path: Path, socket_path: Path
 ) -> None:
     """A refused reply becomes a ReloadReply holding its errors."""
-    live = LiveConfig(_snapshot(tmp_path))
+    live = LiveConfig(_snapshot(tmp_path), RecordingEgress())
 
     with _serving(socket_path, live, _refuse_twice):
         reply = request_reload(socket_path)

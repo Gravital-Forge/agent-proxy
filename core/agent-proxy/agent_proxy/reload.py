@@ -1,15 +1,18 @@
 """Snapshots of the config in force, the reference a reload swaps, and its socket."""
 
+import contextlib
 import json
 import socket
 import socketserver
 import threading
-from collections.abc import Callable, Iterator, Mapping, Set
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Set
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
+from typing import Protocol, Self
 
 from agent_proxy.config import ConfigError, InstanceConfig, load_config
+from agent_proxy.egress import domain_lists
 from agent_proxy.errors import ProxyError
 from agent_proxy.plugins import Manifest
 
@@ -100,36 +103,116 @@ def _warnings(manifests: Mapping[str, Manifest]) -> Iterator[str]:
             yield f"plugins.{plugin}.{warning}"
 
 
-class LiveConfig:
-    """The snapshot in force, which a reload replaces whole."""
+class Egress(Protocol):
+    """The egress proxies and networks the grants of a config need."""
 
-    def __init__(self, snapshot: Snapshot) -> None:
-        """Put snapshot in force."""
+    def ensure(self, lists: Iterable[Collection[str]]) -> None:
+        """Make each list's network and proxy present."""
+
+    def prune(self, lists: Iterable[Collection[str]]) -> None:
+        """Remove every egress proxy and network that no list in lists names."""
+
+
+@dataclass
+class _Use:
+    snapshot: Snapshot
+    count: int
+
+
+class LiveConfig:
+    """The snapshot in force, which a reload replaces whole, and its egress.
+
+    The egress of every snapshot in force or in use is kept; a prune follows
+    each reload and the last use of a snapshot no longer in force. The reload
+    lock is always taken before the state lock, never while holding it.
+    """
+
+    def __init__(self, snapshot: Snapshot, egress: Egress) -> None:
+        """Put snapshot in force, with egress neither ensured nor pruned."""
         self._current = snapshot
+        self._egress = egress
+        self._uses: dict[int, _Use] = {}
         self._reload_lock = threading.Lock()
+        self._state_lock = threading.Lock()
+
+    @classmethod
+    def start(cls, build: Callable[[], Snapshot], egress: Egress) -> Self:
+        """Build the first snapshot, ensure its egress, and prune every other.
+
+        Raises:
+            ProxyError: build or egress.ensure fails; its error propagates.
+        """
+        snapshot = build()
+        lists = domain_lists(snapshot.config)
+        egress.ensure(lists)
+        egress.prune(lists)
+        return cls(snapshot, egress)
 
     @property
     def current(self) -> Snapshot:
-        """The snapshot in force.
-
-        A call reads this once when it starts and uses that snapshot to its end.
-        """
+        """The snapshot in force."""
         return self._current
 
+    @contextlib.contextmanager
+    def use(self) -> Iterator[Snapshot]:
+        """Yield the snapshot in force, held in use until the block exits.
+
+        A call holds its snapshot this way from its start to its end, so the
+        egress that snapshot's grants name stays through a reload. When the
+        last use of a snapshot no longer in force exits, egress is pruned.
+        """
+        with self._state_lock:
+            snapshot = self._current
+            use = self._uses.setdefault(id(snapshot), _Use(snapshot, 0))
+            use.count += 1
+        try:
+            yield snapshot
+        finally:
+            if self._release(snapshot):
+                # Blocks rather than skips: a reload holding the lock may have
+                # read the kept lists while this snapshot was still in use.
+                with self._reload_lock:
+                    self._prune()
+
     def reload(self, build: Callable[[], Snapshot]) -> Snapshot:
-        """Build a snapshot and put it in force, one reload at a time.
+        """Build a snapshot, ensure its egress, and put it in force.
+
+        One reload runs at a time. Egress is pruned afterwards, whether or not
+        the reload succeeded.
 
         Returns:
             The snapshot now in force.
 
         Raises:
-            ConfigError: build refuses the config file; the snapshot in force
-                is unchanged.
+            ProxyError: build refuses the config file, or egress.ensure fails;
+                the snapshot in force is unchanged.
         """
         with self._reload_lock:
-            snapshot = build()
-            self._current = snapshot
+            try:
+                snapshot = build()
+                self._egress.ensure(domain_lists(snapshot.config))
+                with self._state_lock:
+                    self._current = snapshot
+            finally:
+                self._prune()
         return snapshot
+
+    def _release(self, snapshot: Snapshot) -> bool:
+        """End one use of snapshot; return whether it was the last of a retired one."""
+        with self._state_lock:
+            use = self._uses[id(snapshot)]
+            use.count -= 1
+            if use.count:
+                return False
+            del self._uses[id(snapshot)]
+            return snapshot is not self._current
+
+    def _prune(self) -> None:
+        with self._state_lock:
+            lists = domain_lists(self._current.config).union(
+                *(domain_lists(use.snapshot.config) for use in self._uses.values())
+            )
+        self._egress.prune(lists)
 
 
 class ControlError(ProxyError):

@@ -16,6 +16,7 @@ from docker.models.containers import Container
 
 from agent_proxy.config import EnvMount, FileMount, Grant, Root
 from agent_proxy.credentials import CredentialStore
+from agent_proxy.egress import CageNetwork
 from agent_proxy.plugins import CommandAction, ScriptAction, parse_manifest
 from agent_proxy.results import new_call_id
 from agent_proxy.runner import (
@@ -70,7 +71,7 @@ class _Cages:
             action=action,
             grant=grant,
             arguments=arguments,
-            network=self.network,
+            network=CageNetwork(name=self.network, environment={}),
             overflow_dir=str(self.overflow_dir),
             max_cages=max_cages,
         )
