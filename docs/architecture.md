@@ -97,9 +97,9 @@ action by name as a `CommandAction` or a `ScriptAction`. It checks in three stag
 the first stage that fails. First it decodes the bytes as a JSON object. Then it validates the
 document against the manifest schema. Last it checks the rules the schema cannot state, reusing the
 name, duration, and credential-path checks of `config.py`. `docs/writing-a-plugin.md` gives every
-rule each stage checks. A failure raises `ManifestError`, which holds one message per failure, each
-located by its JSON path. `Manifest.warnings` returns one message per action that declares
-pass-through args.
+rule each stage checks. A failure raises `ManifestError`, which holds one message per failure. Each
+message from the schema stage or the rule stage is located by its JSON path. `Manifest.warnings`
+returns one message per action that declares pass-through args.
 
 `describe` runs an image's `describe` entrypoint in a container and returns its stdout. The
 container has no network, a read-only root filesystem, no capabilities, and `no-new-privileges`, and
@@ -161,8 +161,8 @@ does not change its mode. The command keeps its state beneath it:
   `0o700`, and writes each credential file with mode `0o600`.
 - `audit/` holds `audit.log` and its rotated files, `audit.log.1` onward. The writer creates the
   directory and narrows it to mode `0o700`. `tail` reads a missing directory or log as no lines.
-- `control.sock` is the control socket. A `ControlServer` from `reload.py` binds it with mode
-  `0o600`, and `reload` connects to it.
+- `control.sock` is the control socket. `reload` connects to it. A `ControlServer` from `reload.py`
+  serves a socket at the path it is given, with mode `0o600`.
 
 `AGENT_PROXY_CONFIG` names the config file. Only `token mint` reads it. `docs/design.md` gives where
 the file comes from under "Config".
@@ -191,9 +191,9 @@ The `agent-proxy` command is `agent_proxy.cli:run`. It takes a noun and a verb:
 - `manifest check IMAGE` runs the `describe` of a local image and checks the manifest it prints. It
   never pulls, so an absent image is a refusal. On a pass it prints a line that names the image and
   the number of actions it declares.
-- `reload` asks the `ControlServer` listening on `control.sock` to reload its config, and prints
-  `reloaded` when the new config is in force. When the server refuses, the command prints each error
-  it sent as a refusal.
+- `reload` connects to `control.sock` beneath the state directory and asks the server there to
+  reload its config. It prints `reloaded` when the new config is in force. When the server refuses,
+  the command prints each error it sent as a refusal.
 
 A listing prints a header row, then one tab-separated row per entry, with `-` for a time that is not
 set.
