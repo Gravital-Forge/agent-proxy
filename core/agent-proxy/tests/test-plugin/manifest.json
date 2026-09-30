@@ -1,0 +1,36 @@
+{
+  "actions": {
+    "echo": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "no_newline": {"type": "boolean"},
+          "text": {"type": "string"}
+        },
+        "required": ["text"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "10s",
+      "argv": ["echo"],
+      "parameters": [
+        {"name": "no_newline", "as": "flag", "flag": "-n"},
+        {"name": "text", "as": "positional"}
+      ],
+      "passthrough_args": false
+    },
+    "count": {
+      "kind": "script",
+      "input_schema": {"type": "object"},
+      "credentials": [],
+      "timeout": "10s",
+      "executable": "/plugin/count-bytes",
+      "output_schema": {
+        "type": "object",
+        "properties": {"bytes": {"type": "integer"}},
+        "required": ["bytes"]
+      }
+    }
+  }
+}

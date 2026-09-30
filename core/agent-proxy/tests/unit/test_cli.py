@@ -1,17 +1,26 @@
+import contextlib
 import hashlib
 import io
 import json
+import shutil
 import stat
 import sys
+import tempfile
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
+from types import MappingProxyType
+from unittest import mock
 
+import docker.errors
 import pytest
 import yaml
 
 from agent_proxy.audit import AuditRecord, AuditWriter
 from agent_proxy.auth import TokenStore
 from agent_proxy.cli import main, run
+from agent_proxy.config import ConfigError, load_config
+from agent_proxy.reload import CONTROL_SOCKET_NAME, ControlServer, LiveConfig, Snapshot
 
 PREFIX = "agent-proxy: "
 TOKEN_HEADER = "NAME\tSCOPE\tCREATED\tLAST_USED\tEXPIRES"
@@ -19,6 +28,34 @@ CONFIG = {
     "agent_tree": "/srv/agents/alpha",
     "plugins": {},
     "scopes": {"ci": {"grants": {}}},
+}
+
+MANIFEST_IMAGE = "example/echo:dev"
+ECHO_ACTION = {
+    "kind": "command",
+    "input_schema": {
+        "type": "object",
+        "properties": {"message": {"type": "string"}},
+        "additionalProperties": False,
+    },
+    "credentials": [],
+    "timeout": "30s",
+    "argv": ["echo"],
+    "parameters": [{"name": "message", "as": "positional"}],
+    "passthrough_args": False,
+}
+RAW_ACTION = {
+    "kind": "command",
+    "input_schema": {
+        "type": "object",
+        "properties": {"args": {"type": "array", "items": {"type": "string"}}},
+        "additionalProperties": False,
+    },
+    "credentials": [],
+    "timeout": "30s",
+    "argv": ["echo"],
+    "parameters": [],
+    "passthrough_args": True,
 }
 
 
@@ -73,6 +110,52 @@ def _assert_refusal(err: str) -> None:
     assert err
     assert all(line.startswith(PREFIX) for line in err.splitlines())
     assert "Traceback" not in err
+
+
+def _docker_describing(
+    monkeypatch: pytest.MonkeyPatch, stdout: bytes
+) -> mock.MagicMock:
+    """Make docker.from_env return a client whose describe container exits 0."""
+    client = mock.MagicMock()
+    container = client.containers.create.return_value
+    container.wait.return_value = {"StatusCode": 0}
+    container.logs.return_value = stdout
+    monkeypatch.setattr("agent_proxy.cli.docker.from_env", lambda: client)
+    return client
+
+
+@pytest.fixture
+def socket_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """Point the state variable at a short directory; AF_UNIX paths cap at 107 bytes."""
+    state_dir = Path(tempfile.mkdtemp(dir="/tmp"))
+    monkeypatch.setenv("AGENT_PROXY_STATE_DIR", str(state_dir))
+    yield state_dir
+    shutil.rmtree(state_dir)
+
+
+def _snapshot(tmp_path: Path, warnings: tuple[str, ...] = ()) -> Snapshot:
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(CONFIG), encoding="utf-8")
+    return Snapshot(
+        config=load_config(path, frozenset()),
+        manifests=MappingProxyType({}),
+        warnings=warnings,
+    )
+
+
+@contextlib.contextmanager
+def _control_server(
+    state_dir: Path, tmp_path: Path, build: Callable[[], Snapshot]
+) -> Iterator[None]:
+    """Serve reloads on the state directory's control socket."""
+    server = ControlServer(
+        state_dir / CONTROL_SOCKET_NAME, LiveConfig(_snapshot(tmp_path)), build
+    )
+    server.start()
+    try:
+        yield
+    finally:
+        server.close()
 
 
 def test_token_mint_prints_the_token_alone(
@@ -420,6 +503,145 @@ def test_a_state_dir_that_does_not_exist_exits_1_and_creates_nothing(
     assert not absent.exists()
 
 
+def test_manifest_check_prints_warnings_and_the_pass_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A pass prints each warning on stderr and one pass line on stdout."""
+    manifest = {"actions": {"echo": ECHO_ACTION, "raw": RAW_ACTION}}
+    _docker_describing(monkeypatch, json.dumps(manifest).encode())
+
+    assert main(["manifest", "check", MANIFEST_IMAGE]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == f"manifest ok: {MANIFEST_IMAGE} declares 2 actions\n"
+    assert captured.err == (
+        "agent-proxy: warning: actions.raw: declares pass-through args\n"
+    )
+
+
+def test_manifest_check_prints_one_line_per_manifest_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Each manifest failure is one prefixed stderr line, and the exit is 1."""
+    broken = {key: value for key, value in ECHO_ACTION.items() if key != "credentials"}
+    broken["timeout"] = "soon"
+    _docker_describing(monkeypatch, json.dumps({"actions": {"echo": broken}}).encode())
+
+    assert main(["manifest", "check", MANIFEST_IMAGE]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    _assert_refusal(captured.err)
+    assert len(captured.err.splitlines()) == 2
+    assert "credentials" in captured.err
+    assert "'soon'" in captured.err
+
+
+def test_manifest_check_refuses_an_absent_image_without_pulling(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An absent image is refused, and manifest check never pulls."""
+    client = _docker_describing(monkeypatch, b"")
+    client.containers.create.side_effect = docker.errors.ImageNotFound("No such image")
+
+    assert main(["manifest", "check", MANIFEST_IMAGE]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"agent-proxy: image {MANIFEST_IMAGE!r} is not present\n"
+    client.images.pull.assert_not_called()
+
+
+def test_manifest_check_exits_1_naming_docker_host_when_docker_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A daemon that cannot be reached is one refusal naming DOCKER_HOST."""
+    monkeypatch.setenv("DOCKER_HOST", "unix:///nonexistent/docker.sock")
+
+    def unreachable() -> mock.MagicMock:
+        raise docker.errors.DockerException("Error while fetching server API version")
+
+    monkeypatch.setattr("agent_proxy.cli.docker.from_env", unreachable)
+
+    assert main(["manifest", "check", MANIFEST_IMAGE]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    _assert_refusal(captured.err)
+    assert len(captured.err.splitlines()) == 1
+    assert "DOCKER_HOST" in captured.err
+    assert "unix:///nonexistent/docker.sock" in captured.err
+
+
+def test_manifest_check_says_docker_host_is_unset_when_the_default_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With DOCKER_HOST unset, the refusal says so rather than printing None."""
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+
+    def unreachable() -> mock.MagicMock:
+        raise docker.errors.DockerException("Error while fetching server API version")
+
+    monkeypatch.setattr("agent_proxy.cli.docker.from_env", unreachable)
+
+    assert main(["manifest", "check", MANIFEST_IMAGE]) == 1
+
+    captured = capsys.readouterr()
+    _assert_refusal(captured.err)
+    assert "DOCKER_HOST is unset" in captured.err
+    assert "None" not in captured.err
+
+
+def test_reload_prints_the_warning_lines_and_reloaded(
+    socket_state: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An accepted reload prints each warning on stderr and reloaded on stdout."""
+    warnings = (
+        "plugins.git.actions.raw: declares pass-through args",
+        "plugins.fs.actions.raw: declares pass-through args",
+    )
+    new = _snapshot(tmp_path, warnings)
+
+    with _control_server(socket_state, tmp_path, lambda: new):
+        status = main(["reload"])
+
+    captured = capsys.readouterr()
+    assert status == 0
+    assert captured.out == "reloaded\n"
+    assert captured.err == "".join(f"{PREFIX}warning: {line}\n" for line in warnings)
+
+
+def test_reload_refused_prints_one_refusal_line_per_error(
+    socket_state: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A reload the proxy refuses exits 1 with each error as a refusal line."""
+    errors = ("config file 'a.yaml': first", "config file 'a.yaml': second")
+
+    def refuse() -> Snapshot:
+        raise ConfigError(*errors)
+
+    with _control_server(socket_state, tmp_path, refuse):
+        status = main(["reload"])
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert captured.out == ""
+    assert captured.err == "".join(f"{PREFIX}{line}\n" for line in errors)
+
+
+def test_reload_with_nothing_listening_exits_1_naming_the_socket(
+    socket_state: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No control socket is one refusal line naming its path, with no traceback."""
+    status = main(["reload"])
+
+    err = capsys.readouterr().err
+    assert status == 1
+    _assert_refusal(err)
+    assert len(err.splitlines()) == 1
+    assert repr(str(socket_state / CONTROL_SOCKET_NAME)) in err
+
+
 def test_no_command_is_a_usage_error() -> None:
     """A bare invocation exits 2 through argparse."""
     with pytest.raises(SystemExit) as excinfo:
@@ -435,7 +657,7 @@ def test_help_lists_the_command_groups(capsys: pytest.CaptureFixture[str]) -> No
 
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    for noun in ("token", "credential", "audit"):
+    for noun in ("token", "credential", "audit", "manifest", "reload"):
         assert noun in out
 
 

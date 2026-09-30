@@ -9,6 +9,8 @@ credential.
 
 - `docs/design.md` is the design: the operator's closed decisions and the reasons behind them.
 - `docs/architecture.md` describes what is built, and cites the code by path.
+- `docs/writing-a-plugin.md` tells a plugin author what the image holds, and how to write and check
+  its manifest.
 - `docs/roadmap.md` is the ordered list of work items that build the proof of concept.
 - `docs/pipeline/index.md` is how baton sessions build it, one job at a time.
 - `spike/FINDINGS.md` is the dated record of the spike that tested the design's load-bearing claims.

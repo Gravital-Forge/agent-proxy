@@ -27,6 +27,7 @@ GRANT_KEY_PATTERN = (
     f"^{PLUGIN_NAME_PATTERN.strip('^$')}\\.{ACTION_NAME_PATTERN.strip('^$')}$"
 )
 DURATION_PATTERN = r"^[1-9][0-9]*[smhd]$"
+ENV_NAME_PATTERN = r"^[A-Z_][A-Z0-9_]*$"
 
 _DURATION_UNITS = {
     "s": timedelta(seconds=1),
@@ -166,7 +167,7 @@ Domain = Annotated[
         pattern=r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$",
     ),
 ]
-EnvName = Annotated[str, StringConstraints(pattern=r"^[A-Z_][A-Z0-9_]*$")]
+EnvName = Annotated[str, StringConstraints(pattern=ENV_NAME_PATTERN)]
 
 
 def _parse_timeout(value: object) -> timedelta:
