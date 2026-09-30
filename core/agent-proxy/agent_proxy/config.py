@@ -118,8 +118,11 @@ def read_yaml(path: Path) -> Mapping[str, object]:
     try:
         document = yaml.load(source, Loader=_UniqueKeyLoader)  # noqa: S506 — a SafeLoader subclass
     except yaml.YAMLError as exc:
+        # PyYAML spreads one error over several lines, and each line of a
+        # refusal must be one failure.
+        reason = " ".join(str(exc).split())
         raise ConfigError(
-            f"config file {str(path)!r} is not valid YAML: {exc}"
+            f"config file {str(path)!r} is not valid YAML: {reason}"
         ) from exc
     if not isinstance(document, dict):
         raise ConfigError(

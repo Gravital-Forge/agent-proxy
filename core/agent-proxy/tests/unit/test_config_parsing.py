@@ -106,6 +106,21 @@ def test_read_yaml_refuses_a_duplicate_key_two_levels_down(tmp_path: Path) -> No
     assert "duplicate key 'timeout'" in str(error)
 
 
+@pytest.mark.parametrize(
+    "source",
+    ["name: [dev, prod\n", "name: dev\nname: prod\n"],
+    ids=["malformed", "duplicate-key"],
+)
+def test_read_yaml_refusal_is_one_line(tmp_path: Path, source: str) -> None:
+    """A YAML error reads as one line, so the admin command prints it as one."""
+    path = tmp_path / "config.yaml"
+    path.write_text(source)
+
+    error = _refusal(path)
+
+    assert all("\n" not in message for message in error.errors)
+
+
 def test_read_yaml_refuses_a_top_level_list(tmp_path: Path) -> None:
     """A document whose top level is not a mapping is refused."""
     path = tmp_path / "config.yaml"

@@ -162,6 +162,24 @@ def test_token_mint_with_an_invalid_config_prints_one_line_per_error(
     assert "extra_two" in captured.err
 
 
+@pytest.mark.parametrize(
+    "source",
+    ["agent_tree: [unclosed\n", "agent_tree: /srv/a\nagent_tree: /srv/b\n"],
+    ids=["malformed", "duplicate-key"],
+)
+def test_token_mint_with_unparseable_yaml_prints_one_stderr_line(
+    state: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str], source: str
+) -> None:
+    """A YAML parse refusal is a single prefixed stderr line."""
+    (tmp_path / "config.yaml").write_text(source, encoding="utf-8")
+
+    assert main(["token", "mint", "--name", "ci-bot", "--scope", "ci"]) == 1
+
+    lines = capsys.readouterr().err.splitlines()
+    assert len(lines) == 1
+    assert lines[0].startswith(PREFIX)
+
+
 def test_token_mint_with_expires_records_an_expiry(
     state: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
