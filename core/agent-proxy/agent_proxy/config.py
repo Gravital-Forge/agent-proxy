@@ -11,6 +11,8 @@ from pydantic import (
     BaseModel,
     BeforeValidator,
     ConfigDict,
+    Field,
+    StrictInt,
     StringConstraints,
     ValidationError,
     ValidationInfo,
@@ -242,18 +244,15 @@ def _agent_tree_failures(agent_tree: str) -> Iterator[str]:
         )
 
 
-def _root_failures(where: str, root: Root, agent_tree: str) -> Iterator[str]:
-    path = PurePosixPath(root.path)
+def _inside_tree_failures(field: str, path_text: str, agent_tree: str) -> Iterator[str]:
+    path = PurePosixPath(path_text)
     tree = PurePosixPath(agent_tree)
     if not _is_clean_absolute(path):
         yield (
-            f"{where}.path must be an absolute path with no '..' segment, "
-            f"got {root.path!r}"
+            f"{field} must be an absolute path with no '..' segment, got {path_text!r}"
         )
     elif path != tree and tree not in path.parents:
-        yield (
-            f"{where}.path must lie inside agent_tree {agent_tree!r}, got {root.path!r}"
-        )
+        yield f"{field} must lie inside agent_tree {agent_tree!r}, got {path_text!r}"
 
 
 def _mount_failures(
@@ -290,6 +289,8 @@ class InstanceConfig(BaseModel):
     model_config = _STRICT
 
     agent_tree: str
+    overflow_dir: str
+    max_cages: Annotated[StrictInt, Field(ge=1)]
     plugins: dict[PluginName, PinnedImage]
     scopes: dict[Name, Scope]
 
@@ -307,6 +308,9 @@ class InstanceConfig(BaseModel):
 
     def _rule_failures(self, credential_names: Set[str]) -> Iterator[str]:
         yield from _agent_tree_failures(self.agent_tree)
+        yield from _inside_tree_failures(
+            "overflow_dir", self.overflow_dir, self.agent_tree
+        )
         for scope_name, scope in self.scopes.items():
             for key, grant in scope.grants.items():
                 yield from self._grant_failures(
@@ -320,7 +324,9 @@ class InstanceConfig(BaseModel):
         if plugin not in self.plugins:
             yield f"{where}: plugin {plugin!r} is not in plugins"
         for index, root in enumerate(grant.roots):
-            yield from _root_failures(f"{where}.roots.{index}", root, self.agent_tree)
+            yield from _inside_tree_failures(
+                f"{where}.roots.{index}.path", root.path, self.agent_tree
+            )
         yield from _mount_failures(f"{where}.credentials", grant.credentials)
         yield from _unknown_credential_failures(
             f"{where}.credentials", grant.credentials, credential_names

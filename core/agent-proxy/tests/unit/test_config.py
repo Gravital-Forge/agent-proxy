@@ -16,6 +16,8 @@ from agent_proxy.config import (
 )
 
 AGENT_TREE = "/srv/agents/alpha"
+OVERFLOW_DIR = f"{AGENT_TREE}/overflow"
+MAX_CAGES = 4
 IMAGE = "ghcr.io/example/git@sha256:" + "a" * 64
 CREDENTIAL_NAMES = frozenset({"gh-token", "ssh-key"})
 LONG_DOMAIN = ".".join(["a" * 63] * 4)
@@ -41,12 +43,15 @@ def _scopes(grants: dict[str, object]) -> dict[str, object]:
 
 
 def _config(**overrides: object) -> dict[str, object]:
-    """Return a valid config with top-level overrides applied."""
-    return {
+    """Return a valid config with top-level overrides applied; OMIT drops a field."""
+    fields: dict[str, object] = {
         "agent_tree": AGENT_TREE,
+        "overflow_dir": OVERFLOW_DIR,
+        "max_cages": MAX_CAGES,
         "plugins": {"git": IMAGE},
         "scopes": _scopes({"git.clone": _grant()}),
     } | overrides
+    return {key: value for key, value in fields.items() if value is not OMIT}
 
 
 def _with_grant(**overrides: object) -> dict[str, object]:
@@ -94,6 +99,19 @@ def test_load_config_returns_a_frozen_config(tmp_path: Path) -> None:
 
     with pytest.raises(ValidationError):
         config.agent_tree = "/srv/agents/beta"
+
+
+def test_load_config_returns_the_overflow_dir_and_the_cage_cap(tmp_path: Path) -> None:
+    """overflow_dir and max_cages load as the file states them."""
+    config = _load(tmp_path, _config())
+
+    assert config.overflow_dir == OVERFLOW_DIR
+    assert config.max_cages == MAX_CAGES
+
+
+def test_load_config_accepts_a_cage_cap_of_one(tmp_path: Path) -> None:
+    """The smallest cap max_cages allows is 1."""
+    assert _load(tmp_path, _config(max_cages=1)).max_cages == 1
 
 
 def test_load_config_accepts_empty_grant_fields(tmp_path: Path) -> None:
@@ -289,6 +307,67 @@ def test_load_config_refuses_an_invalid_config(
     assert any(expected in message for message in error.errors)
     assert all(
         repr(str(tmp_path / "config.yaml")) in message for message in error.errors
+    )
+
+
+INSTANCE_FIELD_REFUSALS = [
+    pytest.param(
+        _config(overflow_dir=OMIT),
+        "overflow_dir: Field required",
+        id="omitted-overflow-dir",
+    ),
+    pytest.param(
+        _config(max_cages=OMIT), "max_cages: Field required", id="omitted-max-cages"
+    ),
+    pytest.param(
+        _config(max_cages=True),
+        "max_cages: Input should be a valid integer, got True",
+        id="max-cages-boolean",
+    ),
+    pytest.param(
+        _config(max_cages=2.0),
+        "max_cages: Input should be a valid integer, got 2.0",
+        id="max-cages-float",
+    ),
+    pytest.param(
+        _config(max_cages="2"),
+        "max_cages: Input should be a valid integer, got '2'",
+        id="max-cages-string",
+    ),
+    pytest.param(
+        _config(max_cages=0),
+        "max_cages: Input should be greater than or equal to 1, got 0",
+        id="max-cages-zero",
+    ),
+    pytest.param(
+        _config(overflow_dir="overflow"),
+        "overflow_dir must be an absolute path with no '..' segment, got 'overflow'",
+        id="relative-overflow-dir",
+    ),
+    pytest.param(
+        _config(overflow_dir=f"{AGENT_TREE}/../overflow"),
+        "overflow_dir must be an absolute path with no '..' segment,"
+        f" got '{AGENT_TREE}/../overflow'",
+        id="overflow-dir-dotdot",
+    ),
+    pytest.param(
+        _config(overflow_dir="/srv/other/overflow"),
+        f"overflow_dir must lie inside agent_tree {AGENT_TREE!r},"
+        " got '/srv/other/overflow'",
+        id="overflow-dir-outside-agent-tree",
+    ),
+]
+
+
+@pytest.mark.parametrize(("document", "expected"), INSTANCE_FIELD_REFUSALS)
+def test_load_config_refuses_a_bad_overflow_dir_or_cage_cap(
+    tmp_path: Path, document: object, expected: str
+) -> None:
+    """Each bad overflow_dir or max_cages is one failure, located at its field."""
+    error = _refusal(tmp_path, document)
+
+    assert error.errors == (
+        f"config file {str(tmp_path / 'config.yaml')!r}: {expected}",
     )
 
 

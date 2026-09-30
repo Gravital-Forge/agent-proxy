@@ -324,21 +324,29 @@ def _command_failures(where: str, action: _CommandDoc) -> Iterator[str]:
 def _parameter_failures(
     where: str, parameters: list[_ParameterDoc], properties: Mapping[str, object]
 ) -> Iterator[str]:
-    seen: set[str] = set()
+    seen_names: set[str] = set()
+    seen_flags: set[str] = set()
     for index, parameter in enumerate(parameters):
         at = f"{where}.parameters[{index}]"
         name = parameter["name"]
         if name == "args":
             yield f"{at}.name: parameter name must not be 'args', got {name!r}"
-        if name in seen:
+        if name in seen_names:
             yield (
                 f"{at}.name: parameter name must not repeat an earlier "
                 f"parameter's, got {name!r}"
             )
-        seen.add(name)
+        seen_names.add(name)
         flag = parameter.get("flag")
-        if flag is not None and re.fullmatch(FLAG_PATTERN, flag) is None:
-            yield f"{at}.flag: flag must match {FLAG_PATTERN!r}, got {flag!r}"
+        if flag is not None:
+            if re.fullmatch(FLAG_PATTERN, flag) is None:
+                yield f"{at}.flag: flag must match {FLAG_PATTERN!r}, got {flag!r}"
+            if flag in seen_flags:
+                yield (
+                    f"{at}.flag: flag must not repeat an earlier parameter's, "
+                    f"got {flag!r}"
+                )
+            seen_flags.add(flag)
         if name not in properties:
             yield (
                 f"{at}.name: parameter name must be a property of input_schema, "

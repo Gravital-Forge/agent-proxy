@@ -26,6 +26,8 @@ PREFIX = "agent-proxy: "
 TOKEN_HEADER = "NAME\tSCOPE\tCREATED\tLAST_USED\tEXPIRES"
 CONFIG = {
     "agent_tree": "/srv/agents/alpha",
+    "overflow_dir": "/srv/agents/alpha/overflow",
+    "max_cages": 4,
     "plugins": {},
     "scopes": {"ci": {"grants": {}}},
 }
