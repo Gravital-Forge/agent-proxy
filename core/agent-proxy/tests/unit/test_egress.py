@@ -1,7 +1,10 @@
 import dataclasses
 import hashlib
+import logging
 import re
-from collections.abc import Callable, Iterator
+import shutil
+import stat
+from collections.abc import Callable, Collection, Iterator, Mapping
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from unittest import mock
@@ -23,6 +26,7 @@ from agent_proxy.egress import (
     CageNetwork,
     EgressConfigError,
     EgressError,
+    EgressProxies,
     EgressStartError,
     cage_network,
     domain_lists,
@@ -32,6 +36,7 @@ from agent_proxy.egress import (
     start_proxy,
 )
 from agent_proxy.errors import ProxyError
+from agent_proxy.plugins import PluginImageError
 
 IMAGE = "ghcr.io/example/git@sha256:" + "a" * 64
 EMPTY_LIST_KEY = "e3b0c44298fc1c14"
@@ -59,6 +64,13 @@ DOCKER_ERRORS = [
         requests.exceptions.ConnectionError("daemon said no"), id="connection-error"
     ),
 ]
+LISTED = ("example.com",)
+LISTED_KEY = list_key(LISTED)
+LISTED_NAME = network_name(LISTED_KEY)
+OTHER = ("api.github.com", "github.com")
+OTHER_KEY = list_key(OTHER)
+OTHER_NAME = network_name(OTHER_KEY)
+TEST_LABELS = MappingProxyType({"agent-proxy.test": "1"})
 
 
 class _FakeClock:
@@ -86,6 +98,14 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> _FakeClock:
         egress, "time", SimpleNamespace(monotonic=fake.monotonic, sleep=fake.sleep)
     )
     return fake
+
+
+@pytest.fixture
+def started(monkeypatch: pytest.MonkeyPatch) -> mock.MagicMock:
+    """Replace the start_proxy that egress calls with a double."""
+    double = mock.MagicMock()
+    monkeypatch.setattr(egress, "start_proxy", double)
+    return double
 
 
 def _client(*logs: bytes, status: str = "running") -> mock.MagicMock:
@@ -157,6 +177,116 @@ def _keys(node: object) -> Iterator[object]:
     elif isinstance(node, list):
         for item in node:
             yield from _keys(item)
+
+
+def _docker(
+    *, networks: Collection[str] = (), proxy: mock.MagicMock | None = None
+) -> mock.MagicMock:
+    """Return a client holding the proxy image and only the named networks.
+
+    The one proxy container, when given, is the listed list's.
+    """
+    client = mock.MagicMock()
+
+    def get_network(name: str) -> mock.MagicMock:
+        if name not in networks:
+            raise docker.errors.NotFound(f"network {name} not found")
+        return mock.MagicMock()
+
+    def get_container(name: str) -> mock.MagicMock:
+        if proxy is None or name != LISTED_NAME:
+            raise docker.errors.NotFound(f"container {name} not found")
+        return proxy
+
+    client.networks.get.side_effect = get_network
+    client.containers.get.side_effect = get_container
+    return client
+
+
+def _proxy(*, status: str = "running", image: str = IRON_PROXY_IMAGE) -> mock.MagicMock:
+    proxy = mock.MagicMock()
+    proxy.status = status
+    proxy.attrs = {"Config": {"Image": image}}
+    return proxy
+
+
+def _write_listed_config(root: Path, config: bytes) -> Path:
+    directory = root / LISTED_NAME
+    directory.mkdir()
+    (directory / "proxy.yaml").write_bytes(config)
+    return directory
+
+
+def _network_call(
+    name: str,
+    value: str,
+    *,
+    internal: bool,
+    labels: Mapping[str, str] = LABELS,
+) -> object:
+    return mock.call(
+        name,
+        driver="bridge",
+        internal=internal,
+        labels={"agent-proxy.egress": value, **labels},
+    )
+
+
+def _failing_network_lookup(client: mock.MagicMock, error: Exception) -> None:
+    client.networks.get.side_effect = error
+
+
+def _failing_network_create(client: mock.MagicMock, error: Exception) -> None:
+    client.networks.create.side_effect = error
+
+
+def _failing_proxy_lookup(client: mock.MagicMock, error: Exception) -> None:
+    client.containers.get.side_effect = error
+
+
+def _failing_proxy_removal(client: mock.MagicMock, error: Exception) -> None:
+    client.containers.get(LISTED_NAME).remove.side_effect = error
+
+
+def _labelled(
+    *,
+    containers: Collection[mock.MagicMock] = (),
+    networks: Collection[mock.MagicMock] = (),
+) -> mock.MagicMock:
+    """Return a client whose egress label filter finds these resources."""
+    client = mock.MagicMock()
+    client.containers.list.return_value = list(containers)
+    client.networks.list.return_value = list(networks)
+    return client
+
+
+def _egress_container(key: str) -> mock.MagicMock:
+    container = mock.MagicMock()
+    container.name = network_name(key)
+    container.labels = {"agent-proxy.egress": key}
+    return container
+
+
+def _egress_network(name: str, value: str) -> mock.MagicMock:
+    network = mock.MagicMock()
+    network.name = name
+    network.attrs = {"Labels": {"agent-proxy.egress": value}}
+    return network
+
+
+def _write_config_dirs(root: Path, *names: str) -> None:
+    for name in names:
+        (root / name).mkdir()
+        (root / name / "proxy.yaml").write_bytes(b"dns: {}\n")
+
+
+def _warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    """Return the message of each record egress logged, all of them warnings."""
+    records = [
+        record for record in caplog.records if record.name == "agent_proxy.egress"
+    ]
+    assert {record.levelno for record in records} <= {logging.WARNING}
+    return [record.getMessage() for record in records]
 
 
 @pytest.mark.parametrize(
@@ -558,3 +688,471 @@ def test_a_failed_removal_raises_egress_error_naming_the_proxy() -> None:
 
     assert type(excinfo.value) is EgressError
     assert PROXY_NAME in str(excinfo.value)
+
+
+@pytest.mark.usefixtures("started")
+def test_ensure_makes_the_proxy_image_present(tmp_path: Path) -> None:
+    """An image already present is not pulled again."""
+    client = _docker()
+
+    EgressProxies(client, tmp_path).ensure(())
+
+    client.images.get.assert_called_once_with(IRON_PROXY_IMAGE)
+    client.images.pull.assert_not_called()
+
+
+def test_ensure_passes_a_failed_pull_through_unchanged(
+    tmp_path: Path, started: mock.MagicMock
+) -> None:
+    """The image comes first: a failed pull creates nothing."""
+    client = _docker()
+    client.images.get.side_effect = docker.errors.ImageNotFound("no such image")
+    client.images.pull.side_effect = docker.errors.APIError("daemon said no")
+
+    with pytest.raises(PluginImageError) as excinfo:
+        EgressProxies(client, tmp_path).ensure([LISTED])
+
+    assert type(excinfo.value) is PluginImageError
+    client.networks.create.assert_not_called()
+    started.assert_not_called()
+
+
+def test_ensure_of_no_lists_makes_only_the_image_and_the_bridge_present(
+    tmp_path: Path, started: mock.MagicMock
+) -> None:
+    """With no lists, no internal network, proxy, or config is made."""
+    client = _docker()
+
+    EgressProxies(client, tmp_path).ensure(())
+
+    assert client.networks.create.call_args_list == [
+        _network_call(BRIDGE_NETWORK, "bridge", internal=False)
+    ]
+    client.containers.get.assert_not_called()
+    started.assert_not_called()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.usefixtures("started")
+def test_ensure_creates_the_bridge_and_each_list_s_internal_network(
+    tmp_path: Path,
+) -> None:
+    """The bridge is a plain network; each list's network is internal."""
+    client = _docker()
+
+    EgressProxies(client, tmp_path).ensure([LISTED, OTHER])
+
+    assert client.networks.create.call_args_list == [
+        _network_call(BRIDGE_NETWORK, "bridge", internal=False),
+        _network_call(LISTED_NAME, LISTED_KEY, internal=True),
+        _network_call(OTHER_NAME, OTHER_KEY, internal=True),
+    ]
+
+
+@pytest.mark.usefixtures("started")
+def test_ensure_adds_labels_to_the_networks_it_creates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A network carries LABELS beside its own egress label."""
+    monkeypatch.setattr(egress, "LABELS", TEST_LABELS)
+    client = _docker()
+
+    EgressProxies(client, tmp_path).ensure([LISTED])
+
+    assert client.networks.create.call_args_list == [
+        _network_call(BRIDGE_NETWORK, "bridge", internal=False, labels=TEST_LABELS),
+        _network_call(LISTED_NAME, LISTED_KEY, internal=True, labels=TEST_LABELS),
+    ]
+
+
+def test_ensure_creates_nothing_that_is_present(
+    tmp_path: Path, started: mock.MagicMock
+) -> None:
+    """A running proxy on the pinned image, from the rendered config, is kept."""
+    proxy = _proxy()
+    client = _docker(networks={BRIDGE_NETWORK, LISTED_NAME}, proxy=proxy)
+    _write_listed_config(tmp_path, render_config(LISTED))
+
+    EgressProxies(client, tmp_path).ensure([LISTED])
+
+    client.networks.create.assert_not_called()
+    proxy.remove.assert_not_called()
+    started.assert_not_called()
+
+
+def test_ensure_gives_the_empty_list_a_network_and_no_proxy(
+    tmp_path: Path, started: mock.MagicMock
+) -> None:
+    """The empty list's network holds no proxy, so no config is written."""
+    client = _docker(networks={BRIDGE_NETWORK})
+
+    EgressProxies(client, tmp_path).ensure([()])
+
+    assert client.networks.create.call_args_list == [
+        _network_call(network_name(EMPTY_LIST_KEY), EMPTY_LIST_KEY, internal=True)
+    ]
+    client.containers.get.assert_not_called()
+    started.assert_not_called()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_ensure_writes_the_config_then_starts_an_absent_proxy(
+    tmp_path: Path, started: mock.MagicMock
+) -> None:
+    """The proxy starts from a config already rendered on disk."""
+    client = _docker(networks={BRIDGE_NETWORK, LISTED_NAME})
+    configs_at_start: list[bytes] = []
+    started.side_effect = lambda _client, _key, config_dir: configs_at_start.append(
+        (config_dir / "proxy.yaml").read_bytes()
+    )
+
+    EgressProxies(client, tmp_path).ensure([LISTED])
+
+    started.assert_called_once_with(client, LISTED_KEY, tmp_path / LISTED_NAME)
+    assert configs_at_start == [render_config(LISTED)]
+
+
+def test_ensure_starts_a_proxy_for_each_listed_list(
+    tmp_path: Path, started: mock.MagicMock
+) -> None:
+    """Each non-empty list gets its own proxy, in the order given."""
+    client = _docker()
+
+    EgressProxies(client, tmp_path).ensure([LISTED, OTHER])
+
+    assert started.call_args_list == [
+        mock.call(client, LISTED_KEY, tmp_path / LISTED_NAME),
+        mock.call(client, OTHER_KEY, tmp_path / OTHER_NAME),
+    ]
+
+
+@pytest.mark.usefixtures("started")
+def test_ensure_keeps_the_config_directory_and_file_private(tmp_path: Path) -> None:
+    """Only the instance's user can read a proxy's config."""
+    client = _docker(networks={BRIDGE_NETWORK, LISTED_NAME})
+
+    EgressProxies(client, tmp_path).ensure([LISTED])
+
+    directory = tmp_path / LISTED_NAME
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    assert stat.S_IMODE((directory / "proxy.yaml").stat().st_mode) == 0o600
+
+
+@pytest.mark.usefixtures("started")
+def test_ensure_narrows_a_config_directory_and_file_it_finds_open(
+    tmp_path: Path,
+) -> None:
+    """A config left open by another writer is narrowed and rewritten."""
+    client = _docker(networks={BRIDGE_NETWORK, LISTED_NAME})
+    directory = _write_listed_config(tmp_path, b"stale: true\n")
+    directory.chmod(0o755)
+    (directory / "proxy.yaml").chmod(0o644)
+
+    EgressProxies(client, tmp_path).ensure([LISTED])
+
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+    assert stat.S_IMODE((directory / "proxy.yaml").stat().st_mode) == 0o600
+    assert (directory / "proxy.yaml").read_bytes() == render_config(LISTED)
+
+
+@pytest.mark.usefixtures("started")
+def test_ensure_renames_a_dot_staging_file_into_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The proxy never reads a half-written config."""
+    renames: list[tuple[Path, Path]] = []
+    replace = Path.replace
+
+    def recording_replace(self: Path, target: Path) -> Path:
+        renames.append((self, Path(target)))
+        return replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", recording_replace)
+    client = _docker(networks={BRIDGE_NETWORK, LISTED_NAME})
+
+    EgressProxies(client, tmp_path).ensure([LISTED])
+
+    directory = tmp_path / LISTED_NAME
+    [(staging, target)] = renames
+    assert target == directory / "proxy.yaml"
+    assert staging.parent == directory
+    assert staging.name.startswith(".")
+    assert [path.name for path in directory.iterdir()] == ["proxy.yaml"]
+
+
+def test_a_failed_config_write_raises_egress_error_and_leaves_no_staging_file(
+    tmp_path: Path, started: mock.MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write that fails is refused, and nothing is started from it."""
+
+    def failing_replace(self: Path, target: Path) -> Path:
+        raise OSError("disk said no")
+
+    monkeypatch.setattr(Path, "replace", failing_replace)
+    client = _docker(networks={BRIDGE_NETWORK, LISTED_NAME})
+
+    with pytest.raises(EgressError, match="disk said no") as excinfo:
+        EgressProxies(client, tmp_path).ensure([LISTED])
+
+    assert type(excinfo.value) is EgressError
+    assert LISTED_NAME in str(excinfo.value)
+    assert list((tmp_path / LISTED_NAME).iterdir()) == []
+    started.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("proxy_state", "config"),
+    [
+        pytest.param({"status": "exited"}, render_config(LISTED), id="stopped"),
+        pytest.param(
+            {"image": "ironsh/iron-proxy:0.51.0"},
+            render_config(LISTED),
+            id="another-image",
+        ),
+        pytest.param({}, render_config(["example.org"]), id="another-config"),
+        pytest.param({}, None, id="no-config"),
+    ],
+)
+def test_ensure_replaces_a_proxy_it_cannot_keep(
+    tmp_path: Path,
+    started: mock.MagicMock,
+    proxy_state: dict[str, str],
+    config: bytes | None,
+) -> None:
+    """The old proxy goes before the new config is written and started."""
+    proxy = _proxy(**proxy_state)
+    client = _docker(networks={BRIDGE_NETWORK, LISTED_NAME}, proxy=proxy)
+    if config is not None:
+        _write_listed_config(tmp_path, config)
+    events: list[object] = []
+    proxy.remove.side_effect = lambda **_: events.append("remove")
+    started.side_effect = lambda _client, _key, config_dir: events.append(
+        (config_dir / "proxy.yaml").read_bytes()
+    )
+
+    EgressProxies(client, tmp_path).ensure([LISTED])
+
+    proxy.remove.assert_called_once_with(force=True)
+    started.assert_called_once_with(client, LISTED_KEY, tmp_path / LISTED_NAME)
+    assert events == ["remove", render_config(LISTED)]
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(EgressStartError("proxy stopped"), id="start-refused"),
+        pytest.param(EgressError("daemon said no"), id="docker-failure"),
+    ],
+)
+def test_a_failed_start_removes_the_proxy_s_config_directory(
+    tmp_path: Path, started: mock.MagicMock, error: EgressError
+) -> None:
+    """No config iron-proxy refused stays on disk."""
+    client = _docker(networks={BRIDGE_NETWORK, LISTED_NAME})
+    started.side_effect = error
+
+    with pytest.raises(EgressError) as excinfo:
+        EgressProxies(client, tmp_path).ensure([LISTED])
+
+    assert excinfo.value is error
+    assert not (tmp_path / LISTED_NAME).exists()
+
+
+@pytest.mark.usefixtures("started")
+@pytest.mark.parametrize("error", DOCKER_ERRORS)
+@pytest.mark.parametrize(
+    "break_step",
+    [
+        pytest.param(_failing_network_lookup, id="network-lookup"),
+        pytest.param(_failing_network_create, id="network-create"),
+        pytest.param(_failing_proxy_lookup, id="proxy-lookup"),
+        pytest.param(_failing_proxy_removal, id="proxy-removal"),
+    ],
+)
+def test_a_docker_failure_in_ensure_raises_egress_error(
+    tmp_path: Path,
+    break_step: Callable[[mock.MagicMock, Exception], None],
+    error: Exception,
+) -> None:
+    """The refusal is a plain EgressError carrying the cause."""
+    client = _docker(proxy=_proxy(status="exited"))
+    break_step(client, error)
+
+    with pytest.raises(EgressError, match="daemon said no") as excinfo:
+        EgressProxies(client, tmp_path).ensure([LISTED])
+
+    assert type(excinfo.value) is EgressError
+
+
+def test_prune_finds_egress_resources_by_their_label(tmp_path: Path) -> None:
+    """Stopped proxies count too, so the container list includes them."""
+    client = _labelled()
+
+    EgressProxies(client, tmp_path).prune(())
+
+    client.containers.list.assert_called_once_with(
+        all=True, filters={"label": ["agent-proxy.egress"]}
+    )
+    client.networks.list.assert_called_once_with(
+        filters={"label": ["agent-proxy.egress"]}
+    )
+
+
+def test_prune_filters_on_every_entry_of_labels_when_it_is_not_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A test run prunes only what a test run made."""
+    monkeypatch.setattr(egress, "LABELS", TEST_LABELS)
+    client = _labelled()
+
+    EgressProxies(client, tmp_path).prune(())
+
+    filters = {"label": ["agent-proxy.egress", "agent-proxy.test=1"]}
+    client.containers.list.assert_called_once_with(all=True, filters=filters)
+    client.networks.list.assert_called_once_with(filters=filters)
+
+
+def test_prune_removes_only_unlisted_proxies_with_their_config_directories(
+    tmp_path: Path,
+) -> None:
+    """A listed proxy and its config stay."""
+    kept, dropped = _egress_container(LISTED_KEY), _egress_container(OTHER_KEY)
+    _write_config_dirs(tmp_path, LISTED_NAME, OTHER_NAME)
+    client = _labelled(containers=[kept, dropped])
+
+    EgressProxies(client, tmp_path).prune([LISTED])
+
+    kept.remove.assert_not_called()
+    dropped.remove.assert_called_once_with(force=True)
+    assert (tmp_path / LISTED_NAME / "proxy.yaml").exists()
+    assert not (tmp_path / OTHER_NAME).exists()
+
+
+def test_prune_removes_only_unlisted_networks_and_never_the_bridge(
+    tmp_path: Path,
+) -> None:
+    """The bridge stays even when no list is left."""
+    bridge = _egress_network(BRIDGE_NETWORK, "bridge")
+    kept = _egress_network(LISTED_NAME, LISTED_KEY)
+    dropped = _egress_network(OTHER_NAME, OTHER_KEY)
+    client = _labelled(networks=[bridge, kept, dropped])
+
+    EgressProxies(client, tmp_path).prune([LISTED])
+
+    bridge.remove.assert_not_called()
+    kept.remove.assert_not_called()
+    dropped.remove.assert_called_once_with()
+
+
+def test_prune_removes_a_proxy_before_its_network(tmp_path: Path) -> None:
+    """A network still holding its proxy's endpoint cannot be removed."""
+    container = _egress_container(OTHER_KEY)
+    network = _egress_network(OTHER_NAME, OTHER_KEY)
+    events: list[str] = []
+    container.remove.side_effect = lambda **_: events.append("proxy")
+    network.remove.side_effect = lambda: events.append("network")
+    client = _labelled(containers=[container], networks=[network])
+
+    EgressProxies(client, tmp_path).prune(())
+
+    assert events == ["proxy", "network"]
+
+
+def test_prune_is_quiet_about_a_proxy_that_has_no_config_directory(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A proxy whose config is already gone is no failure."""
+    dropped = _egress_container(OTHER_KEY)
+    client = _labelled(containers=[dropped])
+    caplog.set_level(logging.WARNING, logger="agent_proxy.egress")
+
+    EgressProxies(client, tmp_path).prune(())
+
+    dropped.remove.assert_called_once_with(force=True)
+    assert _warnings(caplog) == []
+
+
+@pytest.mark.parametrize("error", DOCKER_ERRORS)
+def test_prune_logs_a_failed_proxy_listing_and_still_prunes_networks(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, error: Exception
+) -> None:
+    """A container listing that fails does not stop the network prune."""
+    dropped = _egress_network(OTHER_NAME, OTHER_KEY)
+    client = _labelled(networks=[dropped])
+    client.containers.list.side_effect = error
+    caplog.set_level(logging.WARNING, logger="agent_proxy.egress")
+
+    EgressProxies(client, tmp_path).prune([LISTED])
+
+    dropped.remove.assert_called_once_with()
+    [message] = _warnings(caplog)
+    assert "daemon said no" in message
+
+
+@pytest.mark.parametrize("error", DOCKER_ERRORS)
+def test_prune_logs_a_failed_network_listing_after_pruning_proxies(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, error: Exception
+) -> None:
+    """A network listing that fails leaves the proxy prune done."""
+    dropped = _egress_container(OTHER_KEY)
+    client = _labelled(containers=[dropped])
+    client.networks.list.side_effect = error
+    caplog.set_level(logging.WARNING, logger="agent_proxy.egress")
+
+    EgressProxies(client, tmp_path).prune([LISTED])
+
+    dropped.remove.assert_called_once_with(force=True)
+    [message] = _warnings(caplog)
+    assert "daemon said no" in message
+
+
+@pytest.mark.parametrize("error", DOCKER_ERRORS)
+def test_prune_logs_a_failed_removal_and_moves_on_to_the_next_resource(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, error: Exception
+) -> None:
+    """A proxy it could not remove keeps its config directory."""
+    stuck_proxy = _egress_container(LISTED_KEY)
+    next_proxy = _egress_container(OTHER_KEY)
+    stuck_proxy.remove.side_effect = error
+    stuck_network = _egress_network(LISTED_NAME, LISTED_KEY)
+    stuck_network.remove.side_effect = error
+    next_network = _egress_network(OTHER_NAME, OTHER_KEY)
+    _write_config_dirs(tmp_path, LISTED_NAME, OTHER_NAME)
+    client = _labelled(
+        containers=[stuck_proxy, next_proxy], networks=[stuck_network, next_network]
+    )
+    caplog.set_level(logging.WARNING, logger="agent_proxy.egress")
+
+    EgressProxies(client, tmp_path).prune(())
+
+    next_proxy.remove.assert_called_once_with(force=True)
+    next_network.remove.assert_called_once_with()
+    assert (tmp_path / LISTED_NAME / "proxy.yaml").exists()
+    assert not (tmp_path / OTHER_NAME).exists()
+    proxy_warning, network_warning = _warnings(caplog)
+    assert LISTED_NAME in proxy_warning
+    assert "daemon said no" in proxy_warning
+    assert LISTED_NAME in network_warning
+    assert "daemon said no" in network_warning
+
+
+def test_prune_logs_a_config_directory_it_cannot_remove(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A config directory that will not go is logged, and prune goes on."""
+
+    def failing_rmtree(path: Path, *args: object, **kwargs: object) -> None:
+        raise PermissionError("disk said no")
+
+    monkeypatch.setattr(shutil, "rmtree", failing_rmtree)
+    first, second = _egress_container(LISTED_KEY), _egress_container(OTHER_KEY)
+    client = _labelled(containers=[first, second])
+    caplog.set_level(logging.WARNING, logger="agent_proxy.egress")
+
+    EgressProxies(client, tmp_path).prune(())
+
+    second.remove.assert_called_once_with(force=True)
+    first_warning, second_warning = _warnings(caplog)
+    assert LISTED_NAME in first_warning
+    assert "disk said no" in first_warning
+    assert OTHER_NAME in second_warning

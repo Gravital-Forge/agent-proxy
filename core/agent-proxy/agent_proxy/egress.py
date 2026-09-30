@@ -2,21 +2,27 @@
 
 import hashlib
 import json
+import logging
+import os
 import re
+import secrets
+import shutil
 import time
 import types
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+import docker.errors
 import docker.types
 import yaml
 from docker import DockerClient
 from docker.models.containers import Container
+from docker.models.networks import Network
 
 from agent_proxy.config import DOMAIN_PATTERN, PROXY_ENV_NAME, InstanceConfig
 from agent_proxy.errors import ProxyError
-from agent_proxy.plugins import DOCKER_FAILURES
+from agent_proxy.plugins import DOCKER_FAILURES, ensure_image
 
 BRIDGE_NETWORK = "apx-egress-bridge"
 IRON_PROXY_IMAGE = (
@@ -28,11 +34,15 @@ PROXY_ALIAS = "egress"
 PROXY_LOG_EXCERPT_BYTES = 2048
 PROXY_READY_TIMEOUT_SECONDS = 10
 TUNNEL_PORT = 1080
+_BRIDGE_VALUE = "bridge"
+_CONFIG_FILE = "proxy.yaml"
 _CONFIG_MOUNT = "/etc/iron-proxy"
 _EGRESS_LABEL = "agent-proxy.egress"
 _KEY_DIGITS = 16
 _POLL_SECONDS = 0.1
 _READY_MESSAGE = "tunnel proxy starting"
+
+_logger = logging.getLogger(__name__)
 
 
 class EgressError(ProxyError):
@@ -159,7 +169,7 @@ def _create_proxy(client: DockerClient, key: str, config_dir: Path) -> Container
     try:
         return client.containers.create(
             IRON_PROXY_IMAGE,
-            command=["-config", f"{_CONFIG_MOUNT}/proxy.yaml"],
+            command=["-config", f"{_CONFIG_MOUNT}/{_CONFIG_FILE}"],
             name=name,
             user="0:0",
             read_only=True,
@@ -245,3 +255,204 @@ def _remove_proxy(container: Container, name: str) -> None:
         container.remove(force=True)
     except DOCKER_FAILURES as exc:
         raise EgressError(f"proxy {name!r} could not be removed: {exc}") from exc
+
+
+class EgressProxies:
+    """The egress networks and proxies on one daemon, with each proxy's config."""
+
+    def __init__(self, client: DockerClient, config_root: Path) -> None:
+        """Keep each proxy's config in its own directory under config_root."""
+        self._client = client
+        self._config_root = config_root
+
+    def ensure(self, lists: Iterable[Collection[str]]) -> None:
+        """Make the proxy image, the bridge, and each list's network and proxy present.
+
+        The empty list gets its network and no proxy. A proxy is kept when it
+        runs, on IRON_PROXY_IMAGE, from a config file holding exactly what
+        render_config renders; any other proxy of that name is replaced.
+
+        Raises:
+            PluginImageError: the proxy image cannot be looked up or pulled.
+            EgressStartError: a proxy stops, or is not ready in time; it is
+                removed with its config directory.
+            EgressError: Docker refuses a step, or a config cannot be written.
+        """
+        ensure_image(self._client, IRON_PROXY_IMAGE)
+        self._ensure_network(BRIDGE_NETWORK, _BRIDGE_VALUE, internal=False)
+        for domains in lists:
+            key = list_key(domains)
+            self._ensure_network(network_name(key), key, internal=True)
+            if domains:
+                self._ensure_proxy(key, render_config(domains))
+
+    def prune(self, lists: Iterable[Collection[str]]) -> None:
+        """Remove every egress proxy and network that no list in lists names.
+
+        Proxies go first, each with its config directory, so their networks
+        hold no endpoint; the bridge always stays. It never raises: a failure
+        logs a warning, and the next prune tries again.
+        """
+        kept = {list_key(domains) for domains in lists}
+        for container in self._egress_containers():
+            key = container.labels[_EGRESS_LABEL]
+            if key not in kept:
+                self._prune_proxy(container, key)
+        for network in self._egress_networks():
+            if network.attrs["Labels"][_EGRESS_LABEL] not in kept | {_BRIDGE_VALUE}:
+                self._prune_network(network)
+
+    def _ensure_network(self, name: str, value: str, *, internal: bool) -> None:
+        if not self._network_exists(name):
+            self._create_network(name, value, internal=internal)
+
+    def _network_exists(self, name: str) -> bool:
+        try:
+            self._client.networks.get(name)
+        except docker.errors.NotFound:
+            return False
+        except DOCKER_FAILURES as exc:
+            raise EgressError(
+                f"network {name!r} could not be looked up: {exc}"
+            ) from exc
+        return True
+
+    def _create_network(self, name: str, value: str, *, internal: bool) -> None:
+        try:
+            self._client.networks.create(
+                name,
+                driver="bridge",
+                internal=internal,
+                labels={_EGRESS_LABEL: value} | LABELS,
+            )
+        except DOCKER_FAILURES as exc:
+            raise EgressError(f"network {name!r} could not be created: {exc}") from exc
+
+    def _ensure_proxy(self, key: str, config: bytes) -> None:
+        name = network_name(key)
+        proxy = self._find_proxy(name)
+        if proxy is not None:
+            if self._is_current(proxy, key, config):
+                return
+            _remove_proxy(proxy, name)
+        directory = self._write_config(key, config)
+        try:
+            start_proxy(self._client, key, directory)
+        except EgressError:
+            self._remove_config_dir(key)
+            raise
+
+    def _find_proxy(self, name: str) -> Container | None:
+        try:
+            return self._client.containers.get(name)
+        except docker.errors.NotFound:
+            return None
+        except DOCKER_FAILURES as exc:
+            raise EgressError(f"proxy {name!r} could not be looked up: {exc}") from exc
+
+    def _is_current(self, proxy: Container, key: str, config: bytes) -> bool:
+        return (
+            proxy.status == "running"
+            and proxy.attrs["Config"]["Image"] == IRON_PROXY_IMAGE
+            and self._config_holds(key, config)
+        )
+
+    def _config_holds(self, key: str, config: bytes) -> bool:
+        """Return whether key's config file holds exactly config.
+
+        A file that cannot be read does not; rewriting it reports any failure.
+        """
+        try:
+            return (self._config_dir(key) / _CONFIG_FILE).read_bytes() == config
+        except OSError:
+            return False
+
+    def _write_config(self, key: str, config: bytes) -> Path:
+        directory = self._config_dir(key)
+        try:
+            directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+            directory.chmod(0o700)
+            _write_staged(directory / _CONFIG_FILE, config)
+        except OSError as exc:
+            raise EgressError(
+                f"config for proxy {network_name(key)!r} could not be written: {exc}"
+            ) from exc
+        return directory
+
+    def _config_dir(self, key: str) -> Path:
+        return self._config_root / network_name(key)
+
+    def _remove_config_dir(self, key: str) -> None:
+        directory = self._config_dir(key)
+        try:
+            shutil.rmtree(directory)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            _logger.warning(
+                "egress config directory %r could not be removed: %s",
+                str(directory),
+                exc,
+            )
+
+    def _egress_containers(self) -> list[Container]:
+        try:
+            return self._client.containers.list(all=True, filters=_egress_filters())
+        except DOCKER_FAILURES as exc:
+            _logger.warning("egress proxies could not be listed: %s", exc)
+            return []
+
+    def _egress_networks(self) -> list[Network]:
+        try:
+            return self._client.networks.list(filters=_egress_filters())
+        except DOCKER_FAILURES as exc:
+            _logger.warning("egress networks could not be listed: %s", exc)
+            return []
+
+    def _prune_proxy(self, container: Container, key: str) -> None:
+        try:
+            container.remove(force=True)
+        except DOCKER_FAILURES as exc:
+            _logger.warning(
+                "egress proxy %r could not be removed: %s", container.name, exc
+            )
+            return
+        self._remove_config_dir(key)
+
+    def _prune_network(self, network: Network) -> None:
+        try:
+            network.remove()
+        except DOCKER_FAILURES as exc:
+            _logger.warning(
+                "egress network %r could not be removed: %s", network.name, exc
+            )
+
+
+def _egress_filters() -> dict[str, list[str]]:
+    """Return the label filter that finds egress resources.
+
+    Docker matches a container or network only when it carries every label
+    in the list.
+    """
+    return {
+        "label": [
+            _EGRESS_LABEL,
+            *(f"{name}={value}" for name, value in LABELS.items()),
+        ]
+    }
+
+
+def _write_staged(target: Path, content: bytes) -> None:
+    """Write content to target, mode 0o600, through a staging file renamed over it."""
+    staging = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
+    fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as staged:
+            os.fchmod(fd, 0o600)
+            staged.write(content)
+            staged.flush()
+            os.fsync(fd)
+        staging.replace(target)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
