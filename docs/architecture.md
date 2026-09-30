@@ -5,9 +5,8 @@ This document describes what is built, and cites the code by path. The decisions
 
 ## The core package
 
-The core is the uv package in `core/agent-proxy/`. The repository has no root `pyproject.toml`, and
-each directory that carries one is its own package, as `docs/design.md` sets out under "Repository
-layout".
+The core is the uv package in `core/agent-proxy/`, placed as `docs/design.md` sets out under
+"Repository layout".
 
 - `core/agent-proxy/pyproject.toml` declares the dependencies, the `agent-proxy` console script, and
   the poe tasks that lint and test the package.
@@ -22,28 +21,28 @@ Each module below is a file in `core/agent-proxy/agent_proxy/`.
 
 ### `errors.py`
 
-`ProxyError` is the base of every error a caller can act on. Each module raises its own subclass,
-and the message names the refused value and what the module expected. The admin command catches
-`ProxyError` and prints it as a refusal.
+`ProxyError` is the base of every error a caller can act on. Each module that refuses input raises
+its own subclass, and the message names the refused value and what the module expected. The admin
+command catches `ProxyError` and prints it as a refusal.
 
 ### `config.py`
 
 This module holds the rules the other modules share, and the instance config those rules govern.
 
-The shared rules are the name patterns and two checks. `NAME_PATTERN` governs scope, token, and
-credential names, and `check_name` refuses a name that does not match it with `InvalidNameError`.
-`PLUGIN_NAME_PATTERN` and `ACTION_NAME_PATTERN` govern plugin and action names. `parse_duration`
-turns a duration such as `120s` or `7d` into a `timedelta`, and refuses anything else with
-`DurationError`.
+The shared rules are the name patterns and the checks that apply them. `NAME_PATTERN` governs scope,
+token, and credential names, and `check_name` refuses a name that does not match it with
+`InvalidNameError`. `PLUGIN_NAME_PATTERN` governs plugin names. `parse_duration` turns a duration
+such as `120s` or `7d` into a `timedelta`, and refuses anything else with `DurationError`.
 
 `load_config` reads one YAML file and returns an `InstanceConfig`: the agent tree, the plugins
 pinned by image digest, and the scopes with their grants. `read_yaml` parses the file with a safe
 loader that also refuses a key repeated in one mapping. The pydantic models refuse unknown fields
 and check each field's form. The `InstanceConfig` validator then checks the rules that span fields,
-such as a root lying inside the agent tree. `docs/design.md` gives the checks under "Config".
+such as a root lying inside the agent tree. `docs/design.md` sets the validation rules under
+"Config", and the validator checks those that the file and the credential store can settle.
 
 A config that fails raises `ConfigError`, which holds one message per failure. Each message names
-the file and the location of the failure inside it.
+the file, and a failure inside the file also names its location.
 
 `load_config` takes the credential names as an argument and does not open the credential store.
 
@@ -83,7 +82,7 @@ environment, opens each store under the state directory, and hands the credentia
 
 ## Where state lives
 
-Two environment variables place everything the admin command reads and writes.
+Environment variables place everything the admin command reads and writes.
 
 `AGENT_PROXY_STATE_DIR` names the state directory. The directory must already exist, and the command
 does not change its mode. The command keeps its state beneath it:
