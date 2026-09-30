@@ -95,7 +95,13 @@ docker info
 docker run --rm --label agent-proxy.test=1 alpine:3 true
 docker network create --internal --label agent-proxy.test=1 apx-dry-run
 docker network rm apx-dry-run
+rm -rf .rumdl_cache
+find . \( -name .venv -o -name __pycache__ -o -name .pytest_cache -o -name .ruff_cache -o -name .rumdl_cache \) -prune -print
+docker image prune --all --force --filter label=agent-proxy.test=1
 ```
+
+The last three lines are the worktree cleanup `.dev/version-control.md` sets, so the dry run shows
+whether auto mode lets a job run it.
 
 Then, through the sidecar on the dry-run worktree's route, the worker runs `git_status`, `git_log`,
 `git_add` and `git_commit` of one scratch file, `git_push`, and `gh_pr_checks` against any open pull

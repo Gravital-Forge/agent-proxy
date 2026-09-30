@@ -286,7 +286,8 @@ agent-proxy/
 ```
 
 The core is Python on uv and FastMCP, reusing git-sidecar's auth, transport, and test patterns.
-Plugins may be written in any language. CI builds each plugin image and publishes it to GHCR.
+Plugins may be written in any language. CI builds each plugin image and runs `manifest check` on it.
+Publishing images to a registry is deployment, and out of scope.
 
 ## Verification
 
