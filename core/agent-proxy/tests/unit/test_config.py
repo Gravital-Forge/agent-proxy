@@ -131,12 +131,13 @@ def test_load_config_leaves_an_omitted_timeout_unset(tmp_path: Path) -> None:
     assert config.scopes["dev"].grants["git.clone"].timeout is None
 
 
-def test_load_config_accepts_the_agent_tree_itself_as_a_root(tmp_path: Path) -> None:
-    """A root equal to agent_tree lies inside it."""
-    config = _load(tmp_path, _with_grant(roots=[{"path": AGENT_TREE, "mode": "ro"}]))
+def test_load_config_accepts_a_root_beside_the_overflow_dir(tmp_path: Path) -> None:
+    """A root whose path starts with overflow_dir's text, but lies beside it, loads."""
+    root = {"path": f"{OVERFLOW_DIR}-archive", "mode": "rw"}
+    config = _load(tmp_path, _with_grant(roots=[root]))
 
     assert config.scopes["dev"].grants["git.clone"].roots == [
-        Root(path=AGENT_TREE, mode="ro")
+        Root(path=f"{OVERFLOW_DIR}-archive", mode="rw")
     ]
 
 
@@ -356,6 +357,21 @@ INSTANCE_FIELD_REFUSALS = [
         " got '/srv/other/overflow'",
         id="overflow-dir-outside-agent-tree",
     ),
+    pytest.param(
+        _config(
+            overflow_dir=AGENT_TREE, scopes=_scopes({"git.clone": _grant(roots=[])})
+        ),
+        f"overflow_dir must differ from agent_tree {AGENT_TREE!r}, got {AGENT_TREE!r}",
+        id="overflow-dir-equals-agent-tree",
+    ),
+    pytest.param(
+        _config(
+            overflow_dir=f"{AGENT_TREE}/",
+            scopes=_scopes({"git.clone": _grant(roots=[])}),
+        ),
+        f"overflow_dir must differ from agent_tree {AGENT_TREE!r}, got '{AGENT_TREE}/'",
+        id="overflow-dir-equals-agent-tree-after-cleaning",
+    ),
 ]
 
 
@@ -369,6 +385,61 @@ def test_load_config_refuses_a_bad_overflow_dir_or_cage_cap(
     assert error.errors == (
         f"config file {str(tmp_path / 'config.yaml')!r}: {expected}",
     )
+
+
+ROOT_PATH_FIELD = "scopes.dev.grants.git.clone.roots.0.path"
+
+ROOT_OVERFLOW_REFUSALS = [
+    pytest.param(
+        OVERFLOW_DIR,
+        f"{ROOT_PATH_FIELD} must not equal overflow_dir {OVERFLOW_DIR!r},"
+        f" got {OVERFLOW_DIR!r}",
+        id="root-equals-overflow-dir",
+    ),
+    pytest.param(
+        f"{OVERFLOW_DIR}/",
+        f"{ROOT_PATH_FIELD} must not equal overflow_dir {OVERFLOW_DIR!r},"
+        f" got '{OVERFLOW_DIR}/'",
+        id="root-equals-overflow-dir-after-cleaning",
+    ),
+    pytest.param(
+        AGENT_TREE,
+        f"{ROOT_PATH_FIELD} must not contain overflow_dir {OVERFLOW_DIR!r},"
+        f" got {AGENT_TREE!r}",
+        id="root-contains-overflow-dir",
+    ),
+    pytest.param(
+        f"{OVERFLOW_DIR}/calls",
+        f"{ROOT_PATH_FIELD} must not lie inside overflow_dir {OVERFLOW_DIR!r},"
+        f" got '{OVERFLOW_DIR}/calls'",
+        id="root-inside-overflow-dir",
+    ),
+]
+
+
+@pytest.mark.parametrize(("root_path", "expected"), ROOT_OVERFLOW_REFUSALS)
+def test_load_config_refuses_a_root_that_overlaps_the_overflow_dir(
+    tmp_path: Path, root_path: str, expected: str
+) -> None:
+    """A root equal to, containing, or inside overflow_dir is one failure there."""
+    error = _refusal(tmp_path, _with_grant(roots=[{"path": root_path, "mode": "ro"}]))
+
+    assert error.errors == (
+        f"config file {str(tmp_path / 'config.yaml')!r}: {expected}",
+    )
+
+
+def test_load_config_refuses_a_dotdot_root_only_for_its_segment(
+    tmp_path: Path,
+) -> None:
+    """A root with a '..' segment is not compared with overflow_dir."""
+    error = _refusal(
+        tmp_path,
+        _with_grant(roots=[{"path": f"{OVERFLOW_DIR}/../repo", "mode": "ro"}]),
+    )
+
+    assert len(error.errors) == 1
+    assert "no '..' segment" in error.errors[0]
 
 
 def test_load_config_leaves_the_parent_mapping_out_of_a_missing_field(

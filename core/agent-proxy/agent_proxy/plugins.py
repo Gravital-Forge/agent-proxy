@@ -166,7 +166,7 @@ def parse_manifest(data: bytes) -> Manifest:
             cannot state, or embeds a schema nested too deep to check. It
             holds one message per failure.
     """
-    document = _decode(data)
+    document = decode_json_object(data)
     failures = _schema_failures(document)
     if failures:
         raise ManifestError(*failures)
@@ -177,7 +177,7 @@ def parse_manifest(data: bytes) -> Manifest:
     return _to_manifest(manifest)
 
 
-def _decode(data: bytes) -> dict[str, object]:
+def decode_json_object(data: bytes) -> dict[str, object]:
     """Return the JSON object data holds.
 
     Raises:
