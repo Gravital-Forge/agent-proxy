@@ -9,13 +9,18 @@ import threading
 from collections.abc import Callable, Collection, Iterable, Iterator
 from pathlib import Path
 from types import MappingProxyType
+from unittest import mock
 
+import docker.errors
 import pytest
+import requests
 import yaml
 
 from agent_proxy.config import ConfigError, load_config
+from agent_proxy.credentials import CredentialStore
 from agent_proxy.egress import EgressError
 from agent_proxy.errors import ProxyError
+from agent_proxy.mcp import snapshot_builder
 from agent_proxy.reload import (
     CONTROL_SOCKET_NAME,
     ControlError,
@@ -28,6 +33,7 @@ from agent_proxy.reload import (
 
 WARNING = "plugins.git.actions.raw: declares pass-through args"
 WAIT_SECONDS = 5
+PLUGIN_IMAGE = "ghcr.io/example/tools@sha256:" + "a" * 64
 CONFIG = {
     "agent_tree": "/srv/agents/alpha",
     "overflow_dir": "/srv/agents/alpha/overflow",
@@ -406,3 +412,56 @@ def test_request_reload_refuses_a_reply_that_does_not_arrive_in_time(
         with _refusal_naming(socket_path):
             request_reload(socket_path)
         released.set()
+
+
+def _pull_refused(client: mock.MagicMock) -> None:
+    client.images.get.side_effect = docker.errors.ImageNotFound("no such image")
+    client.images.pull.side_effect = docker.errors.APIError("pull access denied")
+
+
+def _pull_unreachable(client: mock.MagicMock) -> None:
+    client.images.get.side_effect = docker.errors.ImageNotFound("no such image")
+    client.images.pull.side_effect = requests.exceptions.ConnectionError(
+        "connection refused"
+    )
+
+
+def _describe_refused(client: mock.MagicMock) -> None:
+    client.containers.create.side_effect = docker.errors.APIError("create refused")
+
+
+@pytest.mark.parametrize(
+    ("break_docker", "error_text"),
+    [
+        pytest.param(_pull_refused, "pull access denied", id="pull-api-error"),
+        pytest.param(
+            _pull_unreachable, "connection refused", id="pull-connection-error"
+        ),
+        pytest.param(_describe_refused, "create refused", id="describe-api-error"),
+    ],
+)
+def test_a_docker_failure_in_the_serving_build_replies_it_as_an_error(
+    tmp_path: Path,
+    socket_path: Path,
+    break_docker: Callable[[mock.MagicMock], None],
+    error_text: str,
+) -> None:
+    """snapshot_builder's Docker failures reach the reload reply as ok false."""
+    config_path = tmp_path / "plugin-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump({**CONFIG, "plugins": {"tools": PLUGIN_IMAGE}}),
+        encoding="utf-8",
+    )
+    client = mock.MagicMock()
+    break_docker(client)
+    build = snapshot_builder(
+        config_path, CredentialStore(tmp_path / "credentials"), client
+    )
+    live = LiveConfig(_snapshot(tmp_path), RecordingEgress())
+
+    with _serving(socket_path, live, build):
+        reply = request_reload(socket_path)
+
+    assert reply.ok is False
+    [error] = reply.errors
+    assert error_text in error
