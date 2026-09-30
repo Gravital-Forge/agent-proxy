@@ -50,12 +50,15 @@ decisions each entry builds on.
    iron-proxy still ignores `source_ip` (`E9`) while no config the core writes carries one.
 5. **mcp-surface** — Serve MCP over Streamable HTTP on the instance's loopback port, with bearer
    auth, `tools/list` filtered to the scope, `<plugin>_<action>` names with the manifests' input
-   schemas, the proxy's refusal errors, last-used updates, and one audit line per call.
+   schemas, the proxy's refusal errors, last-used updates, and one audit line per call. The item
+   decides what a failed audit write does to its call, and what the writer does after the failure.
 
    **Done when** a transport test starts the real server and, through an MCP client, lists only the
    granted tools; runs a test-plugin action in a real cage and gets its result; gets a refusal
    naming the proxy for a bad token, a revoked token, an ungranted action, and an input that fails
-   its schema; and finds one audit line per call.
+   its schema; and finds one audit line per call. A test makes one audit write fail, then asserts
+   the decided outcome for that call and that no later audit line carries a fragment of the failed
+   one.
 6. **git-plugin** — Build `plugins/git`: an action for every git and git LFS tool git-sidecar
    offers, `safe.directory` per root, the credential helper, and git-sidecar's rules — protected
    branches unpushable, force-push refused, the `task/` branch prefix — as `script` actions.
