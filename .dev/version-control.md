@@ -54,8 +54,7 @@ Then remove the worktree with `git_worktree` on the project route. Its branch st
 ## Constraints
 
 `task/poc` advances by the Merge job's merge commits and PM's roadmap commits. PM and the Merge job
-are the only jobs that push to it. `main` is the operator's. CI runs on pull requests and on pushes
-to `main`.
+are the only jobs that push to it. CI runs on pull requests and on pushes to `main`.
 
 Everything else resolves to the workspace root's `version-control` topic: the sidecar as the
 credentialed path to git and GitHub, the token read and the route form, `git_diff` with its `output`

@@ -12,7 +12,7 @@ runs it and when.
   declares fewer than `lint` and `test` is a gap the bar reports, never a pass.
 - The **heavy bar** is `poe test-integration` in every package, run against the agent's own rootless
   Docker daemon, which `DOCKER_HOST` names. The orchestrator alone runs it, once per Build and once
-  per Merge.
+  per Merge. A package that declares no `test-integration` is a gap the bar reports, never a pass.
 - The **full bar** is the light bar, the heavy bar, and CI green on the head commit.
 
 ## Constraints
