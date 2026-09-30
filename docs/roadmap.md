@@ -32,13 +32,16 @@ decisions each entry builds on.
    a read-only root filesystem, every capability dropped, `no-new-privileges`, a bounded tmpfs,
    credentials as environment variables or files, the concurrency cap, the timeout, the result
    shapes, and the overflow directory with its seven-day cleanup. The cage joins a network it is
-   given; this item gives it a no-proxy internal network.
+   given; this item gives it a no-proxy internal network. The runner forms a command action's argv
+   by the rule in `docs/writing-a-plugin.md`. The item decides how a positional value that begins
+   with `-` is kept from reading as an option, and whether two parameters may share one flag.
 
    **Done when**, on the agent's daemon, an unmounted path is absent; an `ro` root refuses a write;
-   an ungranted credential is in neither the environment nor the filesystem; `H1` to `H4` hold; a
-   timed-out cage leaves no container; an output over 256 KiB lands in the overflow directory and
-   the result carries only its pointer and size; a call over the cap waits; and the heavy bar's
-   output prints the cage cost median over 30 calls.
+   a positional value that begins with `-` never reaches the tool as an option; an ungranted
+   credential is in neither the environment nor the filesystem; `H1` to `H4` hold; a timed-out cage
+   leaves no container; an output over 256 KiB lands in the overflow directory and the result
+   carries only its pointer and size; a call over the cap waits; and the heavy bar's output prints
+   the cage cost median over 30 calls.
 4. **egress** — Build the egress proxies and their networks as `docs/design.md` states them, reload
    reconciliation included.
 
@@ -52,13 +55,16 @@ decisions each entry builds on.
    auth, `tools/list` filtered to the scope, `<plugin>_<action>` names with the manifests' input
    schemas, the proxy's refusal errors, last-used updates, and one audit line per call. The item
    decides what a failed audit write does to its call, and what the writer does after the failure.
+   The serving process starts the reload control server, and every Docker error in a reload's build
+   reaches the caller as a `ProxyError`.
 
    **Done when** a transport test starts the real server and, through an MCP client, lists only the
    granted tools; runs a test-plugin action in a real cage and gets its result; gets a refusal
    naming the proxy for a bad token, a revoked token, an ungranted action, and an input that fails
-   its schema; and finds one audit line per call. A test makes one audit write fail, then asserts
-   the decided outcome for that call and that no later audit line carries a fragment of the failed
-   one.
+   its schema; and finds one audit line per call. `agent-proxy reload` against the running server
+   swaps in a changed config, and a reload whose build hits a Docker error gets that error as its
+   reply. A test makes one audit write fail, then asserts the decided outcome for that call and that
+   no later audit line carries a fragment of the failed one.
 6. **git-plugin** — Build `plugins/git`: an action for every git and git LFS tool git-sidecar
    offers, `safe.directory` per root, the credential helper, and git-sidecar's rules — protected
    branches unpushable, force-push refused, the `task/` branch prefix — as `script` actions.

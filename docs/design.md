@@ -278,11 +278,11 @@ agent-proxy/
 ├── examples/             # a sample instance config
 ├── core/
 │   ├── agent-proxy/      # the core uv package (Python, FastMCP, Docker SDK)
-│   │   ├── agent_proxy/  # cli, config, auth, credentials, plugins, mcp, runner, egress, results, audit, errors, schemas
+│   │   ├── agent_proxy/  # cli, config, auth, credentials, plugins, reload, mcp, runner, egress, results, audit, errors, schemas
 │   │   └── tests/        # unit/, integration/
 │   └── docker/           # the proxy's Dockerfile, iron-proxy pin and base config, provisioning
 └── plugins/
-    ├── git/              # Dockerfile, manifest.yaml, scripts/, tests/, README.md
+    ├── git/              # Dockerfile, describe and the manifest it prints, scripts/, tests/, README.md
     └── github/
 ```
 
