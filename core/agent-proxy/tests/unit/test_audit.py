@@ -423,23 +423,37 @@ def test_a_failed_rollback_latches_the_writer(
     assert opened == []
 
 
+def _close_then_fail(fd: int) -> None:
+    """Close fd, then raise EIO as a close that reports a deferred error does."""
+    _REAL_CLOSE(fd)
+    raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+
 def test_a_log_that_cannot_be_closed_raises_audit_error(
     directory: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A close that fails after the line lands reaches the caller as an AuditError."""
     writer = AuditWriter(directory)
 
-    def close(fd: int) -> None:
-        _REAL_CLOSE(fd)
-        raise OSError(errno.EIO, os.strerror(errno.EIO))
-
-    monkeypatch.setattr("agent_proxy.audit.os.close", close)
+    monkeypatch.setattr("agent_proxy.audit.os.close", _close_then_fail)
 
     with pytest.raises(AuditError, match="Input/output error") as caught:
         writer.write(_record())
 
     assert str(directory / "audit.log") in str(caught.value)
     assert writer.available is True
+
+
+def test_a_close_failure_after_a_failed_write_keeps_the_write_error(
+    directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the write and then the close fail, the error reports the write."""
+    writer = AuditWriter(directory)
+    _fail_once_after_half(monkeypatch)
+    monkeypatch.setattr("agent_proxy.audit.os.close", _close_then_fail)
+
+    with pytest.raises(AuditError, match="No space left on device"):
+        writer.write(_record())
 
 
 def test_tail_reads_back_across_a_rotation(directory: Path) -> None:

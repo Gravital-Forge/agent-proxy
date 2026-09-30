@@ -467,6 +467,27 @@ def test_authenticate_compares_every_row(store: TokenStore, minted: list[str]) -
     assert compare.call_count == 3
 
 
+def test_authenticate_matches_and_writes_in_one_immediate_transaction(
+    store: TokenStore,
+) -> None:
+    """The match runs after BEGIN IMMEDIATE, so no revoke lands before the update."""
+    token = store.mint("ci-bot", "ci", None)
+    statements: list[str] = []
+    real_connect = sqlite3.connect
+
+    def tracing_connect(*args: object, **kwargs: object) -> sqlite3.Connection:
+        connection = real_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    with mock.patch("agent_proxy.auth.sqlite3.connect", tracing_connect):
+        store.authenticate(token)
+
+    assert statements[0].strip().upper() == "BEGIN IMMEDIATE"
+    verbs = [statement.split()[0].upper() for statement in statements]
+    assert verbs == ["BEGIN", "SELECT", "UPDATE", "COMMIT"]
+
+
 def test_verify_never_writes(store: TokenStore, path: Path) -> None:
     """Verifying a live token leaves the file and last_used_at unchanged."""
     token = store.mint("ci-bot", "ci", None)

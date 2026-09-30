@@ -130,7 +130,8 @@ class TokenStore:
     def authenticate(self, token: str) -> TokenRecord | None:
         """Verify token as verify does, and record its use on a match.
 
-        The match and the last-used time are one transaction.
+        The match and the last-used time are one transaction, which holds the
+        write lock from before the match.
 
         Returns:
             The token's record with last_used_at set to now, or None when the
@@ -141,6 +142,7 @@ class TokenStore:
         """
         used_at = self._now()
         with self._checked() as connection:
+            connection.execute("BEGIN IMMEDIATE")
             matched = _match(connection, token, used_at)
             if matched is None:
                 return None

@@ -1,5 +1,6 @@
 """Audit records written as rotating JSON lines, and the tail reader."""
 
+import contextlib
 import dataclasses
 import json
 import os
@@ -128,8 +129,13 @@ class AuditWriter:
             ) from exc
         try:
             self._write_or_roll_back(fd, line)
-        finally:
-            self._close(fd)
+        except BaseException:
+            # Linux frees the descriptor even when close fails, so the error
+            # worth raising is the write's.
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            raise
+        self._close(fd)
 
     def _close(self, fd: int) -> None:
         """Close fd.
