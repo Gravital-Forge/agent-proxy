@@ -11,6 +11,9 @@ dependencies = [
     "pyyaml>=6.0.3,<7.0.0",
 ]
 
+[project.scripts]
+agent-proxy = "agent_proxy.cli:run"
+
 [dependency-groups]
 dev = [
     "coverage>=7.16.2,<8.0.0",
