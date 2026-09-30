@@ -1,5 +1,6 @@
 """Bearer tokens stored as SHA-256 digests in one SQLite file."""
 
+import dataclasses
 import hashlib
 import hmac
 import os
@@ -32,6 +33,10 @@ class TokenNameInUseError(ProxyError):
 
 class UnknownTokenError(ProxyError):
     """No token is stored under the given name."""
+
+
+class TokenStoreError(ProxyError):
+    """The token store's file cannot be read."""
 
 
 @dataclass(frozen=True)
@@ -114,23 +119,36 @@ class TokenStore:
         """Return the record of a stored, unexpired token, or None.
 
         Every stored digest is compared, so the time taken depends on the row
-        count alone.
+        count alone. Nothing is written.
+
+        Raises:
+            TokenStoreError: the store's file cannot be read.
         """
-        presented = _digest(token)
-        with self._connect() as connection:
-            rows = connection.execute(
-                "SELECT token_sha256, name, scope, created_at, last_used_at, expires_at"
-                " FROM tokens"
-            ).fetchall()
-        matched = None
-        for stored_digest, *fields in rows:
-            if hmac.compare_digest(presented, stored_digest):
-                matched = _record(*fields)
-        if matched is None:
-            return None
-        if matched.expires_at is not None and matched.expires_at <= self._now():
-            return None
-        return matched
+        with self._checked() as connection:
+            return _match(connection, token, self._now())
+
+    def authenticate(self, token: str) -> TokenRecord | None:
+        """Verify token as verify does, and record its use on a match.
+
+        The match and the last-used time are one transaction.
+
+        Returns:
+            The token's record with last_used_at set to now, or None when the
+            token is unknown or expired.
+
+        Raises:
+            TokenStoreError: the store's file cannot be read.
+        """
+        used_at = self._now()
+        with self._checked() as connection:
+            matched = _match(connection, token, used_at)
+            if matched is None:
+                return None
+            connection.execute(
+                "UPDATE tokens SET last_used_at = ? WHERE name = ?",
+                (used_at.isoformat(), matched.name),
+            )
+        return dataclasses.replace(matched, last_used_at=used_at)
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
@@ -138,9 +156,47 @@ class TokenStore:
         with closing(sqlite3.connect(self._path, timeout=5)) as connection, connection:
             yield connection
 
+    @contextmanager
+    def _checked(self) -> Iterator[sqlite3.Connection]:
+        """Yield a connection as _connect does, raising TokenStoreError on failure.
+
+        Raises:
+            TokenStoreError: any sqlite3.Error from the file or the block.
+        """
+        try:
+            with self._connect() as connection:
+                yield connection
+        except sqlite3.Error as error:
+            raise TokenStoreError(
+                f"token store {str(self._path)!r} could not be read: {error}"
+            ) from error
+
 
 def _digest(token: str) -> bytes:
     return hashlib.sha256(token.encode()).digest()
+
+
+def _match(
+    connection: sqlite3.Connection, token: str, now: datetime
+) -> TokenRecord | None:
+    """Return the record of token when stored and unexpired at now, or None.
+
+    Every stored digest is compared, never stopping at a match.
+    """
+    presented = _digest(token)
+    rows = connection.execute(
+        "SELECT token_sha256, name, scope, created_at, last_used_at, expires_at"
+        " FROM tokens"
+    ).fetchall()
+    matched = None
+    for stored_digest, *fields in rows:
+        if hmac.compare_digest(presented, stored_digest):
+            matched = _record(*fields)
+    if matched is None:
+        return None
+    if matched.expires_at is not None and matched.expires_at <= now:
+        return None
+    return matched
 
 
 def _format_time(moment: datetime | None) -> str | None:

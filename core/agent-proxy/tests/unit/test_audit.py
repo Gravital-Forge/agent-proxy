@@ -34,6 +34,7 @@ FIELD_NAMES = [
 ]
 
 _REAL_WRITE = os.write
+_REAL_CLOSE = os.close
 
 
 @pytest.fixture
@@ -420,6 +421,25 @@ def test_a_failed_rollback_latches_the_writer(
 
     assert writer.available is False
     assert opened == []
+
+
+def test_a_log_that_cannot_be_closed_raises_audit_error(
+    directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A close that fails after the line lands reaches the caller as an AuditError."""
+    writer = AuditWriter(directory)
+
+    def close(fd: int) -> None:
+        _REAL_CLOSE(fd)
+        raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+    monkeypatch.setattr("agent_proxy.audit.os.close", close)
+
+    with pytest.raises(AuditError, match="Input/output error") as caught:
+        writer.write(_record())
+
+    assert str(directory / "audit.log") in str(caught.value)
+    assert writer.available is True
 
 
 def test_tail_reads_back_across_a_rotation(directory: Path) -> None:

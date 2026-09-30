@@ -13,12 +13,16 @@ from agent_proxy.auth import (
     TokenNameInUseError,
     TokenRecord,
     TokenStore,
+    TokenStoreError,
     UnknownTokenError,
 )
 from agent_proxy.config import InvalidNameError
 from agent_proxy.errors import ProxyError
 
 MINTED_AT = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
+LATER = MINTED_AT + timedelta(minutes=5)
+UNKNOWN_TOKEN = "apx_" + "x" * 43
+NOT_SQLITE = b"this file is not a SQLite database\n" * 8
 
 
 class Clock:
@@ -391,3 +395,102 @@ def test_verify_compares_every_remaining_row_for_a_revoked_token(
     store.revoke("alpha")
 
     assert_one_digest_comparison_per_row(store, minted[0], rows=2)
+
+
+def _last_used(store: TokenStore, name: str) -> datetime | None:
+    [record] = [record for record in store.records() if record.name == name]
+    return record.last_used_at
+
+
+def test_token_store_error_is_a_proxy_error() -> None:
+    """TokenStoreError subclasses ProxyError."""
+    assert issubclass(TokenStoreError, ProxyError)
+
+
+def test_authenticate_returns_the_record_with_last_used_at_set(
+    store: TokenStore, clock: Clock
+) -> None:
+    """A live token's record comes back with last_used_at at the clock's time."""
+    token = store.mint("ci-bot", "ci", None)
+    clock.moment = LATER
+
+    assert store.authenticate(token) == TokenRecord(
+        name="ci-bot",
+        scope="ci",
+        created_at=MINTED_AT,
+        last_used_at=LATER,
+        expires_at=None,
+    )
+
+
+def test_authenticate_stores_last_used_at(store: TokenStore, clock: Clock) -> None:
+    """The last-used time is written to the store."""
+    token = store.mint("ci-bot", "ci", None)
+    clock.moment = LATER
+
+    store.authenticate(token)
+
+    assert _last_used(store, "ci-bot") == LATER
+
+
+def test_authenticate_of_an_unknown_token_returns_none_and_writes_nothing(
+    store: TokenStore, path: Path
+) -> None:
+    """An unknown token neither authenticates nor changes the file."""
+    store.mint("ci-bot", "ci", None)
+    before = path.read_bytes()
+
+    assert store.authenticate(UNKNOWN_TOKEN) is None
+    assert path.read_bytes() == before
+    assert _last_used(store, "ci-bot") is None
+
+
+def test_authenticate_of_an_expired_token_returns_none_and_writes_nothing(
+    store: TokenStore, path: Path, clock: Clock
+) -> None:
+    """An expired token neither authenticates nor records its use."""
+    token = store.mint("ci-bot", "ci", timedelta(hours=1))
+    clock.moment = MINTED_AT + timedelta(hours=2)
+    before = path.read_bytes()
+
+    assert store.authenticate(token) is None
+    assert path.read_bytes() == before
+    assert _last_used(store, "ci-bot") is None
+
+
+def test_authenticate_compares_every_row(store: TokenStore, minted: list[str]) -> None:
+    """A match on the first row does not end authenticate's comparisons."""
+    compare = mock.Mock(wraps=hmac.compare_digest)
+    with mock.patch("agent_proxy.auth.hmac.compare_digest", compare):
+        store.authenticate(minted[0])
+
+    assert compare.call_count == 3
+
+
+def test_verify_never_writes(store: TokenStore, path: Path) -> None:
+    """Verifying a live token leaves the file and last_used_at unchanged."""
+    token = store.mint("ci-bot", "ci", None)
+    before = path.read_bytes()
+
+    verified = store.verify(token)
+
+    assert verified is not None
+    assert verified.last_used_at is None
+    assert path.read_bytes() == before
+    assert _last_used(store, "ci-bot") is None
+
+
+@pytest.mark.parametrize("method", ["verify", "authenticate"])
+def test_an_unreadable_store_raises_token_store_error(
+    store: TokenStore, path: Path, method: str
+) -> None:
+    """A file overwritten with bytes that are not SQLite raises TokenStoreError."""
+    token = store.mint("ci-bot", "ci", None)
+    path.write_bytes(NOT_SQLITE)
+
+    with pytest.raises(TokenStoreError) as caught:
+        getattr(store, method)(token)
+
+    message = str(caught.value)
+    assert message.startswith(f"token store {str(path)!r} could not be read: ")
+    assert token not in message

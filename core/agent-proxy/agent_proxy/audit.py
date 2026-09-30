@@ -74,8 +74,8 @@ class AuditWriter:
         byte of it.
 
         Raises:
-            AuditError: the writer is latched, the log cannot be rotated, or
-                the log cannot take the line.
+            AuditError: the writer is latched, or the log cannot be rotated,
+                take the line, or be closed.
         """
         line = f"{_render_line(record)}\n".encode()
         with self._lock:
@@ -118,7 +118,7 @@ class AuditWriter:
         """Append line to the log, truncating it away when the write fails.
 
         Raises:
-            AuditError: the log cannot be opened or cannot take the line.
+            AuditError: the log cannot be opened, take the line, or be closed.
         """
         try:
             fd = os.open(self._path, _LOG_FLAGS, _LOG_MODE)
@@ -129,7 +129,20 @@ class AuditWriter:
         try:
             self._write_or_roll_back(fd, line)
         finally:
+            self._close(fd)
+
+    def _close(self, fd: int) -> None:
+        """Close fd.
+
+        Raises:
+            AuditError: the close fails.
+        """
+        try:
             os.close(fd)
+        except OSError as exc:
+            raise AuditError(
+                f"audit log {str(self._path)!r} cannot be closed: {exc}"
+            ) from exc
 
     def _write_or_roll_back(self, fd: int, line: bytes) -> None:
         """Write line to fd, cutting fd back to its prior size on failure.
