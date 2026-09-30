@@ -40,13 +40,13 @@ DESCRIBE_TIMEOUT_SECONDS = 30
 DESCRIBE_STDOUT_LIMIT = 1024 * 1024
 STDERR_EXCERPT_LIMIT = 1024
 CONTAINER_LABELS: Mapping[str, str] = types.MappingProxyType({})
-_DOCKER_FAILURES = (
+DOCKER_FAILURES = (
     docker.errors.DockerException,
     requests.exceptions.RequestException,
 )
 # Over a Unix socket the SDK's wait raises ConnectionError on timeout, not the
 # ReadTimeout its docstring names; another transport may raise the latter.
-_WAIT_TIMEOUTS = (
+WAIT_TIMEOUTS = (
     requests.exceptions.ConnectionError,
     requests.exceptions.ReadTimeout,
 )
@@ -477,7 +477,7 @@ def ensure_image(client: DockerClient, reference: str) -> None:
         client.images.get(reference)
     except docker.errors.ImageNotFound:
         _pull(client, reference)
-    except _DOCKER_FAILURES as exc:
+    except DOCKER_FAILURES as exc:
         raise PluginImageError(
             f"image {reference!r} could not be looked up: {exc}"
         ) from exc
@@ -505,7 +505,7 @@ def describe(client: DockerClient, image: str) -> bytes:
 def _pull(client: DockerClient, reference: str) -> None:
     try:
         client.images.pull(reference)
-    except _DOCKER_FAILURES as exc:
+    except DOCKER_FAILURES as exc:
         raise PluginImageError(
             f"image {reference!r} could not be pulled: {exc}"
         ) from exc
@@ -524,7 +524,7 @@ def _create_describe_container(client: DockerClient, image: str) -> Container:
         )
     except docker.errors.ImageNotFound as exc:
         raise PluginImageError(f"image {image!r} is not present") from exc
-    except _DOCKER_FAILURES as exc:
+    except DOCKER_FAILURES as exc:
         raise PluginImageError(
             f"image {image!r}: the describe container could not be created: {exc}"
         ) from exc
@@ -541,7 +541,7 @@ def _run_describe(container: Container, image: str) -> bytes:
                 f"stderr {excerpt!r}"
             )
         stdout = container.logs(stdout=True, stderr=False)
-    except _DOCKER_FAILURES as exc:
+    except DOCKER_FAILURES as exc:
         raise PluginImageError(f"image {image!r}: describe failed: {exc}") from exc
     if len(stdout) > DESCRIBE_STDOUT_LIMIT:
         raise PluginImageError(
@@ -554,7 +554,7 @@ def _run_describe(container: Container, image: str) -> bytes:
 def _wait(container: Container, image: str) -> int:
     try:
         result = container.wait(timeout=DESCRIBE_TIMEOUT_SECONDS)
-    except _WAIT_TIMEOUTS as exc:
+    except WAIT_TIMEOUTS as exc:
         raise PluginImageError(
             f"image {image!r}: describe did not exit within "
             f"{DESCRIBE_TIMEOUT_SECONDS} seconds"
@@ -570,7 +570,7 @@ def _stderr_excerpt(container: Container) -> str:
 def _remove_container(container: Container, image: str) -> None:
     try:
         container.remove(force=True)
-    except _DOCKER_FAILURES as exc:
+    except DOCKER_FAILURES as exc:
         raise PluginImageError(
             f"image {image!r}: the describe container could not be removed: {exc}"
         ) from exc

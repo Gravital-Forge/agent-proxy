@@ -1,17 +1,49 @@
 """The cage runner: one action call in one short-lived, hardened container."""
 
 import json
-from collections.abc import Mapping, Sequence
+import re
+import socket
+import threading
+import time
+import types
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import cast
 
 import docker.types
+from docker import DockerClient
+from docker.models.containers import Container
 from jsonschema import Draft202012Validator
 
-from agent_proxy.config import EnvMount, FileMount, Root
+from agent_proxy.config import EnvMount, FileMount, Grant, Root
 from agent_proxy.credentials import CredentialStore, UnknownCredentialError
 from agent_proxy.errors import ProxyError
-from agent_proxy.plugins import CommandAction, ScriptAction
+from agent_proxy.plugins import (
+    DOCKER_FAILURES,
+    WAIT_TIMEOUTS,
+    CommandAction,
+    ScriptAction,
+)
+from agent_proxy.results import (
+    CALL_ID_PATTERN,
+    CapturedStream,
+    Stream,
+    capture_stream,
+    command_content,
+    script_content,
+)
+
+CONTAINER_LABELS: Mapping[str, str] = types.MappingProxyType({})
+TMPFS_PATH = "/tmp"  # noqa: S108 - the path is inside the cage, on its own tmpfs
+TMPFS_OPTIONS = "rw,size=64m"
+CONTAINER_USER = "0:0"
+LOG_DRIVER = "json-file"
+_STDIN_ATTACH_PARAMS: Mapping[str, int] = types.MappingProxyType(
+    {"stdin": 1, "stream": 1}
+)
 
 
 class RunnerError(ProxyError):
@@ -142,7 +174,8 @@ def cage_environment(
 
 
 def _environment_value(name: str, store: CredentialStore) -> str:
-    stored_bytes = _stored_path(name, store).read_bytes()
+    with _known_credentials():
+        stored_bytes = store.read(name)
     try:
         value = stored_bytes.decode("utf-8")
     except UnicodeDecodeError:
@@ -178,22 +211,365 @@ def cage_mounts(
         )
         for root in roots
     ]
-    # The SDK serialises a mount with json.dumps, which refuses a Path.
-    credential_mounts = [
-        docker.types.Mount(
-            target=mount.file,
-            source=str(_stored_path(name, store)),
-            type="bind",
-            read_only=True,
-        )
-        for name, mount in credentials.items()
-        if isinstance(mount, FileMount)
-    ]
+    with _known_credentials():
+        # The SDK serialises a mount with json.dumps, which refuses a Path.
+        credential_mounts = [
+            docker.types.Mount(
+                target=mount.file,
+                source=str(store.path(name)),
+                type="bind",
+                read_only=True,
+            )
+            for name, mount in credentials.items()
+            if isinstance(mount, FileMount)
+        ]
     return root_mounts + credential_mounts
 
 
-def _stored_path(name: str, store: CredentialStore) -> Path:
+@contextmanager
+def _known_credentials() -> Iterator[None]:
+    """Turn the store's refusal of an unknown name into a CredentialError."""
     try:
-        return store.path(name)
+        yield
     except UnknownCredentialError as error:
         raise CredentialError(str(error)) from error
+
+
+class CageLimiter:
+    """The count of an instance's running cages, shared by every call."""
+
+    def __init__(self) -> None:
+        """Start with no cage running."""
+        self._condition = threading.Condition()
+        self._running = 0
+
+    @contextmanager
+    def slot(self, limit: int) -> Iterator[None]:
+        """Wait until fewer than limit cages run, then count one in for the body.
+
+        The wait has no bound. The cage is counted out when the body ends, also
+        when it raises.
+        """
+        with self._condition:
+            self._condition.wait_for(lambda: self._running < limit)
+            self._running += 1
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._running -= 1
+                # Each call brings its own limit, so the waiter one notify would
+                # wake may still be over its limit while another could go.
+                self._condition.notify_all()
+
+
+@dataclass(frozen=True)
+class CageCall:
+    """One action call, and what the instance's config gives it."""
+
+    call_id: str
+    image: str
+    action: CommandAction | ScriptAction
+    grant: Grant
+    arguments: Mapping[str, object]
+    network: str
+    overflow_dir: str
+    max_cages: int
+
+
+@dataclass(frozen=True)
+class Outcome:
+    """What a cage produced: its result, and what an audit record needs of it."""
+
+    content: Mapping[str, object]
+    script_failed: bool
+    exit_code: int
+    duration_ms: int
+    stdout_bytes: int
+    stderr_bytes: int
+    truncated: bool
+
+
+class CageRunner:
+    """Runs each action call in a cage of its own, under the instance's cap."""
+
+    def __init__(
+        self, client: DockerClient, store: CredentialStore, limiter: CageLimiter
+    ) -> None:
+        """Hold the daemon client, the credential store, and the instance's limiter."""
+        self._client = client
+        self._store = store
+        self._limiter = limiter
+
+    def run(self, call: CageCall) -> Outcome:
+        """Run call in a new cage, remove the cage, and return what it produced.
+
+        Every refusal of the call ID, input, roots, or credentials comes before
+        the call takes a slot. The slot is held until the cage is removed.
+
+        Raises:
+            InputError: the call ID or the input is refused.
+            RootError: a root's path holds a symbolic link.
+            CredentialError: a granted credential is not stored or cannot be
+                placed in the cage.
+            CageStartError: the cage cannot be created, attached, or started.
+            CageTimeoutError: the cage runs past its timeout.
+            CageFailedError: the cage fails after it starts, or cannot be removed.
+            OverflowWriteError: a stream passes the cap and its overflow file
+                cannot be written.
+        """
+        setup = _set_up(call, self._store)
+        with self._limiter.slot(call.max_cages):
+            container = _create(self._client, call, setup)
+            try:
+                return _run_container(container, call, setup)
+            finally:
+                _remove(container, call.action.name)
+
+
+@dataclass(frozen=True)
+class _CageSetup:
+    entrypoint: tuple[str, ...]
+    stdin: bytes | None
+    environment: Mapping[str, str]
+    mounts: Sequence[docker.types.Mount]
+
+
+@dataclass(frozen=True)
+class _Deadline:
+    action: str
+    timeout: timedelta
+    started: float
+
+    def remaining(self) -> float:
+        """Return the seconds left before the timeout.
+
+        Raises:
+            CageTimeoutError: no time is left.
+        """
+        left = self.started + self.timeout.total_seconds() - time.monotonic()
+        if left <= 0:
+            raise self.expired()
+        return left
+
+    def expired(self) -> CageTimeoutError:
+        """Return the error that refuses the call for running past its timeout."""
+        return CageTimeoutError(
+            f"action {self.action!r} did not finish within its timeout of "
+            f"{self.timeout.total_seconds():g} seconds"
+        )
+
+    def elapsed_ms(self) -> int:
+        """Return the whole milliseconds since the cage started."""
+        return round((time.monotonic() - self.started) * 1000)
+
+
+@dataclass(frozen=True)
+class _StdinFeed:
+    raw: socket.socket
+    payload: bytes
+
+    def send(self, deadline: _Deadline) -> None:
+        """Send the payload, then end of file, within the time deadline leaves.
+
+        Raises:
+            CageTimeoutError: the time runs out before or while sending.
+        """
+        self.raw.settimeout(deadline.remaining())
+        try:
+            self.raw.sendall(self.payload)
+            self.raw.shutdown(socket.SHUT_WR)
+        except TimeoutError as exc:
+            raise deadline.expired() from exc
+        except (BrokenPipeError, ConnectionResetError):
+            # The script stopped reading its input; its exit tells the rest.
+            return
+
+
+def _set_up(call: CageCall, store: CredentialStore) -> _CageSetup:
+    """Check the call and return what its cage is created with.
+
+    Raises:
+        InputError: the call ID or the input is refused.
+        RootError: a root's path holds a symbolic link.
+        CredentialError: a granted credential is not stored or cannot be placed.
+    """
+    if re.fullmatch(CALL_ID_PATTERN, call.call_id) is None:
+        raise InputError(f"call ID {call.call_id!r} does not match {CALL_ID_PATTERN!r}")
+    validate_input(call.action, call.arguments)
+    if isinstance(call.action, CommandAction):
+        entrypoint = form_argv(call.action, call.arguments)
+        stdin = None
+    else:
+        entrypoint = (call.action.executable,)
+        stdin = script_stdin(call.arguments)
+    check_roots(call.grant.roots)
+    credentials = call.grant.credentials
+    return _CageSetup(
+        entrypoint=entrypoint,
+        stdin=stdin,
+        environment=cage_environment(credentials, store),
+        mounts=cage_mounts(call.grant.roots, credentials, store),
+    )
+
+
+def _create(client: DockerClient, call: CageCall, setup: _CageSetup) -> Container:
+    """Create the call's cage; its entrypoint also clears the image's command.
+
+    Raises:
+        CageStartError: Docker refuses the create, an absent image included.
+    """
+    try:
+        return client.containers.create(
+            call.image,
+            entrypoint=list(setup.entrypoint),
+            stdin_open=setup.stdin is not None,
+            user=CONTAINER_USER,
+            read_only=True,
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges"],
+            tmpfs={TMPFS_PATH: TMPFS_OPTIONS},
+            mounts=list(setup.mounts),
+            environment=dict(setup.environment),
+            network=call.network,
+            labels=dict(CONTAINER_LABELS),
+            log_config=docker.types.LogConfig(type=LOG_DRIVER, config={}),
+        )
+    except DOCKER_FAILURES as exc:
+        raise CageStartError(
+            f"image {call.image!r}: the cage could not be created: {exc}"
+        ) from exc
+
+
+def _run_container(container: Container, call: CageCall, setup: _CageSetup) -> Outcome:
+    with _attach_stdin(container, setup.stdin, call.image) as feed:
+        deadline = _start(container, call)
+        if feed is not None:
+            feed.send(deadline)
+        exit_code = _wait(container, deadline)
+        duration_ms = deadline.elapsed_ms()
+    stdout = _capture(container, call, "stdout")
+    stderr = _capture(container, call, "stderr")
+    return _outcome(call.action, exit_code, duration_ms, stdout, stderr)
+
+
+@contextmanager
+def _attach_stdin(
+    container: Container, payload: bytes | None, image: str
+) -> Iterator[_StdinFeed | None]:
+    """Yield a feed attached to the cage's stdin, or None with no payload.
+
+    Raises:
+        CageStartError: the attach fails.
+    """
+    if payload is None:
+        yield None
+        return
+    try:
+        attached = container.attach_socket(params=dict(_STDIN_ATTACH_PARAMS))
+    except DOCKER_FAILURES as exc:
+        raise CageStartError(
+            f"image {image!r}: the cage's stdin could not be attached: {exc}"
+        ) from exc
+    # attach_socket returns a SocketIO; only its raw socket can shut down the
+    # write side, which is the one way to give the script end of file.
+    raw = attached._sock
+    try:
+        yield _StdinFeed(raw=raw, payload=payload)
+    finally:
+        raw.close()
+
+
+def _start(container: Container, call: CageCall) -> _Deadline:
+    """Start the cage and return its deadline, timed from the start.
+
+    Raises:
+        CageStartError: the start fails.
+    """
+    try:
+        container.start()
+    except DOCKER_FAILURES as exc:
+        raise CageStartError(
+            f"image {call.image!r}: the cage could not be started: {exc}"
+        ) from exc
+    return _Deadline(
+        action=call.action.name,
+        timeout=call.grant.timeout or call.action.timeout,
+        started=time.monotonic(),
+    )
+
+
+def _wait(container: Container, deadline: _Deadline) -> int:
+    """Wait for the cage to exit within the time left, and return its exit code.
+
+    Raises:
+        CageTimeoutError: no time is left, or the wait outlasts it.
+        CageFailedError: the wait fails otherwise.
+    """
+    seconds = deadline.remaining()
+    try:
+        result = container.wait(timeout=seconds)
+    except WAIT_TIMEOUTS as exc:
+        raise deadline.expired() from exc
+    except DOCKER_FAILURES as exc:
+        raise CageFailedError(
+            f"action {deadline.action!r}: waiting for the cage failed: {exc}"
+        ) from exc
+    return result["StatusCode"]
+
+
+def _capture(container: Container, call: CageCall, stream: Stream) -> CapturedStream:
+    """Read one stream from the exited cage's log.
+
+    Raises:
+        CageFailedError: the logs call fails.
+        OverflowWriteError: the stream passes the cap and its overflow file
+            cannot be written.
+    """
+    try:
+        chunks = container.logs(
+            stdout=stream == "stdout", stderr=stream == "stderr", stream=True
+        )
+        return capture_stream(chunks, call.overflow_dir, call.call_id, stream)
+    except DOCKER_FAILURES as exc:
+        raise CageFailedError(
+            f"action {call.action.name!r}: the cage's {stream} could not be read: {exc}"
+        ) from exc
+
+
+def _outcome(
+    action: CommandAction | ScriptAction,
+    exit_code: int,
+    duration_ms: int,
+    stdout: CapturedStream,
+    stderr: CapturedStream,
+) -> Outcome:
+    if isinstance(action, ScriptAction):
+        content, script_failed = script_content(
+            action.output_schema, exit_code, stdout, stderr
+        )
+    else:
+        content, script_failed = command_content(exit_code, stdout, stderr), False
+    return Outcome(
+        content=content,
+        script_failed=script_failed,
+        exit_code=exit_code,
+        duration_ms=duration_ms,
+        stdout_bytes=stdout.size,
+        stderr_bytes=stderr.size,
+        truncated=stdout.file is not None or stderr.file is not None,
+    )
+
+
+def _remove(container: Container, action_name: str) -> None:
+    """Force-remove the cage, running or not.
+
+    Raises:
+        CageFailedError: the removal fails.
+    """
+    try:
+        container.remove(force=True)
+    except DOCKER_FAILURES as exc:
+        raise CageFailedError(
+            f"action {action_name!r}: cage {container.id!r} could not be removed: {exc}"
+        ) from exc
