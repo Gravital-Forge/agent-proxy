@@ -118,10 +118,11 @@ replaces the image's entrypoint and command:
 The root filesystem is read-only. Write scratch files under `/tmp`, a small tmpfs.
 
 A script succeeds when it exits 0 and prints on stdout one JSON object that its `output_schema`
-validates. The call then returns that object. Otherwise the script has failed, and the call returns
-what a command action returns: the exit code, stdout, and stderr. A stdout over the output cap goes
-to an overflow file, so a script whose output passes the cap fails. `docs/design.md` gives the cap
-and the result forms under "Results".
+validates. That stdout keeps the rules the manifest keeps: UTF-8, no key repeated in one object, and
+every number finite. The call then returns that object. Otherwise the script has failed, and the
+call returns what a command action returns: the exit code, stdout, and stderr. A stdout over the
+output cap goes to an overflow file, so a script whose output passes the cap fails. `docs/design.md`
+gives the cap and the result forms under "Results".
 
 ## Checking a manifest
 

@@ -15,8 +15,9 @@ The core is the uv package in `core/agent-proxy/`, placed as `docs/design.md` se
   and none of them touches Docker.
 - `core/agent-proxy/tests/integration/` holds the integration tests. They run on the Docker daemon
   that `DOCKER_HOST` names. `conftest.py` there builds the test plugin, pushes it to a `registry:3`
-  container that keeps its storage on a tmpfs, and removes the local image, so a test pulls the
-  plugin by digest.
+  container that keeps its storage on a tmpfs, and removes the local image, so a plugin test pulls
+  the plugin by digest. For the cage tests, it also builds the test plugin locally under its own
+  tag, and creates an internal network that each of their cages joins.
 - `core/agent-proxy/tests/test-plugin/` holds the source of the test plugin image.
 
 ## Modules
@@ -38,21 +39,22 @@ token, and credential names, and `check_name` refuses a name that does not match
 `InvalidNameError`. `PLUGIN_NAME_PATTERN` governs plugin names. `parse_duration` turns a duration
 such as `120s` or `7d` into a `timedelta`, and refuses anything else with `DurationError`.
 
-`load_config` reads one YAML file and returns an `InstanceConfig`: the agent tree, the plugins
-pinned by image digest, and the scopes with their grants. `read_yaml` parses the file with a safe
-loader that also refuses a key repeated in one mapping and a YAML merge key (`<<`). The pydantic
-models refuse unknown fields and check each field's form. The `InstanceConfig` validator then checks
-the rules that span fields, such as a root lying inside the agent tree. `docs/design.md` sets the
-validation rules under "Config". The models and the validator together check each rule that the file
-and the credential store can settle. For example, the models make a grant state `roots`, `domains`,
-and `credentials`, because `Grant` gives none of them a default.
+`load_config` reads one YAML file and returns an `InstanceConfig`: the agent tree, the overflow
+directory, the cap on running cages, the plugins pinned by image digest, and the scopes with their
+grants. `read_yaml` parses the file with a safe loader that also refuses a key repeated in one
+mapping and a YAML merge key (`<<`). The pydantic models refuse unknown fields and check each
+field's form. The `InstanceConfig` validator then checks the rules that span fields, such as a root
+lying inside the agent tree. `docs/design.md` sets the validation rules under "Config". The models
+and the validator together check each rule that the file and the credential store can settle. For
+example, the models make a grant state `roots`, `domains`, and `credentials`, because `Grant` gives
+none of them a default.
 
 Two fields of `InstanceConfig` serve the cage runner. `max_cages` is the instance's cap on running
 cages, an integer of 1 or more; `docs/design.md` gives the cap under "The cage". `overflow_dir` is
 the directory that takes a stream over the output cap; `docs/design.md` gives it under "Results". It
-is a clean absolute path inside the agent tree, and it must not equal the agent tree. A grant's root
-must not equal the overflow directory, contain it, or lie inside it, so no cage mounts it and the
-sweep never reaches a root.
+is an absolute path with no `..` segment, inside the agent tree, and it must not equal the agent
+tree. A grant's root must not equal the overflow directory, contain it, or lie inside it, so no cage
+mounts it and the sweep never reaches a root.
 
 A config that fails raises `ConfigError`, which holds one message per failure. Each message names
 the file, and a failure inside the file also names its location.
@@ -191,10 +193,10 @@ the wait for the exit. After the exit, the run reads stdout and stderr from the 
 script failed, the exit code, the duration in milliseconds, the size of each stream, and whether a
 stream overflowed.
 
-Every refusal and failure is a `RunnerError`. A create, an attach of stdin, or a start that fails
-raises `CageStartError`. A cage past its timeout raises `CageTimeoutError`. Any other failure after
-the start, a failed removal included, raises `CageFailedError`. An `OverflowWriteError` passes
-through unchanged.
+Every refusal and failure that `runner.py` raises itself is a `RunnerError`. A create, an attach of
+stdin, or a start that fails raises `CageStartError`. A cage past its timeout raises
+`CageTimeoutError`. Any other failure after the start, a failed removal included, raises
+`CageFailedError`. An `OverflowWriteError` passes through unchanged.
 
 `CageLimiter` counts the running cages of an instance, and every call shares one. `slot` waits with
 no bound until fewer cages run than the limit it is given. Each call brings its own limit, so calls
@@ -258,10 +260,10 @@ the file comes from under "Config".
 An unset `AGENT_PROXY_STATE_DIR` or `AGENT_PROXY_CONFIG`, or a state directory that does not exist,
 is a refusal that names the variable.
 
-The cage runner reaches two places beyond the stores. It bind-mounts each credential that a grant
-gives as a file from its file in the credential store's directory, read-only. It writes each
-overflow file under the config's `overflow_dir`, in the agent's tree, and the sweep removes old
-entries there. The runner creates neither directory.
+The cage runner reaches into the credential store's directory, and into one place outside the state
+directory. It bind-mounts each credential that a grant gives as a file, read-only, from its file in
+the credential store. It writes each overflow file under the config's `overflow_dir`, in the agent's
+tree, and the sweep removes old entries there. The runner creates neither directory.
 
 `manifest check` reaches the Docker daemon through `DOCKER_HOST`, which the Docker SDK reads from
 the environment. With `DOCKER_HOST` unset, the SDK uses its default socket. A daemon it cannot reach
