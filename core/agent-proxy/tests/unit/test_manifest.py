@@ -15,6 +15,7 @@ from agent_proxy.config import (
 )
 from agent_proxy.errors import ProxyError
 from agent_proxy.plugins import (
+    FLAG_PATTERN,
     CommandAction,
     Manifest,
     ManifestError,
@@ -26,11 +27,17 @@ from agent_proxy.plugins import (
 OMIT = object()
 ECHO = "$.actions.echo"
 REPORT = "$.actions.report"
+ECHO_PROPERTIES = {"loud": {"type": "boolean"}, "message": {"type": "string"}}
 ECHO_INPUT_SCHEMA = {
     "type": "object",
-    "properties": {"loud": {"type": "boolean"}, "message": {"type": "string"}},
+    "properties": ECHO_PROPERTIES,
     "additionalProperties": False,
 }
+ARGS_PROPERTY = {"type": "array", "items": {"type": "string"}}
+INTEGER_ARGS_PROPERTY = {"type": "array", "items": {"type": "integer"}}
+LOUD = {"name": "loud", "as": "flag", "flag": "--loud"}
+MESSAGE = {"name": "message", "as": "positional"}
+FILE_RULE = "must be an absolute path beneath '/run/credentials/' with no '..' segment"
 REPORT_OUTPUT_SCHEMA = {
     "type": "object",
     "properties": {"score": {"type": "number", "maximum": 1.5}},
@@ -60,10 +67,7 @@ def _command(**overrides: object) -> dict[str, object]:
         "credentials": [{"env": "GH_TOKEN"}, {"file": "/run/credentials/ssh-key"}],
         "timeout": "30s",
         "argv": ["echo"],
-        "parameters": [
-            {"name": "loud", "as": "flag", "flag": "--loud"},
-            {"name": "message", "as": "positional"},
-        ],
+        "parameters": [LOUD, MESSAGE],
         "passthrough_args": False,
     } | overrides
     return {key: value for key, value in members.items() if value is not OMIT}
@@ -80,6 +84,20 @@ def _script(**overrides: object) -> dict[str, object]:
         "output_schema": REPORT_OUTPUT_SCHEMA,
     } | overrides
     return {key: value for key, value in members.items() if value is not OMIT}
+
+
+def _echo_input(**properties: object) -> dict[str, object]:
+    """Return echo's input schema with properties added or replaced."""
+    return ECHO_INPUT_SCHEMA | {"properties": ECHO_PROPERTIES | properties}
+
+
+def _passthrough_command(**overrides: object) -> dict[str, object]:
+    """Return a valid command action that declares pass-through args."""
+    passthrough: dict[str, object] = {
+        "input_schema": _echo_input(args=ARGS_PROPERTY),
+        "passthrough_args": True,
+    }
+    return _command(**(passthrough | overrides))
 
 
 def _echo(**overrides: object) -> dict[str, object]:
@@ -119,12 +137,13 @@ def test_schema_is_a_valid_draft_2020_12_schema() -> None:
         (("properties", "actions", "propertyNames", "pattern"), ACTION_NAME_PATTERN),
         (("$defs", "timeout", "pattern"), DURATION_PATTERN),
         (("$defs", "credential", "properties", "env", "pattern"), ENV_NAME_PATTERN),
+        (("$defs", "parameter", "properties", "flag", "pattern"), FLAG_PATTERN),
     ],
 )
 def test_schema_repeats_each_shared_pattern_exactly(
     path: tuple[str, ...], constant: str
 ) -> None:
-    """Each pattern the schema copies from config.py equals its constant."""
+    """Each pattern the schema shares with the Python code equals its constant."""
     node = _schema()
     for key in path:
         assert isinstance(node, dict)
@@ -493,6 +512,237 @@ def test_parse_manifest_reports_every_refused_timeout() -> None:
         f"{ECHO}.timeout: duration must match {DURATION_PATTERN!r}, got '30s\\n'",
         f"{REPORT}.timeout: duration must fit in a timedelta, got '1000000000d'",
     )
+
+
+RULE_CASES = [
+    pytest.param(
+        {"actions": {"echo\n": _command()}},
+        f"$.actions: action name must match {ACTION_NAME_PATTERN!r}, got 'echo\\n'",
+        id="action-name-trailing-newline",
+    ),
+    pytest.param(
+        _echo(credentials=[{"env": "GH_TOKEN\n"}]),
+        f"{ECHO}.credentials[0].env: env must match {ENV_NAME_PATTERN!r},"
+        " got 'GH_TOKEN\\n'",
+        id="env-trailing-newline",
+    ),
+    pytest.param(
+        _echo(parameters=[LOUD | {"flag": "--loud\n"}, MESSAGE]),
+        f"{ECHO}.parameters[0].flag: flag must match {FLAG_PATTERN!r}, got '--loud\\n'",
+        id="flag-trailing-newline",
+    ),
+    pytest.param(
+        _echo(credentials=[{"file": "/run/credentials/../etc/passwd"}]),
+        f"{ECHO}.credentials[0].file: file {FILE_RULE},"
+        " got '/run/credentials/../etc/passwd'",
+        id="file-parent-segment",
+    ),
+    pytest.param(
+        _echo(credentials=[{"file": "/run/credentials/"}]),
+        f"{ECHO}.credentials[0].file: file {FILE_RULE}, got '/run/credentials/'",
+        id="file-credentials-directory",
+    ),
+    pytest.param(
+        _echo(input_schema=_echo_input(message={"type": "strin"})),
+        f"{ECHO}.input_schema.properties.message.type:"
+        " 'strin' is not valid under any of the given schemas",
+        id="command-input-schema-invalid",
+    ),
+    pytest.param(
+        _report(input_schema={"type": "object", "required": "score"}),
+        f"{REPORT}.input_schema.required: 'score' is not of type 'array'",
+        id="script-input-schema-invalid",
+    ),
+    pytest.param(
+        _report(
+            output_schema={"type": "object", "properties": {"score": {"type": "strin"}}}
+        ),
+        f"{REPORT}.output_schema.properties.score.type:"
+        " 'strin' is not valid under any of the given schemas",
+        id="output-schema-invalid",
+    ),
+    pytest.param(
+        _echo(input_schema=ECHO_INPUT_SCHEMA | {"additionalProperties": True}),
+        f"{ECHO}.input_schema.additionalProperties: a command action's input_schema"
+        " must set additionalProperties to false, got True",
+        id="additional-properties-true",
+    ),
+    pytest.param(
+        _echo(input_schema={"type": "object", "properties": ECHO_PROPERTIES}),
+        f"{ECHO}.input_schema.additionalProperties: a command action's input_schema"
+        " must set additionalProperties to false, got None",
+        id="additional-properties-unset",
+    ),
+    pytest.param(
+        _echo(
+            parameters=[
+                LOUD,
+                MESSAGE,
+                {"name": "quiet", "as": "flag", "flag": "--quiet"},
+            ]
+        ),
+        f"{ECHO}.parameters[2].name: parameter name must be a property of"
+        " input_schema, got 'quiet'",
+        id="parameter-not-a-property",
+    ),
+    pytest.param(
+        _echo(parameters=[LOUD, MESSAGE, MESSAGE]),
+        f"{ECHO}.parameters[2].name: parameter name must not repeat an earlier"
+        " parameter's, got 'message'",
+        id="parameter-repeated",
+    ),
+    pytest.param(
+        _echo(parameters=[LOUD]),
+        f"{ECHO}.input_schema.properties: each property other than 'args' must be"
+        " a parameter, got 'message'",
+        id="property-not-a-parameter",
+    ),
+    pytest.param(
+        _echo(passthrough_args=True),
+        f"{ECHO}.passthrough_args: passthrough_args must be false when"
+        " input_schema has no 'args' property, got True",
+        id="passthrough-without-args",
+    ),
+    pytest.param(
+        _echo(input_schema=_echo_input(args=ARGS_PROPERTY)),
+        f"{ECHO}.passthrough_args: passthrough_args must be true when"
+        " input_schema has an 'args' property, got False",
+        id="args-without-passthrough",
+    ),
+    pytest.param(
+        {
+            "actions": {
+                "echo": _passthrough_command(
+                    input_schema=_echo_input(args=INTEGER_ARGS_PROPERTY)
+                )
+            }
+        },
+        f"{ECHO}.input_schema.properties.args: the 'args' property must be"
+        f" {ARGS_PROPERTY!r}, got {INTEGER_ARGS_PROPERTY!r}",
+        id="args-property-shape",
+    ),
+    pytest.param(
+        _echo(input_schema=_echo_input(loud={"type": "number"})),
+        f"{ECHO}.parameters[0]: a flag parameter's property must set type to one"
+        " of ['boolean', 'string', 'integer'], got {'type': 'number'}",
+        id="flag-property-type",
+    ),
+    pytest.param(
+        _echo(input_schema=_echo_input(message={"type": "boolean"})),
+        f"{ECHO}.parameters[1]: a positional parameter's property must set type to"
+        " one of ['string', 'integer'], got {'type': 'boolean'}",
+        id="positional-property-type",
+    ),
+    pytest.param(
+        _echo(input_schema=_echo_input(message=True)),
+        f"{ECHO}.parameters[1]: a positional parameter's property must set type to"
+        " one of ['string', 'integer'], got True",
+        id="positional-property-boolean-schema",
+    ),
+]
+
+
+@pytest.mark.parametrize(("document", "expected"), RULE_CASES)
+def test_parse_manifest_refuses_each_rule_outside_the_schema(
+    document: object, expected: str
+) -> None:
+    """A manifest breaking one rule outside the schema is refused with its message."""
+    assert _refusal(_encode(document)).errors == (expected,)
+
+
+def test_parse_manifest_refuses_a_parameter_named_args() -> None:
+    """A parameter named args is refused, and its array property fails its type."""
+    action = _passthrough_command(
+        parameters=[LOUD, MESSAGE, {"name": "args", "as": "positional"}]
+    )
+
+    assert _refusal(_encode({"actions": {"echo": action}})).errors == (
+        f"{ECHO}.parameters[2].name: parameter name must not be 'args', got 'args'",
+        f"{ECHO}.parameters[2]: a positional parameter's property must set type to"
+        f" one of ['string', 'integer'], got {ARGS_PROPERTY!r}",
+    )
+
+
+def test_parse_manifest_checks_nothing_else_in_an_action_whose_name_is_refused() -> (
+    None
+):
+    """No message carries a refused action name into its path."""
+    document = {"actions": {"echo\n": _command(timeout="30s\n")}}
+
+    assert _refusal(_encode(document)).errors == (
+        f"$.actions: action name must match {ACTION_NAME_PATTERN!r}, got 'echo\\n'",
+    )
+
+
+def test_parse_manifest_reports_every_broken_rule_in_action_order() -> None:
+    """Rules broken in two actions are each reported in one ManifestError."""
+    document = {
+        "actions": {
+            "echo": _command(credentials=[{"env": "GH_TOKEN\n"}]),
+            "report": _script(input_schema={"type": "object", "required": "score"}),
+        }
+    }
+
+    assert _refusal(_encode(document)).errors == (
+        f"{ECHO}.credentials[0].env: env must match {ENV_NAME_PATTERN!r},"
+        " got 'GH_TOKEN\\n'",
+        f"{REPORT}.input_schema.required: 'score' is not of type 'array'",
+    )
+
+
+@pytest.mark.parametrize(
+    ("name", "property_type"),
+    [
+        ("loud", "boolean"),
+        ("loud", "string"),
+        ("loud", "integer"),
+        ("message", "string"),
+        ("message", "integer"),
+    ],
+)
+def test_parse_manifest_accepts_each_allowed_parameter_type(
+    name: str, property_type: str
+) -> None:
+    """A flag takes a boolean, string, or integer; a positional a string or integer."""
+    input_schema = _echo_input(**{name: {"type": property_type}})
+
+    manifest = parse_manifest(_encode(_echo(input_schema=input_schema)))
+
+    assert manifest.actions["echo"].input_schema == input_schema
+
+
+def test_parse_manifest_accepts_pass_through_args() -> None:
+    """A command action tied to an args property of strings parses with the flag set."""
+    manifest = parse_manifest(_encode({"actions": {"echo": _passthrough_command()}}))
+
+    action = manifest.actions["echo"]
+    assert isinstance(action, CommandAction)
+    assert action.passthrough_args is True
+    assert action.input_schema == _echo_input(args=ARGS_PROPERTY)
+
+
+def test_manifest_warns_once_per_action_declaring_pass_through_args() -> None:
+    """warnings() holds one message per action whose passthrough_args is true."""
+    document = {
+        "actions": {
+            "echo": _passthrough_command(),
+            "report": _script(),
+            "shout": _passthrough_command(),
+            "whisper": _command(),
+        }
+    }
+
+    assert parse_manifest(_encode(document)).warnings() == (
+        "actions.echo: declares pass-through args",
+        "actions.shout: declares pass-through args",
+    )
+
+
+def test_manifest_without_pass_through_args_has_no_warnings() -> None:
+    """A manifest with no action declaring pass-through args warns of nothing."""
+    document = {"actions": {"echo": _command(), "report": _script()}}
+
+    assert parse_manifest(_encode(document)).warnings() == ()
 
 
 @pytest.mark.parametrize(
