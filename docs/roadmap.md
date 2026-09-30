@@ -63,20 +63,20 @@ decisions each entry builds on.
    It also starts the overflow sweeper, mints each call's ID, and passes the runner each cage's
    network from `egress.cage_network`. A call's reply never waits on a reload in flight; the item
    decides whether the reply goes before `use()` exits or the prune on exit runs off the call's
-   thread. A failed script's result goes back as an MCP error result carrying the command shape,
-   never as a refusal.
+   thread. A failed script's result goes back as a normal result carrying the command shape, the way
+   `docs/design.md` "Results" returns a command's non-zero exit, and never as an MCP error result.
 
    **Done when** a transport test starts the real server and, through an MCP client, lists only the
    granted tools; runs a test-plugin action in a real cage and gets its result; gets a refusal
    naming the proxy for a bad token, a revoked token, an ungranted action, and an input that fails
-   its schema; gets a failing script action's result as an error result that names no refusal; and
-   finds one audit line per call, carrying the call ID its overflow files carry. Through the real
-   server, a reload that drops a list while a call on that list runs leaves the list's proxy until
-   the call ends, and a call of a retired snapshot gets its reply while a later reload is held in
-   flight. `agent-proxy reload` against the running server swaps in a changed config, and a reload
-   whose build hits a Docker error gets that error as its reply. A test makes one audit write fail,
-   then asserts the decided outcome for that call and that no later audit line carries a fragment of
-   the failed one.
+   its schema; gets a failing script action's result as the command shape in a result that is not an
+   error result; and finds one audit line per call, carrying the call ID its overflow files carry.
+   Through the real server, a reload that drops a list while a call on that list runs leaves the
+   list's proxy until the call ends, and a call of a retired snapshot gets its reply while a later
+   reload is held in flight. `agent-proxy reload` against the running server swaps in a changed
+   config, and a reload whose build hits a Docker error gets that error as its reply. A test makes
+   one audit write fail, then asserts the decided outcome for that call and that no later audit line
+   carries a fragment of the failed one.
 6. **root-race** — Close the window between the runner's symbolic-link check on a root and the
    daemon's bind mount of it. The agent owns its tree, so it can swap a checked root for a link in
    that window, and the daemon then mounts whatever the link names that the service user can read,
