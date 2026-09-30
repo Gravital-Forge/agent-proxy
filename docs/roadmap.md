@@ -77,17 +77,18 @@ decisions each entry builds on.
    config, and a reload whose build hits a Docker error gets that error as its reply. A test makes
    one audit write fail, then asserts the decided outcome for that call and that no later audit line
    carries a fragment of the failed one.
-6. **root-race** — Close the window between the runner's symbolic-link check on a root and the
-   daemon's bind mount of it. The agent owns its tree, so it can swap a checked root for a link in
-   that window, and the daemon then mounts whatever the link names that the service user can read,
-   the credential store included. A root must never mount a path other than the one the runner
-   checked. The item decides the mechanism, and a spike on the pinned Docker proves it first.
+6. **root-race** — Keep a swapped root from reaching an action. The runner checks a root for
+   symbolic links, and the daemon mounts it later. The agent owns its tree, so in between it can
+   swap the root, or a parent of it, for a link. The daemon then mounts whatever the link names that
+   the service user can read, the credential store included. An action must never run against a
+   directory other than the one the runner checked. The mechanism verifies each root mount's device
+   and inode inside the cage, against the pair the runner recorded, before the action runs. It adds
+   no privilege to the instance or the cage.
 
-   **Done when**, on the agent's daemon, a test that swaps a root for a link to an outside directory
-   between the check and the mount finds that the cage never sees that directory's content, whether
-   the call is refused or the mount keeps the checked path; and `docs/architecture.md` states the
-   mechanism. When no mechanism closes the window on the pinned Docker, the item hands PM a blocker,
-   and the gap goes to the operator.
+   **Done when**, on the agent's daemon, a test that swaps a root, and one that swaps a parent, for
+   a link to an outside directory between the check and the start finds that the action's code never
+   sees that directory's content, because the call is refused before the action runs; and
+   `docs/architecture.md` states the mechanism.
 7. **git-plugin** — Build `plugins/git`: an action for every git and git LFS tool git-sidecar
    offers, `safe.directory` per root, the credential helper, and git-sidecar's rules — protected
    branches unpushable, force-push refused, the `task/` branch prefix — as `script` actions.
