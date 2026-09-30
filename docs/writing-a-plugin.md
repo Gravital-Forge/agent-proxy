@@ -10,14 +10,10 @@ manifest, and how to check it.
 The image holds an executable named `describe` on its `PATH`. `describe` prints the manifest as
 UTF-8 JSON on stdout and exits 0.
 
-The proxy runs `describe` with the image's entrypoint set to `["describe"]` and no command. The
-container has no network, a read-only root filesystem, no capabilities, and `no-new-privileges`. So
-`describe` reads only what the image holds and writes nothing but its output. `describe` in
-`core/agent-proxy/agent_proxy/plugins.py` sets these limits:
-
-- `DESCRIBE_TIMEOUT_SECONDS` bounds how long `describe` runs.
-- `DESCRIBE_STDOUT_LIMIT` bounds how many bytes it prints on stdout.
-- A non-zero exit is a refusal that shows the start of stderr, so write a diagnostic there.
+The proxy runs `describe` with the image's entrypoint set to `["describe"]` and no command, in the
+container that `docs/architecture.md` gives under `plugins.py`. So `describe` reads only what the
+image holds, writes nothing but its output, and keeps within that section's time and output limits.
+A non-zero exit shows the start of stderr, so write a diagnostic there.
 
 The simplest `describe` prints a manifest file that the image holds. `docs/design.md` gives where a
 plugin's source lives under "Plugins and actions" and "Repository layout".
@@ -44,14 +40,14 @@ Every action states each of these members. None has a default.
 
 - `kind` is `"command"` or `"script"`.
 - `input_schema` is a JSON Schema whose `type` is `"object"`, and it passes the draft 2020-12
-  meta-schema check. It becomes the input schema of the action's MCP tool.
+  meta-schema check.
 - `credentials` is an array, possibly empty, of the credentials the action expects. Each item is
   `{"env": NAME}`, with `NAME` matching `ENV_NAME_PATTERN` in `config.py`, or `{"file": PATH}`, with
   `PATH` an absolute path beneath `/run/credentials/` with no `..` segment. `docs/design.md` gives
   how a grant supplies a credential in these forms under "Credentials".
 - `timeout` is the action's default timeout, a duration string matching `DURATION_PATTERN` in
-  `config.py`, such as `30s` or `5m`. `docs/design.md` gives how a grant overrides it under "The
-  cage".
+  `config.py`, such as `30s` or `5m`, whose count fits a Python `timedelta`. `docs/design.md` gives
+  how a grant overrides it under "The cage".
 
 ### A command action
 
@@ -107,15 +103,14 @@ Build the image, then check it from `core/agent-proxy/`:
 uv run agent-proxy manifest check IMAGE
 ```
 
-`IMAGE` is any local image reference. The command never pulls, so build or pull the image first. It
-reaches Docker through `DOCKER_HOST`. It exits 0 when the manifest passes and prints each warning on
-stderr. It exits 1 when the manifest fails and prints each failure on stderr, one per line.
-`docs/architecture.md` gives what the command prints under "The admin command".
+`IMAGE` is any local image reference; build or pull it first. `docs/architecture.md` gives how the
+command reaches Docker under "Where state lives", and what it prints and how it exits under "The
+admin command".
 
 ## A working example
 
 `core/agent-proxy/tests/test-plugin/` is a working plugin. Its `Dockerfile` copies a `manifest.json`
 into the image, and a `describe` script onto the `PATH` that prints it. The manifest declares a
 command action with a flag and a positional parameter, and a script action whose executable the
-image also holds. `COPY` keeps each file's mode, so each executable is executable in the build
-context.
+image also holds. `COPY` keeps each file's mode, so an executable must already be executable in the
+build context.

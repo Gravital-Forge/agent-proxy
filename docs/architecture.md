@@ -82,11 +82,11 @@ gives what a record holds and what it never holds under "Audit".
 
 ### `schemas/manifest.schema.json`
 
-This file is the manifest schema, a JSON Schema of draft 2020-12 that ships in the package as data.
-It fixes the members of a manifest and of each action kind, their types, and the patterns their
-strings match. `plugins.py` checks the rules the schema cannot state. `docs/writing-a-plugin.md`
-explains the manifest to a plugin author, and `docs/design.md` gives what a manifest declares under
-"Plugins and actions".
+This file is the manifest schema, a JSON Schema that ships in the package as data. It fixes the
+members of a manifest and of each action kind, their types, and the patterns their strings match.
+`plugins.py` checks the rules the schema cannot state. `docs/writing-a-plugin.md` explains the
+manifest to a plugin author, and `docs/design.md` gives what a manifest declares under "Plugins and
+actions".
 
 ### `plugins.py`
 
@@ -94,12 +94,12 @@ This module reads a plugin's manifest from its image and checks it.
 
 `parse_manifest` takes the bytes a `describe` printed and returns a `Manifest`, which holds each
 action by name as a `CommandAction` or a `ScriptAction`. It checks in three stages and stops after
-the first stage that fails. First it decodes the bytes, which must be UTF-8 JSON with an object at
-the top level, no key repeated in one object, and only finite numbers. Then it validates the
-document against the manifest schema. Last it checks the rules the schema cannot state, which read
-`ACTION_NAME_PATTERN`, `ENV_NAME_PATTERN`, and `parse_duration` from `config.py`. A failure raises
-`ManifestError`, which holds one message per failure, each located by its JSON path.
-`Manifest.warnings` returns one message per action that declares pass-through args.
+the first stage that fails. First it decodes the bytes as a JSON object. Then it validates the
+document against the manifest schema. Last it checks the rules the schema cannot state, reusing the
+name, duration, and credential-path checks of `config.py`. `docs/writing-a-plugin.md` gives every
+rule each stage checks. A failure raises `ManifestError`, which holds one message per failure, each
+located by its JSON path. `Manifest.warnings` returns one message per action that declares
+pass-through args.
 
 `describe` runs an image's `describe` entrypoint in a container and returns its stdout. The
 container has no network, a read-only root filesystem, no capabilities, and `no-new-privileges`, and
@@ -138,9 +138,9 @@ request is the line `reload`. The reply is one JSON line, `{"ok": true, "warning
 `{"ok": false, "errors": [...]}`.
 
 `request_reload` is the client. It sends the request, waits at most `RELOAD_REPLY_TIMEOUT_SECONDS`
-for the reply, and returns it as a `ReloadReply`. A socket with nothing listening or out of reach, a
-connection that closes with no reply, and a reply of another form each raise `ControlError`, which
-names the socket path.
+for the reply, and returns it as a `ReloadReply`. A socket with nothing listening or out of reach,
+no reply in time, a connection that closes with no reply, and a reply of another form each raise
+`ControlError`, which names the socket path.
 
 ### `cli.py`
 
@@ -161,8 +161,8 @@ does not change its mode. The command keeps its state beneath it:
   `0o700`, and writes each credential file with mode `0o600`.
 - `audit/` holds `audit.log` and its rotated files, `audit.log.1` onward. The writer creates the
   directory and narrows it to mode `0o700`. `tail` reads a missing directory or log as no lines.
-- `control.sock` is the control socket. The process that serves reloads binds it with mode `0o600`,
-  and `reload` connects to it.
+- `control.sock` is the control socket. A `ControlServer` from `reload.py` binds it with mode
+  `0o600`, and `reload` connects to it.
 
 `AGENT_PROXY_CONFIG` names the config file. Only `token mint` reads it. `docs/design.md` gives where
 the file comes from under "Config".
@@ -191,9 +191,9 @@ The `agent-proxy` command is `agent_proxy.cli:run`. It takes a noun and a verb:
 - `manifest check IMAGE` runs the `describe` of a local image and checks the manifest it prints. It
   never pulls, so an absent image is a refusal. On a pass it prints a line that names the image and
   the number of actions it declares.
-- `reload` asks the process serving `control.sock` to reload its config, and prints `reloaded` when
-  the new config is in force. When that process refuses, the command prints each error it sent as a
-  refusal.
+- `reload` asks the `ControlServer` listening on `control.sock` to reload its config, and prints
+  `reloaded` when the new config is in force. When the server refuses, the command prints each error
+  it sent as a refusal.
 
 A listing prints a header row, then one tab-separated row per entry, with `-` for a time that is not
 set.
