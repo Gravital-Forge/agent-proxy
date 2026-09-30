@@ -182,6 +182,33 @@ def test_writer_narrows_an_existing_wider_directory(directory: Path) -> None:
     assert stat.S_IMODE(directory.stat().st_mode) == 0o700
 
 
+def _full_log_writer(directory: Path) -> AuditWriter:
+    """Return a writer whose log is /dev/full, so every flush fails with ENOSPC."""
+    directory.mkdir()
+    (directory / "audit.log").symlink_to("/dev/full")
+    return AuditWriter(directory)
+
+
+def test_a_write_the_log_cannot_take_raises(directory: Path) -> None:
+    """A write that fails reaches the caller instead of passing as written."""
+    writer = _full_log_writer(directory)
+
+    with pytest.raises(OSError, match="No space left on device"):
+        writer.write(_record())
+
+
+def test_a_failed_write_prints_nothing_to_stderr(
+    directory: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A failed write leaves stderr empty, so no record argument leaks there."""
+    writer = _full_log_writer(directory)
+
+    with pytest.raises(OSError, match="No space left on device"):
+        writer.write(_record())
+
+    assert capsys.readouterr().err == ""
+
+
 def test_tail_reads_back_across_a_rotation(directory: Path) -> None:
     """The last lines come back in write order when they span rotated files."""
     records = [_record(f"call-{index:04d}") for index in range(5)]

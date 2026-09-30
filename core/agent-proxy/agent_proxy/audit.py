@@ -8,6 +8,7 @@ from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from typing import override
 
 AUDIT_MAX_BYTES = 10 * 1024 * 1024
 AUDIT_BACKUP_COUNT = 5
@@ -30,6 +31,19 @@ class AuditRecord:
     refusal: str | None
 
 
+class _RaisingRotatingFileHandler(logging.handlers.RotatingFileHandler):
+    """A rotating handler that lets a failed write reach its caller."""
+
+    @override
+    def handleError(self, record: logging.LogRecord) -> None:
+        """Re-raise the exception emit is handling, printing nothing.
+
+        Raises:
+            Exception: the exception emit caught while writing record.
+        """
+        raise
+
+
 class AuditWriter:
     def __init__(
         self,
@@ -40,7 +54,7 @@ class AuditWriter:
         """Open directory/audit.log for appending, narrowing directory to 0o700."""
         directory.mkdir(exist_ok=True)
         directory.chmod(0o700)
-        self._handler = logging.handlers.RotatingFileHandler(
+        self._handler = _RaisingRotatingFileHandler(
             directory / _LOG_NAME,
             maxBytes=max_bytes,
             backupCount=backup_count,
@@ -49,7 +63,11 @@ class AuditWriter:
         self._handler.setFormatter(logging.Formatter("%(message)s"))
 
     def write(self, record: AuditRecord) -> None:
-        """Append record to the log as one JSON line, rotating a full file first."""
+        """Append record to the log as one JSON line, rotating a full file first.
+
+        Raises:
+            OSError: the log cannot take the line or cannot be rotated.
+        """
         line = _render_line(record)
         self._handler.handle(
             logging.makeLogRecord({"msg": line, "levelno": logging.INFO})

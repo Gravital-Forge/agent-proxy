@@ -23,6 +23,9 @@ from agent_proxy.errors import ProxyError
 NAME_PATTERN = r"^[a-z0-9][a-z0-9-]{0,63}$"
 PLUGIN_NAME_PATTERN = r"^[a-z][a-z0-9-]*$"
 ACTION_NAME_PATTERN = r"^[a-z][a-z0-9_]*$"
+GRANT_KEY_PATTERN = (
+    f"^{PLUGIN_NAME_PATTERN.strip('^$')}\\.{ACTION_NAME_PATTERN.strip('^$')}$"
+)
 DURATION_PATTERN = r"^[1-9][0-9]*[smhd]$"
 
 _DURATION_UNITS = {
@@ -77,8 +80,11 @@ class ConfigError(ProxyError):
         super().__init__("\n".join(errors))
 
 
+_YAML_MERGE_TAG = "tag:yaml.org,2002:merge"
+
+
 class _UniqueKeyLoader(yaml.SafeLoader):
-    """A safe loader that refuses a key repeated in one mapping."""
+    """A safe loader that refuses a key repeated in one mapping, and merge keys."""
 
 
 def _construct_unique_mapping(
@@ -86,6 +92,15 @@ def _construct_unique_mapping(
 ) -> dict[Hashable, object]:
     seen: set[Hashable] = set()
     for key_node, _ in node.value:
+        # An explicit key silently overrides a merged one, which would hide a
+        # grant field from a reader of the file.
+        if key_node.tag == _YAML_MERGE_TAG:
+            raise yaml.constructor.ConstructorError(
+                None,
+                None,
+                "YAML merge keys ('<<') are not supported",
+                key_node.start_mark,
+            )
         key = loader.construct_object(key_node, deep=deep)
         if not isinstance(key, Hashable):
             continue
@@ -107,7 +122,8 @@ def read_yaml(path: Path) -> Mapping[str, object]:
 
     Raises:
         ConfigError: the file cannot be read, is not valid YAML, repeats a key in
-            one mapping, or holds something other than a mapping at the top level.
+            one mapping, uses a merge key, or holds something other than a
+            mapping at the top level.
     """
     try:
         source = path.read_bytes()
@@ -139,9 +155,7 @@ _STRICT = ConfigDict(extra="forbid", frozen=True)
 
 Name = Annotated[str, StringConstraints(pattern=NAME_PATTERN)]
 PluginName = Annotated[str, StringConstraints(pattern=PLUGIN_NAME_PATTERN)]
-GrantKey = Annotated[
-    str, StringConstraints(pattern=r"^[a-z][a-z0-9-]*\.[a-z][a-z0-9_]*$")
-]
+GrantKey = Annotated[str, StringConstraints(pattern=GRANT_KEY_PATTERN)]
 PinnedImage = Annotated[
     str, StringConstraints(pattern=r"^[^@\s]+@sha256:[0-9a-f]{64}$")
 ]

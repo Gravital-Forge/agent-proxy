@@ -131,6 +131,27 @@ def test_read_yaml_refusal_keeps_the_key_verbatim(tmp_path: Path) -> None:
     assert "duplicate key 'a  b'" in str(error)
 
 
+def test_read_yaml_refuses_a_merge_key_by_name(tmp_path: Path) -> None:
+    """A merge key is refused with a message that names merge keys."""
+    path = tmp_path / "config.yaml"
+    path.write_text("base: &grant {timeout: 10s}\nother:\n  <<: *grant\n")
+
+    error = _refusal(path)
+
+    assert "YAML merge keys ('<<') are not supported" in str(error)
+
+
+def test_read_yaml_loads_a_plain_alias(tmp_path: Path) -> None:
+    """An alias outside a merge key loads as a copy of its anchor's value."""
+    path = tmp_path / "config.yaml"
+    path.write_text("base: &grant {timeout: 10s}\nother: *grant\n")
+
+    assert read_yaml(path) == {
+        "base": {"timeout": "10s"},
+        "other": {"timeout": "10s"},
+    }
+
+
 def test_read_yaml_refuses_a_top_level_list(tmp_path: Path) -> None:
     """A document whose top level is not a mapping is refused."""
     path = tmp_path / "config.yaml"

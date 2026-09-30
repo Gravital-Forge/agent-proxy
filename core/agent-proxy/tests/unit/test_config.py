@@ -6,6 +6,7 @@ import yaml
 from pydantic import ValidationError
 
 from agent_proxy.config import (
+    GRANT_KEY_PATTERN,
     ConfigError,
     EnvMount,
     FileMount,
@@ -64,6 +65,11 @@ def _refusal(tmp_path: Path, document: object) -> ConfigError:
     with pytest.raises(ConfigError) as excinfo:
         _load(tmp_path, document)
     return excinfo.value
+
+
+def test_grant_key_pattern_joins_the_plugin_and_action_patterns() -> None:
+    """A grant key is a plugin name and an action name joined by one dot."""
+    assert GRANT_KEY_PATTERN == r"^[a-z][a-z0-9-]*\.[a-z][a-z0-9_]*$"
 
 
 def test_load_config_returns_the_validated_config(tmp_path: Path) -> None:

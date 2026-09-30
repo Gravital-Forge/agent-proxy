@@ -36,10 +36,12 @@ such as `120s` or `7d` into a `timedelta`, and refuses anything else with `Durat
 
 `load_config` reads one YAML file and returns an `InstanceConfig`: the agent tree, the plugins
 pinned by image digest, and the scopes with their grants. `read_yaml` parses the file with a safe
-loader that also refuses a key repeated in one mapping. The pydantic models refuse unknown fields
-and check each field's form. The `InstanceConfig` validator then checks the rules that span fields,
-such as a root lying inside the agent tree. `docs/design.md` sets the validation rules under
-"Config", and the validator checks those that the file and the credential store can settle.
+loader that also refuses a key repeated in one mapping and a YAML merge key (`<<`). The pydantic
+models refuse unknown fields and check each field's form. The `InstanceConfig` validator then checks
+the rules that span fields, such as a root lying inside the agent tree. `docs/design.md` sets the
+validation rules under "Config". The models and the validator together check each rule that the file
+and the credential store can settle. For example, the models make a grant state `roots`, `domains`,
+and `credentials`, because `Grant` gives none of them a default.
 
 A config that fails raises `ConfigError`, which holds one message per failure. Each message names
 the file, and a failure inside the file also names its location.
@@ -70,8 +72,9 @@ The store reads the clock through the `now` callable it takes, so tests pass a f
 
 `AuditRecord` holds the fields of one call. `AuditWriter` appends each record to `audit.log` as one
 JSON line, and rotates the file by size; `AUDIT_MAX_BYTES` and `AUDIT_BACKUP_COUNT` set the limits.
-`tail` returns the newest lines in write order, and reads the rotated files only while it needs more
-lines. `docs/design.md` gives what a record holds and what it never holds under "Audit".
+A write that fails raises its error to the caller and prints nothing. `tail` returns the newest
+lines in write order, and reads the rotated files only while it needs more lines. `docs/design.md`
+gives what a record holds and what it never holds under "Audit".
 
 ### `cli.py`
 
