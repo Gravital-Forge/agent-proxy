@@ -45,11 +45,14 @@ def docker_client() -> Iterator[DockerClient]:
 @pytest.fixture(scope="session")
 def registry(docker_client: DockerClient) -> Iterator[str]:
     """The host and port of a registry container on the daemon."""
+    # The image declares a volume at its storage path; a tmpfs there keeps
+    # Docker from creating an anonymous volume, which would carry no label.
     container = docker_client.containers.run(
         REGISTRY_IMAGE,
         detach=True,
         labels=TEST_LABELS,
         ports={"5000/tcp": ("127.0.0.1", None)},
+        tmpfs={"/var/lib/registry": ""},
     )
     try:
         container.reload()
@@ -73,11 +76,15 @@ def pinned_plugin(docker_client: DockerClient, registry: str) -> Iterator[str]:
     try:
         _push(docker_client, repository)
         image.reload()
+        repo_digests = image.attrs["RepoDigests"]
         reference = next(
-            digest
-            for digest in image.attrs["RepoDigests"]
-            if digest.startswith(f"{repository}@")
+            (digest for digest in repo_digests if digest.startswith(f"{repository}@")),
+            None,
         )
+        if reference is None:
+            pytest.fail(
+                f"RepoDigests holds no digest for {repository!r}, got {repo_digests!r}"
+            )
         for tag in image.tags:
             docker_client.images.remove(tag)
         with pytest.raises(docker.errors.ImageNotFound):
