@@ -92,9 +92,9 @@ sees the token once, and the store cannot produce it again. `verify` compares th
 digest with every stored digest in constant time, and returns the record of a match that has not
 expired. `verify` writes nothing. `authenticate` matches as `verify` does, and on a match writes the
 token's last-used time and returns the record with that time. The match and the write are one
-`BEGIN IMMEDIATE` transaction, so the store holds its write lock from before the match. A store file
-that cannot be read makes `verify` and `authenticate` raise `TokenStoreError`. `records` lists the
-stored tokens, and `revoke` deletes one. `docs/design.md` gives the token model under "Tokens".
+`BEGIN IMMEDIATE` transaction, so the store holds its write lock from before the match. Any SQLite
+failure in `verify` or `authenticate`, a read or a write, raises `TokenStoreError`. `records` lists
+the stored tokens, and `revoke` deletes one. `docs/design.md` gives the token model under "Tokens".
 
 The store reads the clock through the `now` callable it takes, so tests pass a fixed clock.
 
@@ -106,10 +106,11 @@ Each write opens the log with `O_APPEND`, appends the line with `os.write`, and 
 no file stays open between writes. Writes from several threads take turns. A write that fails part
 way truncates the log back to its size before the line, so the log holds no byte of that line. When
 that truncation also fails, the writer latches: `available` turns false, and every later write
-fails. Every failure raises `AuditError` to the caller and prints nothing. When the writer opens, it
-cuts a regular-file log back to just after its last newline, so a fragment never prefixes a later
-line. `tail` returns the newest lines in write order, and reads the rotated files only while it
-needs more lines. `docs/design.md` gives what a record holds and what it never holds under "Audit".
+fails. Every failure raises `AuditError` to the caller and prints nothing. When an `AuditWriter` is
+created, it cuts a regular-file log back to just after its last newline, so a fragment never
+prefixes a later line. `tail` returns the newest lines in write order, and reads the rotated files
+only while it needs more lines. `docs/design.md` gives what a record holds and what it never holds
+under "Audit".
 
 ### `schemas/manifest.schema.json`
 
@@ -360,16 +361,16 @@ stops the sweeper, and closes the audit writer.
 
 `serve` in `cli.py` runs the app under uvicorn through `_Server`. `_Server` routes SIGINT and
 SIGTERM to uvicorn's shutdown on the main thread, restores the previous handlers when the server
-stops, and re-raises neither signal. `serve` then closes the instance, and the command exits 0.
+stops, and re-raises neither signal.
 
 ### `cli.py`
 
-This module is the admin command, and it is the one module that reads the environment. It opens each
-store under the state directory, and hands the credential store's names to `load_config`. It opens
-the Docker client for `manifest check` and `serve`, and calls `request_reload` for `reload`. For
-`serve --host HOST --port PORT`, it starts an `Instance` from `mcp.py` and serves its app on that
-address. No store imports another; within the package, the stores import only `config.py` and
-`errors.py`.
+This module is the admin command, and it is the one module that reads the environment. Outside
+`serve`, it opens each store under the state directory itself, and hands the credential store's
+names to `load_config`. It opens the Docker client for `manifest check` and `serve`, and calls
+`request_reload` for `reload`. For `serve --host HOST --port PORT`, it starts an `Instance` from
+`mcp.py`, which opens the stores, and serves its app on that address. No store imports another;
+within the package, the stores import only `config.py` and `errors.py`.
 
 ## Where state lives
 
