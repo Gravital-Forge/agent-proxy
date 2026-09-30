@@ -316,6 +316,9 @@ def _error_messages(error: ErrorDetails) -> list[str]:
     # A missing field's input is its whole parent mapping, which names nothing.
     if error["type"] == "missing":
         return [f"{location}: {error['msg']}"]
+    # A validator's own message already names the value it refused.
+    if isinstance(cause, ValueError):
+        return [f"{location}: {cause}"]
     return [f"{location}: {error['msg']}, got {error['input']!r}"]
 
 

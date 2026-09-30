@@ -201,12 +201,12 @@ REFUSALS = [
                 "gh-token": {"env": "GH_TOKEN", "file": "/run/credentials/gh-token"}
             }
         ),
-        "gh-token",
+        "gh-token.EnvMount.file",
         id="credential-env-and-file",
     ),
     pytest.param(
         _with_grant(credentials={"gh-token": {}}),
-        "gh-token",
+        "gh-token.EnvMount.env",
         id="credential-neither-env-nor-file",
     ),
     pytest.param(
@@ -265,7 +265,11 @@ REFUSALS = [
         _with_grant(domains=[LONG_DOMAIN]), repr(LONG_DOMAIN), id="domain-over-253"
     ),
     pytest.param(_with_grant(timeout="0s"), "'0s'", id="timeout-0s"),
-    pytest.param(_with_grant(timeout=120), "timeout", id="timeout-integer"),
+    pytest.param(
+        _with_grant(timeout=120),
+        "timeout: timeout must be a duration string",
+        id="timeout-integer",
+    ),
 ]
 
 
@@ -291,6 +295,14 @@ def test_load_config_leaves_the_parent_mapping_out_of_a_missing_field(
     assert len(error.errors) == 1
     assert "git.clone.roots" in error.errors[0]
     assert "GH_TOKEN" not in error.errors[0]
+
+
+def test_load_config_names_a_validator_refused_value_once(tmp_path: Path) -> None:
+    """A value a validator refuses, and already names, appears once in the message."""
+    error = _refusal(tmp_path, _with_grant(timeout="0s"))
+
+    assert len(error.errors) == 1
+    assert error.errors[0].count("'0s'") == 1
 
 
 def test_load_config_reports_every_field_failure_together(tmp_path: Path) -> None:
