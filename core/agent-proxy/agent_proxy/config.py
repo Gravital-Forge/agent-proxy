@@ -1,7 +1,8 @@
 """The rules every proxy module shares, and the instance config they govern."""
 
 import re
-from collections.abc import Hashable, Iterator, Mapping, Set
+from collections import Counter
+from collections.abc import Hashable, Iterator, Mapping, Sequence, Set
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal, Self
@@ -30,6 +31,10 @@ GRANT_KEY_PATTERN = (
 )
 DURATION_PATTERN = r"^[1-9][0-9]*[smhd]$"
 ENV_NAME_PATTERN = r"^[A-Z_][A-Z0-9_]*$"
+DOMAIN_PATTERN = (
+    r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
+)
+PROXY_ENV_NAME = "HTTPS_PROXY"
 
 _DURATION_UNITS = {
     "s": timedelta(seconds=1),
@@ -162,13 +167,7 @@ GrantKey = Annotated[str, StringConstraints(pattern=GRANT_KEY_PATTERN)]
 PinnedImage = Annotated[
     str, StringConstraints(pattern=r"^[^@\s]+@sha256:[0-9a-f]{64}$")
 ]
-Domain = Annotated[
-    str,
-    StringConstraints(
-        max_length=253,
-        pattern=r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$",
-    ),
-]
+Domain = Annotated[str, StringConstraints(max_length=253, pattern=DOMAIN_PATTERN)]
 EnvName = Annotated[str, StringConstraints(pattern=ENV_NAME_PATTERN)]
 
 
@@ -309,6 +308,23 @@ def _mount_failures(
             yield f"{where}: {owner!r} and {name!r} share file {mount.file!r}"
 
 
+def _duplicate_domain_failures(where: str, domains: Sequence[str]) -> Iterator[str]:
+    for domain, count in Counter(domains).items():
+        if count > 1:
+            yield f"{where}: {domain!r} is named more than once"
+
+
+def _reserved_env_failures(
+    where: str, credentials: Mapping[str, EnvMount | FileMount]
+) -> Iterator[str]:
+    for name, mount in credentials.items():
+        if isinstance(mount, EnvMount) and mount.env == PROXY_ENV_NAME:
+            yield (
+                f"{where}.{name}.env must not be {PROXY_ENV_NAME!r}, "
+                "which the egress proxy sets"
+            )
+
+
 def _unknown_credential_failures(
     where: str, credentials: Mapping[str, EnvMount | FileMount], known: Set[str]
 ) -> Iterator[str]:
@@ -357,7 +373,9 @@ class InstanceConfig(BaseModel):
             field = f"{where}.roots.{index}.path"
             yield from _inside_tree_failures(field, root.path, self.agent_tree)
             yield from _overflow_overlap_failures(field, root.path, self.overflow_dir)
+        yield from _duplicate_domain_failures(f"{where}.domains", grant.domains)
         yield from _mount_failures(f"{where}.credentials", grant.credentials)
+        yield from _reserved_env_failures(f"{where}.credentials", grant.credentials)
         yield from _unknown_credential_failures(
             f"{where}.credentials", grant.credentials, credential_names
         )

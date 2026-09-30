@@ -20,6 +20,7 @@ from jsonschema import Draft202012Validator
 
 from agent_proxy.config import EnvMount, FileMount, Grant, Root
 from agent_proxy.credentials import CredentialStore, UnknownCredentialError
+from agent_proxy.egress import CageNetwork
 from agent_proxy.errors import ProxyError
 from agent_proxy.plugins import (
     DOCKER_FAILURES,
@@ -272,7 +273,7 @@ class CageCall:
     action: CommandAction | ScriptAction
     grant: Grant
     arguments: Mapping[str, object]
-    network: str
+    network: CageNetwork
     overflow_dir: str
     max_cages: int
 
@@ -435,8 +436,8 @@ def _create(client: DockerClient, call: CageCall, setup: _CageSetup) -> Containe
             security_opt=["no-new-privileges"],
             tmpfs={TMPFS_PATH: TMPFS_OPTIONS},
             mounts=list(setup.mounts),
-            environment=dict(setup.environment),
-            network=call.network,
+            environment={**call.network.environment, **setup.environment},
+            network=call.network.name,
             labels=dict(CONTAINER_LABELS),
             log_config=docker.types.LogConfig(type=LOG_DRIVER, config={}),
         )

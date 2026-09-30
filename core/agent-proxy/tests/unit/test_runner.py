@@ -15,6 +15,7 @@ import requests
 
 from agent_proxy.config import EnvMount, FileMount, Grant, Root
 from agent_proxy.credentials import CredentialStore
+from agent_proxy.egress import CageNetwork
 from agent_proxy.errors import ProxyError
 from agent_proxy.plugins import CommandAction, Parameter, ScriptAction, parse_manifest
 from agent_proxy.results import OUTPUT_CAP_BYTES
@@ -121,7 +122,8 @@ def store(tmp_path: Path) -> CredentialStore:
 
 CALL_ID = "0123456789abcdef0123456789abcdef"
 IMAGE = "registry.test/plugin@sha256:" + "0" * 64
-NETWORK = "apx-cage-net"
+NETWORK = CageNetwork(name="apx-cage-net", environment={})
+PROXY_VARIABLE = {"HTTPS_PROXY": "http://egress:1080"}
 _GRANT = Grant(roots=[], domains=[], credentials={})
 
 
@@ -152,6 +154,7 @@ def _cage_call(
     arguments: Mapping[str, object],
     *,
     grant: Grant = _GRANT,
+    network: CageNetwork = NETWORK,
     call_id: str = CALL_ID,
     overflow_dir: str = "/overflow",
     max_cages: int = 2,
@@ -162,7 +165,7 @@ def _cage_call(
         action=action,
         grant=grant,
         arguments=arguments,
-        network=NETWORK,
+        network=network,
         overflow_dir=overflow_dir,
         max_cages=max_cages,
     )
@@ -551,7 +554,7 @@ def test_run_creates_a_hardened_command_cage_with_its_argv_as_entrypoint(
             ),
         ],
         environment={"API_TOKEN": "s3cret"},
-        network=NETWORK,
+        network=NETWORK.name,
         labels={},
         log_config=docker.types.LogConfig(type=LOG_DRIVER, config={}),
     )
@@ -576,10 +579,35 @@ def test_run_creates_a_script_cage_that_takes_its_input_on_stdin(
         tmpfs={TMPFS_PATH: TMPFS_OPTIONS},
         mounts=[],
         environment={},
-        network=NETWORK,
+        network=NETWORK.name,
         labels={},
         log_config=docker.types.LogConfig(type=LOG_DRIVER, config={}),
     )
+
+
+def test_run_gives_the_cage_its_network_s_environment_beside_its_credentials(
+    store: CredentialStore,
+) -> None:
+    """The cage joins the call's network and takes its variable as given."""
+    store.set("api-token", b"s3cret")
+    grant = Grant(
+        roots=[], domains=[], credentials={"api-token": EnvMount(env="API_TOKEN")}
+    )
+    network = CageNetwork(
+        name="apx-egress-0123456789abcdef", environment=PROXY_VARIABLE
+    )
+    client = _client()
+
+    _run(
+        client, store, _cage_call(_echo(), {"text": "hi"}, grant=grant, network=network)
+    )
+
+    kwargs = client.containers.create.call_args.kwargs
+    assert kwargs["network"] == "apx-egress-0123456789abcdef"
+    assert kwargs["environment"] == {
+        "HTTPS_PROXY": "http://egress:1080",
+        "API_TOKEN": "s3cret",
+    }
 
 
 def test_run_starts_waits_reads_both_streams_then_removes_a_command_cage(
