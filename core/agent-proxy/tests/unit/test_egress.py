@@ -478,6 +478,17 @@ def test_start_proxy_reloads_the_proxy_s_state_before_it_reads_it() -> None:
 
 
 @pytest.mark.usefixtures("clock")
+def test_start_proxy_reads_the_log_before_it_refreshes_the_state() -> None:
+    """A running state read after the log proves the proxy outlived the log."""
+    client = _client(TUNNEL_LINE)
+
+    start_proxy(client, KEY, CONFIG_DIR)
+
+    names = [name for name, _, _ in _container(client).mock_calls]
+    assert names.index("logs") < names.index("reload")
+
+
+@pytest.mark.usefixtures("clock")
 def test_a_start_refusal_carries_the_tail_of_the_proxy_s_log() -> None:
     """The refusal holds the last 2 KiB of the log and nothing before it."""
     client = _client(b"<" * 10 + b"z" * PROXY_LOG_EXCERPT_BYTES, status="exited")
