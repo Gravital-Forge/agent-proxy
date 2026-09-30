@@ -6,7 +6,7 @@ import shutil
 import stat
 import sys
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
@@ -126,6 +126,22 @@ def _docker_describing(
     return client
 
 
+class RecordingEgress:
+    """Records each ensure and prune call with the lists it was given."""
+
+    def __init__(self) -> None:
+        """Start with no calls."""
+        self.calls: list[tuple[str, set[tuple[str, ...]]]] = []
+
+    def ensure(self, lists: Iterable[Collection[str]]) -> None:
+        """Record the lists."""
+        self.calls.append(("ensure", {tuple(domains) for domains in lists}))
+
+    def prune(self, lists: Iterable[Collection[str]]) -> None:
+        """Record the lists."""
+        self.calls.append(("prune", {tuple(domains) for domains in lists}))
+
+
 @pytest.fixture
 def socket_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     """Point the state variable at a short directory; AF_UNIX paths cap at 107 bytes."""
@@ -150,9 +166,8 @@ def _control_server(
     state_dir: Path, tmp_path: Path, build: Callable[[], Snapshot]
 ) -> Iterator[None]:
     """Serve reloads on the state directory's control socket."""
-    server = ControlServer(
-        state_dir / CONTROL_SOCKET_NAME, LiveConfig(_snapshot(tmp_path)), build
-    )
+    live = LiveConfig(_snapshot(tmp_path), RecordingEgress())
+    server = ControlServer(state_dir / CONTROL_SOCKET_NAME, live, build)
     server.start()
     try:
         yield
