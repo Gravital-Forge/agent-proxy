@@ -399,8 +399,9 @@ class Instance:
         started, then its error propagates.
 
         Raises:
-            ProxyError: the config cannot be built, its egress cannot be made
-                ready, or the control socket cannot be bound.
+            ProxyError: the audit log cannot be prepared, the config cannot be
+                built, its egress cannot be made ready, or the control socket
+                cannot be bound.
         """
         tokens = TokenStore(state_dir / "tokens.sqlite3")
         credentials = CredentialStore(state_dir / "credentials")

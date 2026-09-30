@@ -270,6 +270,30 @@ def test_opening_empties_a_log_that_holds_only_a_fragment(directory: Path) -> No
     assert (directory / "audit.log").read_bytes() == b""
 
 
+def test_a_directory_that_cannot_be_made_raises_audit_error(tmp_path: Path) -> None:
+    """A directory that cannot be made raises AuditError naming the log."""
+    (tmp_path / "blocker").touch()
+    directory = tmp_path / "blocker" / "audit"
+
+    with pytest.raises(AuditError, match="Not a directory") as caught:
+        AuditWriter(directory)
+
+    assert str(directory / "audit.log") in str(caught.value)
+
+
+def test_a_log_whose_fragment_cannot_be_cut_raises_audit_error(directory: Path) -> None:
+    """A log whose fragment cannot be cut raises AuditError naming the log."""
+    directory.mkdir()
+    log = directory / "audit.log"
+    log.write_bytes(b'{"call_id":"frag')
+    log.chmod(0o200)
+
+    with pytest.raises(AuditError, match="Permission denied") as caught:
+        AuditWriter(directory)
+
+    assert str(log) in str(caught.value)
+
+
 def _full_log_writer(directory: Path) -> AuditWriter:
     """Return a writer whose log is /dev/full, so every write fails with ENOSPC."""
     directory.mkdir()

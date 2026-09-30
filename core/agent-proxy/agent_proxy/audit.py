@@ -53,15 +53,24 @@ class AuditWriter:
 
         A regular-file log whose last byte is not a newline is cut back to
         just after its last newline, so a fragment never prefixes a later line.
+
+        Raises:
+            AuditError: the directory cannot be made or narrowed, or the log's
+                trailing fragment cannot be cut.
         """
-        directory.mkdir(exist_ok=True)
-        directory.chmod(0o700)
         self._path = directory / _LOG_NAME
         self._max_bytes = max_bytes
         self._backup_count = backup_count
         self._lock = threading.Lock()
         self._latched = False
-        _cut_trailing_fragment(self._path)
+        try:
+            directory.mkdir(exist_ok=True)
+            directory.chmod(0o700)
+            _cut_trailing_fragment(self._path)
+        except OSError as exc:
+            raise AuditError(
+                f"audit log {str(self._path)!r} cannot be prepared: {exc}"
+            ) from exc
 
     @property
     def available(self) -> bool:

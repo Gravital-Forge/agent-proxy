@@ -31,6 +31,7 @@ from agent_proxy.plugins import Manifest
 
 PREFIX = "agent-proxy refused: "
 UNKNOWN_TOKEN = "apx_" + "x" * 43
+UNAUTHENTICATED = "the bearer token is missing, unknown, revoked, or expired"
 EXAMPLE_COM = ("example.com",)
 FULL: Mapping[str, Sequence[str]] = MappingProxyType(
     {"echo": (), "count": (), "fail": (), "sleep": EXAMPLE_COM}
@@ -267,24 +268,42 @@ def test_a_granted_call_returns_the_cages_result(instance: _Instance) -> None:
 
 
 @pytest.mark.parametrize(
-    ("caller", "tool", "arguments"),
+    ("caller", "tool", "arguments", "refusal"),
     [
-        pytest.param("unknown", "test_echo", {"text": "hi"}, id="unknown-token"),
-        pytest.param("narrow", "test_count", {}, id="ungranted-tool"),
-        pytest.param("full", "test_echo", {"text": 5}, id="invalid-arguments"),
+        pytest.param(
+            "unknown", "test_echo", {"text": "hi"}, UNAUTHENTICATED, id="unknown-token"
+        ),
+        pytest.param(
+            "narrow",
+            "test_count",
+            {},
+            "tool 'test_count' is not granted to scope 'narrow'",
+            id="ungranted-tool",
+        ),
+        pytest.param(
+            "full",
+            "test_echo",
+            {"text": 5},
+            "$.text: 5 is not of type 'string'",
+            id="invalid-arguments",
+        ),
     ],
 )
-def test_a_refused_call_raises_a_prefixed_tool_error(
-    instance: _Instance, caller: str, tool: str, arguments: dict[str, object]
+def test_a_refused_call_raises_a_tool_error_naming_its_refusal(
+    instance: _Instance,
+    caller: str,
+    tool: str,
+    arguments: dict[str, object],
+    refusal: str,
 ) -> None:
-    """A refused call's ToolError text begins with the refusal prefix."""
+    """A refused call's ToolError text is the refusal prefix, then its refusal."""
     token = {
         "unknown": UNKNOWN_TOKEN,
         "full": instance.full_token,
         "narrow": instance.narrow_token,
     }[caller]
 
-    assert _refusal(instance.url, token, tool, arguments).startswith(PREFIX)
+    assert _refusal(instance.url, token, tool, arguments) == PREFIX + refusal
 
 
 def test_a_revoked_token_is_refused_after_a_granted_call(instance: _Instance) -> None:
@@ -293,7 +312,10 @@ def test_a_revoked_token_is_refused_after_a_granted_call(instance: _Instance) ->
     _call(instance.url, token, "test_echo", {"text": "hi"})
     instance.tokens.revoke("revoked-bot")
 
-    assert _refusal(instance.url, token, "test_echo", {"text": "hi"}).startswith(PREFIX)
+    assert (
+        _refusal(instance.url, token, "test_echo", {"text": "hi"})
+        == PREFIX + UNAUTHENTICATED
+    )
 
 
 def test_a_failed_script_is_an_error_result_with_its_overflow_file(
