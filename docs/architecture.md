@@ -200,11 +200,11 @@ removed. A Docker failure raises `EgressError`. `IRON_PROXY_IMAGE` pins the prox
 and makes the proxy image, the bridge, and each list's network and proxy present. The empty list
 gets its network and no proxy. `ensure` keeps a proxy that runs, on `IRON_PROXY_IMAGE`, from a
 config file that holds exactly what `render_config` renders, and replaces any other proxy of that
-name. A proxy that fails to start is removed with its config directory. A failed image pull raises
-`PluginImageError`, and any other failure raises `EgressError` or `EgressStartError`. `prune` takes
-the lists to keep. It removes every other egress proxy with its config directory, then every other
-egress network, and the bridge always stays. `prune` never raises: a failure logs a warning, and the
-next prune tries again.
+name. A proxy that fails to start is removed with its config directory. A failed image lookup or
+pull raises `PluginImageError`, and any other failure raises `EgressError` or `EgressStartError`.
+`prune` takes the lists to keep. It removes every other egress proxy with its config directory, then
+every other egress network, and the bridge always stays. `prune` never raises: a failure logs a
+warning, and the next prune tries again.
 
 Every egress network and proxy carries the label `agent-proxy.egress`, set to the list's key, or to
 `bridge` on the bridge, and `prune` finds them by that label. Each also carries `LABELS`, which the
