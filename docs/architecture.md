@@ -23,8 +23,7 @@ The core is the uv package in `core/agent-proxy/`, placed as `docs/design.md` se
   `Instance` from `mcp.py`, serves its app on a loopback port, and drives the MCP surface over HTTP
   with a FastMCP client.
 - `core/agent-proxy/tests/test-plugin/` holds the source of the test plugin image. The test plugin
-  holds an action for each thing the tests reach: both action kinds, a call held for a set time, and
-  a script that fails.
+  holds an action for each thing the tests reach, and its `manifest.json` declares them.
 
 ## Modules
 

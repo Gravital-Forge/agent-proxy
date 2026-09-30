@@ -152,7 +152,7 @@ admin command".
 ## A working example
 
 `core/agent-proxy/tests/test-plugin/` is a working plugin. Its `Dockerfile` copies a `manifest.json`
-into the image, and a `describe` script onto the `PATH` that prints it. The manifest declares a
-command action with a flag and a positional parameter, and a script action whose executable the
-image also holds. `COPY` keeps each file's mode, so an executable must already be executable in the
-build context.
+into the image, and a `describe` script onto the `PATH` that prints it. The manifest shows both
+action kinds. Among its actions are a command action with a flag and a positional parameter, and a
+script action whose executable the image also holds. `COPY` keeps each file's mode, so an executable
+must already be executable in the build context.

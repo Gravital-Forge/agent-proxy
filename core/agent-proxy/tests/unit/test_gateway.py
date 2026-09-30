@@ -2,13 +2,14 @@ import errno
 import json
 import os
 import re
-from collections.abc import Buffer, Callable
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
 
 import pytest
+from audit_faults import fail_next_write_after_half
 from egress_fakes import RecordingEgress
 
 from agent_proxy.audit import AuditError, AuditRecord, AuditWriter, tail
@@ -42,7 +43,6 @@ AUDIT_REFUSAL = re.compile(
     r"the audit log could not record call [0-9a-f]{32}, so its result is withheld"
 )
 NOT_SQLITE = b"this file is not a SQLite database\n" * 8
-_REAL_WRITE = os.write
 
 TOOLS_MANIFEST = parse_manifest(
     json.dumps(
@@ -224,22 +224,6 @@ def _refusal(
     with pytest.raises(CallRefusedError) as caught:
         harness.gateway.call(authorization, tool, ECHO_ARGUMENTS)
     return str(caught.value)
-
-
-def _fail_next_write_after_half(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the next os.write land half its buffer and raise ENOSPC; later ones pass."""
-    failed = False
-
-    def write(fd: int, data: Buffer) -> int:
-        nonlocal failed
-        if failed:
-            return _REAL_WRITE(fd, data)
-        failed = True
-        view = memoryview(data)
-        _REAL_WRITE(fd, view[: len(view) // 2])
-        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
-
-    monkeypatch.setattr("agent_proxy.audit.os.write", write)
 
 
 def _latch(audit: AuditWriter, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -593,7 +577,7 @@ def test_a_failed_audit_write_withholds_the_result_and_the_next_call_succeeds(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The failed call is refused and absent from the log; the next one lands."""
-    _fail_next_write_after_half(monkeypatch)
+    fail_next_write_after_half(monkeypatch)
     bearer = _bearer(harness.token)
 
     with pytest.raises(CallRefusedError) as caught:
@@ -617,7 +601,7 @@ def test_a_failed_audit_write_replaces_a_refusal(
     harness: Harness, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A refused call whose line fails gets the audit refusal instead."""
-    _fail_next_write_after_half(monkeypatch)
+    fail_next_write_after_half(monkeypatch)
 
     assert AUDIT_REFUSAL.fullmatch(_refusal(harness, _bearer(UNKNOWN_TOKEN)))
 

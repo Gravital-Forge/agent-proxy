@@ -177,6 +177,8 @@ def _serving(app: StarletteWithLifespan) -> Iterator[str]:
     finally:
         server.should_exit = True
         thread.join(WAIT_SECONDS)
+        if thread.is_alive():
+            pytest.fail(f"the test server did not stop within {WAIT_SECONDS}s")
 
 
 @pytest.fixture

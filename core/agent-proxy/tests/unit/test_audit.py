@@ -3,11 +3,11 @@ import json
 import os
 import stat
 import threading
-from collections.abc import Buffer
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from audit_faults import fail_next_write_after_half
 
 from agent_proxy.audit import (
     AUDIT_BACKUP_COUNT,
@@ -33,7 +33,6 @@ FIELD_NAMES = [
     "refusal",
 ]
 
-_REAL_WRITE = os.write
 _REAL_CLOSE = os.close
 
 
@@ -351,22 +350,6 @@ def test_a_log_that_cannot_be_opened_raises_and_stays_available(
     assert writer.available is True
 
 
-def _fail_once_after_half(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the next os.write land half its buffer and raise ENOSPC; later ones pass."""
-    failed = False
-
-    def write(fd: int, data: Buffer) -> int:
-        nonlocal failed
-        if failed:
-            return _REAL_WRITE(fd, data)
-        failed = True
-        view = memoryview(data)
-        _REAL_WRITE(fd, view[: len(view) // 2])
-        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
-
-    monkeypatch.setattr("agent_proxy.audit.os.write", write)
-
-
 def test_a_failed_write_leaves_the_log_as_it_was(
     directory: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -374,7 +357,7 @@ def test_a_failed_write_leaves_the_log_as_it_was(
     writer = AuditWriter(directory)
     writer.write(_record("call-0001"))
     before = (directory / "audit.log").read_bytes()
-    _fail_once_after_half(monkeypatch)
+    fail_next_write_after_half(monkeypatch)
 
     with pytest.raises(AuditError, match="No space left on device"):
         writer.write(_record("call-0002"))
@@ -388,7 +371,7 @@ def test_the_write_after_a_rolled_back_failure_succeeds(
     """A rolled-back failure leaves the writer available, and the next line lands."""
     writer = AuditWriter(directory)
     writer.write(_record("call-0001"))
-    _fail_once_after_half(monkeypatch)
+    fail_next_write_after_half(monkeypatch)
     with pytest.raises(AuditError):
         writer.write(_record("call-0002"))
 
@@ -403,7 +386,7 @@ def test_a_failed_write_error_names_the_path_and_not_the_record(
 ) -> None:
     """The error names the log path and carries no field of the record."""
     writer = AuditWriter(directory)
-    _fail_once_after_half(monkeypatch)
+    fail_next_write_after_half(monkeypatch)
 
     with pytest.raises(AuditError) as caught:
         writer.write(_record("call-0002"))
@@ -419,7 +402,7 @@ def test_a_failed_rollback_latches_the_writer(
 ) -> None:
     """When the rollback fails too, every later write raises without opening a file."""
     writer = AuditWriter(directory)
-    _fail_once_after_half(monkeypatch)
+    fail_next_write_after_half(monkeypatch)
 
     def ftruncate(fd: int, length: int) -> None:
         raise OSError(errno.EIO, os.strerror(errno.EIO))
@@ -473,7 +456,7 @@ def test_a_close_failure_after_a_failed_write_keeps_the_write_error(
 ) -> None:
     """When the write and then the close fail, the error reports the write."""
     writer = AuditWriter(directory)
-    _fail_once_after_half(monkeypatch)
+    fail_next_write_after_half(monkeypatch)
     monkeypatch.setattr("agent_proxy.audit.os.close", _close_then_fail)
 
     with pytest.raises(AuditError, match="No space left on device"):
