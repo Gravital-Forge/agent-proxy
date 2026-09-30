@@ -2,6 +2,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import threading
 import time
 from collections.abc import Iterator, Mapping
@@ -19,7 +20,7 @@ from fastmcp.client.transports import StreamableHttpTransport
 from fastmcp.exceptions import ToolError
 from fastmcp.server.http import StarletteWithLifespan
 
-from agent_proxy.audit import AuditWriter
+from agent_proxy.audit import AuditError, AuditRecord, AuditWriter
 from agent_proxy.auth import TokenStore
 from agent_proxy.config import InstanceConfig
 from agent_proxy.errors import ProxyError
@@ -34,6 +35,11 @@ TOOLS_IMAGE = "ghcr.io/example/tools@sha256:" + "a" * 64
 OTHER_IMAGE = "ghcr.io/example/other@sha256:" + "b" * 64
 UNKNOWN_TOKEN = "apx_" + "x" * 43
 TOKEN_REFUSAL = "the bearer token is missing, unknown, revoked, or expired"
+TOKEN_STORE_REFUSAL = "the token store could not be read"
+AUDIT_REFUSAL = re.compile(
+    r"the audit log could not record call [0-9a-f]{32}, so its result is withheld"
+)
+NOT_SQLITE = b"this file is not a SQLite database\n" * 8
 ECHO_SCHEMA = {
     "type": "object",
     "properties": {"text": {"type": "string"}},
@@ -152,6 +158,8 @@ class Served:
     dev_token: str
     ops_token: str
     retired_token: str
+    tokens_path: Path
+    audit: AuditWriter
 
 
 @contextlib.contextmanager
@@ -176,13 +184,15 @@ def _serving(app: StarletteWithLifespan) -> Iterator[str]:
 @pytest.fixture
 def served(tmp_path: Path) -> Iterator[Served]:
     """Serve build_app over a gateway with real stores and a fake runner."""
-    store = TokenStore(tmp_path / "tokens.sqlite3")
+    tokens_path = tmp_path / "tokens.sqlite3"
+    store = TokenStore(tokens_path)
     runner = FakeRunner()
+    audit = AuditWriter(tmp_path / "audit")
     gateway = CallGateway(
         store,
         LiveConfig(SNAPSHOT, RecordingEgress()),
         runner,
-        AuditWriter(tmp_path / "audit"),
+        audit,
         lambda: datetime.now(UTC),
     )
     tokens = {
@@ -191,7 +201,15 @@ def served(tmp_path: Path) -> Iterator[Served]:
         "retired": store.mint("old-bot", "retired", None),
     }
     with _serving(build_app(gateway)) as url:
-        yield Served(url, runner, tokens["dev"], tokens["ops"], tokens["retired"])
+        yield Served(
+            url,
+            runner,
+            tokens["dev"],
+            tokens["ops"],
+            tokens["retired"],
+            tokens_path,
+            audit,
+        )
 
 
 def _list(url: str, token: str | None) -> dict[str, object]:
@@ -303,6 +321,36 @@ def test_every_refusal_reaches_the_client_as_a_prefixed_tool_error(
         _call(served.url, _bearer(served, who), tool, {"text": "hello"})
 
     assert str(caught.value) == REFUSAL_PREFIX + refusal
+
+
+def test_an_unreadable_token_store_reaches_the_client_as_a_prefixed_tool_error(
+    served: Served,
+) -> None:
+    """A token store that is not SQLite refuses the call with its fixed message."""
+    served.tokens_path.write_bytes(NOT_SQLITE)
+
+    with pytest.raises(ToolError) as caught:
+        _call(served.url, served.dev_token, "tools_echo", {"text": "hello"})
+
+    assert str(caught.value) == REFUSAL_PREFIX + TOKEN_STORE_REFUSAL
+
+
+def test_a_failed_audit_write_reaches_the_client_as_a_prefixed_tool_error(
+    served: Served, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A call whose audit line cannot be written is refused, its result withheld."""
+
+    def fail(record: AuditRecord) -> None:
+        raise AuditError("the audit log cannot take the line")
+
+    monkeypatch.setattr(served.audit, "write", fail)
+
+    with pytest.raises(ToolError) as caught:
+        _call(served.url, served.dev_token, "tools_echo", {"text": "hello"})
+
+    message = str(caught.value)
+    assert message.startswith(REFUSAL_PREFIX)
+    assert AUDIT_REFUSAL.fullmatch(message.removeprefix(REFUSAL_PREFIX))
 
 
 def test_a_failed_script_is_an_error_result_carrying_its_content(
