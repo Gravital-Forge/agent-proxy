@@ -116,6 +116,20 @@ replaces the image's entrypoint and command:
 
 The root filesystem is read-only. Write scratch files under `/tmp`, a small tmpfs.
 
+The cage's network follows the grant's `domains`. `docs/architecture.md` gives the network and its
+proxy under `egress.py`, and `docs/design.md` gives the egress model under "The cage".
+
+- A grant that names domains gives the cage one environment variable,
+  `HTTPS_PROXY=http://egress:1080`. Through that proxy, the cage reaches each host the grant names,
+  exactly as it names it, and no other host.
+- The proxy passes TLS through by SNI and never decrypts it, so the tool checks the server's own
+  certificate. The cage gets no proxy variable for plain HTTP.
+- A tool that ignores `HTTPS_PROXY` has no route out. curl reads the variable; busybox `wget`
+  ignores it.
+- A grant with `domains: []` gives the cage no proxy and no egress at all.
+- A credential cannot take the environment name `HTTPS_PROXY`. The config refuses a grant that gives
+  one.
+
 A script succeeds when it exits 0 and prints on stdout one JSON object that its `output_schema`
 validates. That stdout must decode as the manifest must, by the rules under "The manifest". The call
 then returns that object. Otherwise the script has failed, and the call returns what a command

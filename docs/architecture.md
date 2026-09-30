@@ -17,7 +17,9 @@ The core is the uv package in `core/agent-proxy/`, placed as `docs/design.md` se
   that `DOCKER_HOST` names. `conftest.py` there builds the test plugin, pushes it to a `registry:3`
   container that keeps its storage on a tmpfs, and removes the local image, so a plugin test pulls
   the plugin by digest. For the cage tests, it also builds the test plugin locally under its own
-  tag, and creates an internal network that each of their cages joins.
+  tag, and creates an internal network that each of their cages joins. For the egress tests, it
+  builds the probe image from `core/agent-proxy/tests/egress-probe/`, the pinned Alpine base with
+  curl added, and every egress test cage runs that image.
 - `core/agent-proxy/tests/test-plugin/` holds the source of the test plugin image.
 
 ## Modules
@@ -56,6 +58,11 @@ is an absolute path with no `..` segment, inside the agent tree, and it must not
 tree. A grant's root must not equal the overflow directory, contain it, or lie inside it, so no cage
 mounts it and the sweep never reaches a root.
 
+Two rules of the validator serve egress. A grant must not name one domain more than once. A grant's
+credential must not take the environment name `PROXY_ENV_NAME`, which is `HTTPS_PROXY`, because the
+cage's network sets that variable. `DOMAIN_PATTERN` is the form of a domain, and `egress.py` checks
+it again before it writes a proxy config.
+
 A config that fails raises `ConfigError`, which holds one message per failure. Each message names
 the file, and a failure inside the file also names its location.
 
@@ -64,13 +71,14 @@ the file, and a failure inside the file also names its location.
 ### `credentials.py`
 
 `CredentialStore` keeps each credential as one file in a directory, named for the credential and
-holding its value verbatim. `set` writes a value to a staging file whose name begins with a dot,
-then renames it into place, so `entries` never lists a half-written credential. `entries` reports
-each name with its set time, read from the file's modification time. `names` returns the stored
-names, which is the set `load_config` checks grants against. `read` returns a stored value as bytes,
-and `path` returns the file that holds it. Each refuses a name that breaks `NAME_PATTERN` with
-`InvalidNameError`, and a name the store does not hold with `UnknownCredentialError`.
-`docs/design.md` gives the credential model under "Credentials".
+holding its value verbatim. `set` writes a value through `write_owner_only`, which writes a staging
+file whose name begins with a dot, with mode `0o600`, then renames it over the target, so `entries`
+never lists a half-written credential. `egress.py` writes each proxy config through the same
+function. `entries` reports each name with its set time, read from the file's modification time.
+`names` returns the stored names, which is the set `load_config` checks grants against. `read`
+returns a stored value as bytes, and `path` returns the file that holds it. Each refuses a name that
+breaks `NAME_PATTERN` with `InvalidNameError`, and a name the store does not hold with
+`UnknownCredentialError`. `docs/design.md` gives the credential model under "Credentials".
 
 ### `auth.py`
 
@@ -157,14 +165,59 @@ reads the directory and the time through the callables it takes, fresh for each 
 fails logs a warning, and the thread keeps its schedule. `docs/design.md` gives the retention under
 "Results".
 
+### `egress.py`
+
+This module gives each cage the egress its grant names: one proxy for each distinct domain list,
+each on its own internal network. `docs/design.md` gives the egress model under "The cage".
+
+`list_key` returns the key of a domain list, a SHA-256 digest of the sorted list cut short, so two
+grants that name the same domains in any order share one key. `network_name` forms, from the key,
+the name of the list's internal network and of its proxy container. `domain_lists` returns each
+distinct sorted list that the grants of a config name. The empty list has a key and a network like
+any other list.
+
+`CageNetwork` holds the network a cage joins and the environment that network gives it.
+`cage_network` returns it for a grant's domains. For a non-empty list, the environment holds one
+variable, `HTTPS_PROXY=http://egress:1080`, which names the proxy's tunnel. For the empty list, the
+environment is empty.
+
+`render_config` returns, as YAML, the iron-proxy config that allows exactly the domains of a list.
+It refuses an empty list, and a domain that does not match `DOMAIN_PATTERN`, with
+`EgressConfigError`. Every listener but the tunnel binds loopback, so a cage on the network reaches
+only the tunnel on `TUNNEL_PORT`. The config has no management block, which keeps the management
+listener off. The proxy passes TLS through by SNI and holds no CA.
+
+`start_proxy` creates the proxy of a list from `IRON_PROXY_IMAGE`, joins it to the list's network
+under the alias `PROXY_ALIAS` and then to `BRIDGE_NETWORK`, starts it, and returns it once it
+serves. Both networks must already exist. The proxy runs as uid 0 with a read-only root filesystem,
+every capability dropped, and `no-new-privileges`. The daemon bind-mounts the proxy's config
+directory into it read-only, and the proxy's command names the config file. It is ready when its log
+holds the tunnel's start line and it still runs. A proxy that stops, or is not ready within
+`PROXY_READY_TIMEOUT_SECONDS`, raises `EgressStartError`, which carries the tail of its log, and is
+removed. A Docker failure raises `EgressError`. `IRON_PROXY_IMAGE` pins the proxy image by digest.
+
+`EgressProxies` manages the egress networks and proxies on one daemon. `ensure` takes domain lists,
+and makes the proxy image, the bridge, and each list's network and proxy present. The empty list
+gets its network and no proxy. `ensure` keeps a proxy that runs, on `IRON_PROXY_IMAGE`, from a
+config file that holds exactly what `render_config` renders, and replaces any other proxy of that
+name. A proxy that fails to start is removed with its config directory. A failed image pull raises
+`PluginImageError`, and any other failure raises `EgressError` or `EgressStartError`. `prune` takes
+the lists to keep. It removes every other egress proxy with its config directory, then every other
+egress network, and the bridge always stays. `prune` never raises: a failure logs a warning, and the
+next prune tries again.
+
+Every egress network and proxy carries the label `agent-proxy.egress`, set to the list's key, or to
+`bridge` on the bridge, and `prune` finds them by that label. Each also carries `LABELS`, which the
+integration tests set to the test label.
+
 ### `runner.py`
 
 This module runs one action call in one cage, a container that exists for that call only.
 `docs/design.md` gives the cage under "The cage".
 
-A `CageCall` holds the call ID, the image, the action, the grant, the arguments, the Docker network,
-and the config's `overflow_dir` and `max_cages`. `CageRunner.run` takes a call and returns an
-`Outcome`. It refuses a bad call before it takes a slot under the cap:
+A `CageCall` holds the call ID, the image, the action, the grant, the arguments, the cage's network
+as a `CageNetwork`, and the config's `overflow_dir` and `max_cages`. `CageRunner.run` takes a call
+and returns an `Outcome`. It refuses a bad call before it takes a slot under the cap:
 
 1. The call ID must match `CALL_ID_PATTERN`.
 2. `validate_input` checks the arguments against the action's input schema, draft 2020-12, and
@@ -183,9 +236,10 @@ The run then waits for a slot, creates the cage, starts it, and removes it by fo
 happens. The slot stays taken until the cage is removed. The cage's entrypoint is the argv or the
 executable, which also clears the image's command. The cage runs as `CONTAINER_USER`, with a
 read-only root filesystem, every capability dropped, `no-new-privileges`, a tmpfs at `TMPFS_PATH`
-with `TMPFS_OPTIONS`, the call's network, `CONTAINER_LABELS`, and the `LOG_DRIVER` log driver. A
-script's input goes to the cage's stdin, then end of file. A script that stops reading its input is
-not a failure in itself.
+with `TMPFS_OPTIONS`, `CONTAINER_LABELS`, and the `LOG_DRIVER` log driver. The runner applies the
+call's `CageNetwork` as given: the cage joins its network, and gets its environment beside the
+grant's credentials. A script's input goes to the cage's stdin, then end of file. A script that
+stops reading its input is not a failure in itself.
 
 The timeout is the grant's, or else the action's. It runs from the start, and covers the input and
 the wait for the exit. After the exit, the run reads stdout and stderr from the cage's log through
@@ -216,10 +270,18 @@ message names the config file. It checks a grant only against a plugin whose man
 callable is the seam to Docker: a caller binds `plugins.load_manifest` to a client, and a unit test
 passes a fake.
 
-`LiveConfig` holds the snapshot in force. A call reads `current` once when it starts and uses that
-snapshot to its end. `reload` builds a snapshot and puts it in force with one reference assignment,
-one reload at a time. A build that fails raises, and the snapshot in force stays. `docs/design.md`
-gives the reload decisions under "Config".
+`LiveConfig` holds the snapshot in force and an egress collaborator, an object with the `ensure` and
+`prune` of the `Egress` protocol, as `EgressProxies` has. `LiveConfig.start` builds the first
+snapshot, ensures the egress its grants name, prunes every other egress resource, and returns the
+`LiveConfig`. A call takes its snapshot through `use`, which holds the snapshot in use from the
+call's start to its end, so the egress that snapshot names stays through a reload. `current` returns
+the snapshot in force.
+
+`reload` builds a snapshot, ensures its egress, and only then puts it in force with one reference
+assignment, one reload at a time. A build or an ensure that fails raises, and the snapshot in force
+stays. A prune keeps each domain list that the snapshot in force or a snapshot in use names. A
+reload prunes after it ends, whether it succeeded or failed. The last use of a snapshot no longer in
+force also prunes when it ends. `docs/design.md` gives the reload decisions under "Config".
 
 `ControlServer` serves reload requests for a `LiveConfig` on a Unix socket, from a daemon thread. It
 binds the socket, sets its mode to `0o600`, and only then listens. It replaces a socket left at the
@@ -268,6 +330,12 @@ is a refusal that names `DOCKER_HOST` and its value, or says that it is unset.
 The cage runner mounts credential files from the credential store's directory, as `runner.py` gives
 above. It writes each overflow file under the config's `overflow_dir`, in the agent's tree, and the
 sweep removes old entries there. The runner creates neither directory.
+
+`EgressProxies` keeps the config of each proxy in its own directory, named for the proxy, under the
+config root it is given. It creates each directory with mode `0o700`, and writes the config file in
+it with mode `0o600`. The daemon bind-mounts that directory into the proxy by its path, so the path
+must name the same directory for the daemon as for the instance. `prune` removes a directory with
+its proxy.
 
 ## The admin command
 
