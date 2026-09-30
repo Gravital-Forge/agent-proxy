@@ -120,7 +120,9 @@ def read_yaml(path: Path) -> Mapping[str, object]:
     except yaml.YAMLError as exc:
         # PyYAML spreads one error over several lines, and each line of a
         # refusal must be one failure.
-        reason = " ".join(str(exc).split())
+        reason = "; ".join(
+            line.strip() for line in str(exc).splitlines() if line.strip()
+        )
         raise ConfigError(
             f"config file {str(path)!r} is not valid YAML: {reason}"
         ) from exc

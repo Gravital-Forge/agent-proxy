@@ -121,6 +121,16 @@ def test_read_yaml_refusal_is_one_line(tmp_path: Path, source: str) -> None:
     assert all("\n" not in message for message in error.errors)
 
 
+def test_read_yaml_refusal_keeps_the_key_verbatim(tmp_path: Path) -> None:
+    """Flattening the error to one line leaves the space inside a key alone."""
+    path = tmp_path / "config.yaml"
+    path.write_text('"a  b": 1\n"a  b": 2\n')
+
+    error = _refusal(path)
+
+    assert "duplicate key 'a  b'" in str(error)
+
+
 def test_read_yaml_refuses_a_top_level_list(tmp_path: Path) -> None:
     """A document whose top level is not a mapping is refused."""
     path = tmp_path / "config.yaml"
