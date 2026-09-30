@@ -92,21 +92,21 @@ def instance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[_Instance]:
     """A started instance, served on a loopback port, with one token per scope."""
-    # Under tmp_path the control socket's path comes near the AF_UNIX limit.
-    state_dir = Path(tempfile.mkdtemp(dir="/tmp"))
     agent_tree = tmp_path / "agent"
     (agent_tree / "overflow").mkdir(parents=True)
     config_path = tmp_path / "config.yaml"
     _write_config(config_path, agent_tree, {"test": pinned_plugin}, FULL, NARROW)
-    tokens = TokenStore(state_dir / "tokens.sqlite3")
-    full_token = tokens.mint("full-bot", "full", None)
-    narrow_token = tokens.mint("narrow-bot", "narrow", None)
-    monkeypatch.setenv(cli.STATE_DIR_VARIABLE, str(state_dir))
-    monkeypatch.setenv(cli.CONFIG_VARIABLE, str(config_path))
     # ExitStack runs its callbacks last-registered first, and runs every one
     # even after an earlier one raised, then re-raises.
     with contextlib.ExitStack() as teardown:
+        # Under tmp_path the control socket's path comes near the AF_UNIX limit.
+        state_dir = Path(tempfile.mkdtemp(dir="/tmp"))
         teardown.callback(shutil.rmtree, state_dir)
+        tokens = TokenStore(state_dir / "tokens.sqlite3")
+        full_token = tokens.mint("full-bot", "full", None)
+        narrow_token = tokens.mint("narrow-bot", "narrow", None)
+        monkeypatch.setenv(cli.STATE_DIR_VARIABLE, str(state_dir))
+        monkeypatch.setenv(cli.CONFIG_VARIABLE, str(config_path))
         teardown.callback(remove_bridge, docker_client)
         teardown.callback(
             egress.EgressProxies(docker_client, state_dir / "egress").prune, ()
