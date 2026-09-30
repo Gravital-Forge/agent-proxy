@@ -184,7 +184,8 @@ MEASURE E7b proxy_ex_ip=172.31.2.2
 CHECK E7b expected=fail observed=exit7 PASS
 ```
 
-- `E1` to `E4`: each network reaches its own allowlist and nothing else.
+- `E1` to `E4`: each network reaches its own allowlist and not the other
+  network's domain.
 - `E5` and `E6b`: a cage that bypasses the proxy cannot resolve an outside
   name (exit 6), so it has no direct way out by name. No check tried an
   outside address directly.
@@ -301,8 +302,9 @@ pays it once per call.
 
 ### iron-proxy config
 
-Planning verified these on the pinned image; `E8a`, `E8d`, and every egress
-check exercised them. `spike/egress/run.sh` holds a working config.
+Planning verified these on the pinned image. `spike/egress/run.sh` holds a
+working config built on them, and `E8a`, `E8d`, and the egress checks ran on
+it. Two facts rest on planning alone, and the list marks them.
 
 - `dns.proxy_ip` is required, even when DNS interception is not used.
 - The proxy binds `:53`, `:80`, `:443`, and `:9090` by default.
@@ -310,10 +312,12 @@ check exercised them. `spike/egress/run.sh` holds a working config.
 - CONNECT requests arrive on `proxy.tunnel_listen`.
 - The allowlist is
   `transforms: [{name: allowlist, config: {domains: [...]}}]`.
-- A denied CONNECT gets 403.
+- A denied CONNECT gets 403. Planning alone established this. The refusal
+  checks observed only curl's exit 56.
 - `POST /v1/reload` with `Authorization: Bearer <key>` returns
   `{"status":"ok"}`. A config that fails to parse or build returns 422. The
-  endpoint re-reads the file on disk and ignores the request body.
+  endpoint re-reads the file on disk and ignores the request body. Planning
+  alone established that it ignores the body: `reload` in `run.sh` sends none.
 - The image's entrypoint has no default arguments, so every run passes
   `-config /etc/iron-proxy/proxy.yaml`.
 - The config is a bind-mounted directory, never a single file. A single-file
@@ -340,9 +344,10 @@ MEASURE M0 curl_version_line="curl 8.14.1 (x86_64-alpine-linux-musl) libcurl/8.1
 <!-- rumdl-enable MD013 -->
 
 It exits 56 on a refused CONNECT (`E2`, `E4`, `E8c`, `E9b`). Newer curl exits
-7, the code it also uses for a failed connection (`E7b`). The core matches on
-the proxy's 403, not on the exit code, because a rebuild can bring a different
-curl.
+7, the code it also uses for a failed connection (`E7b`). A rebuild can bring
+a different curl, so the core matches on the proxy's refusal, not on the exit
+code. That the refusal is a 403 comes from planning; the checks saw only the
+exit code.
 
 ### git refuses a repository it does not own
 
@@ -382,10 +387,15 @@ flags but did not repeat these checks.
 
 ## Where the scripts differ from the plan
 
-- Extra `MEASURE` lines give context, and no check depends on them. They are
-  `M1` (token kind), `F1` (fixture owner, mode, and ACL), `S0` (cage exit),
-  `R1` (egress script exit), `E7b` (proxy address), and the `E8d` and `E9`
-  replies.
+- Extra `MEASURE` lines give context, and no check depends on them. The
+  recorded runs printed `M1` (token kind), `F1` (fixture owner, mode, and
+  ACL), `S0` (cage exit), `R1` (egress script exit), `E7b` (proxy address),
+  and the `E8d` and `E9` replies.
+- `checks.sh` also has failure-path lines, which did not print in the recorded
+  run. `MEASURE S7 stderr=` and `MEASURE S10 stderr=` print the first line of
+  git's error when that commit fails. For `S2`, `S3`, `S5`, and `S7`,
+  `CHECK <id> SKIP the cage exited ...` prints when the cage exits before that
+  check runs.
 - `S4` and `S6` print as `MEASURE` lines, not `CHECK` lines, because the plan
   gave them no expected value.
 - `S8` prints a `MEASURE` line per path, plus the checks `S8a` to `S8c` on
