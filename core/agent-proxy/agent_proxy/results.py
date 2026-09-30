@@ -1,5 +1,6 @@
 """What a cage call returns: its captured streams, their overflow files, the sweep."""
 
+import contextlib
 import itertools
 import logging
 import os
@@ -188,18 +189,25 @@ def sweep_overflow(directory: str, now: datetime) -> None:
     cutoff = (now - OVERFLOW_MAX_AGE).timestamp()
     with _open_directory(directory) as directory_fd:
         for name in _expired_names(directory_fd, cutoff):
-            os.unlink(name, dir_fd=directory_fd)
+            # The agent may delete its own overflow file at any moment.
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(name, dir_fd=directory_fd)
 
 
 def _expired_names(directory_fd: int, cutoff: float) -> list[str]:
     """Return the non-directory entries of directory_fd modified before cutoff."""
     with os.scandir(directory_fd) as entries:
-        return [
-            entry.name
-            for entry in entries
-            if not entry.is_dir(follow_symlinks=False)
+        return [entry.name for entry in entries if _is_expired(entry, cutoff)]
+
+
+def _is_expired(entry: os.DirEntry[str], cutoff: float) -> bool:
+    try:
+        return (
+            not entry.is_dir(follow_symlinks=False)
             and entry.stat(follow_symlinks=False).st_mtime < cutoff
-        ]
+        )
+    except FileNotFoundError:
+        return False
 
 
 class OverflowSweeper:

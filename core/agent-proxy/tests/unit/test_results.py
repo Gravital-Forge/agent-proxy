@@ -1,4 +1,6 @@
+import contextlib
 import errno
+import itertools
 import logging
 import os
 import re
@@ -8,6 +10,7 @@ import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -302,10 +305,55 @@ def test_sweep_overflow_refuses_a_symlinked_directory(tmp_path: Path) -> None:
     link = tmp_path / "overflow"
     link.symlink_to(real)
 
-    with pytest.raises(OSError, match="."):
+    with pytest.raises(OSError) as excinfo:
         sweep_overflow(str(link), NOW)
 
+    assert excinfo.value.errno in {errno.ENOTDIR, errno.ELOOP}
     assert old.exists()
+
+
+def test_sweep_overflow_skips_an_entry_gone_before_its_unlink(tmp_path: Path) -> None:
+    """An entry removed by someone else before its unlink does not stop the sweep."""
+    for name in ("a.stdout", "b.stdout"):
+        (tmp_path / name).write_bytes(b"old")
+        _age(tmp_path / name, timedelta(days=8))
+    real_unlink = os.unlink
+
+    def unlink_after_a_race(name: str, *, dir_fd: int) -> None:
+        real_unlink(name, dir_fd=dir_fd)
+        if name == "a.stdout":
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), name)
+
+    with mock.patch("agent_proxy.results.os.unlink", side_effect=unlink_after_a_race):
+        sweep_overflow(str(tmp_path), NOW)
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_sweep_overflow_skips_an_entry_gone_before_its_stat(tmp_path: Path) -> None:
+    """An entry removed by someone else before its stat does not stop the sweep."""
+    old = tmp_path / "old.stdout"
+    old.write_bytes(b"old")
+    _age(old, timedelta(days=8))
+    vanished = mock.Mock(spec=os.DirEntry)
+    vanished.name = "vanished.stdout"
+    vanished.is_dir.return_value = False
+    vanished.stat.side_effect = FileNotFoundError(
+        errno.ENOENT, os.strerror(errno.ENOENT), "vanished.stdout"
+    )
+    real_scandir = os.scandir
+
+    @contextlib.contextmanager
+    def scandir_with_a_vanished_entry(fd: int) -> Iterator[Iterator[os.DirEntry]]:
+        with real_scandir(fd) as entries:
+            yield itertools.chain([vanished], entries)
+
+    with mock.patch(
+        "agent_proxy.results.os.scandir", side_effect=scandir_with_a_vanished_entry
+    ):
+        sweep_overflow(str(tmp_path), NOW)
+
+    assert not old.exists()
 
 
 def test_overflow_sweeper_sweeps_at_once_on_start(tmp_path: Path) -> None:
