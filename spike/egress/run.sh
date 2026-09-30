@@ -86,7 +86,7 @@ reload() {
   fi
   code=${out##*$'\n'}
   body=${out%$'\n'*}
-  printf '%s:%s\n' "$code" "$(printf '%s' "$body" | tr -d ' \n')"
+  printf '%s:%s\n' "$code" "$(printf '%s' "$body" | tr -d '\n' | tr ' ' '_')"
 }
 
 write_config() {
