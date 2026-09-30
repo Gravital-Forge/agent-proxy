@@ -2,6 +2,7 @@ import os
 import stat
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -62,6 +63,20 @@ def test_set_replaces_an_existing_value(directory: Path) -> None:
 
     assert (directory / "github-token").read_bytes() == b"new"
     assert [path.name for path in directory.iterdir()] == ["github-token"]
+
+
+def test_set_leaves_no_file_behind_when_the_write_fails(directory: Path) -> None:
+    """A write that fails part-way removes its temporary file and re-raises."""
+    store = CredentialStore(directory)
+    disk_full = OSError(28, "No space left on device")
+
+    with (
+        mock.patch("agent_proxy.credentials.os.fsync", side_effect=disk_full),
+        pytest.raises(OSError, match="No space left"),
+    ):
+        store.set("github-token", b"s3cret")
+
+    assert list(directory.iterdir()) == []
 
 
 @pytest.mark.parametrize(

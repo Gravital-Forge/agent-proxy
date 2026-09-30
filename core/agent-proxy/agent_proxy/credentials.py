@@ -48,12 +48,16 @@ class CredentialStore:
         # entries() never lists a half-written credential.
         staging = self._directory / f".{name}.{secrets.token_hex(8)}.tmp"
         fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "wb") as staged:
-            os.fchmod(fd, 0o600)
-            staged.write(value)
-            staged.flush()
-            os.fsync(fd)
-        staging.replace(self._directory / name)
+        try:
+            with os.fdopen(fd, "wb") as staged:
+                os.fchmod(fd, 0o600)
+                staged.write(value)
+                staged.flush()
+                os.fsync(fd)
+            staging.replace(self._directory / name)
+        except BaseException:
+            staging.unlink(missing_ok=True)
+            raise
 
     def entries(self) -> list[CredentialEntry]:
         """Return the stored credentials, sorted by name."""
