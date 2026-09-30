@@ -57,19 +57,26 @@ decisions each entry builds on.
    schemas, the proxy's refusal errors, last-used updates, and one audit line per call. The item
    decides what a failed audit write does to its call, and what the writer does after the failure.
    The serving process starts the reload control server, and every Docker error in a reload's build
-   reaches the caller as a `ProxyError`. It also starts the overflow sweeper, mints each call's ID,
-   and passes the runner each cage's network. A failed script's result goes back as an MCP error
-   result carrying the command shape, never as a refusal.
+   reaches the caller as a `ProxyError`. It starts the live config through `LiveConfig.start`, with
+   an `EgressProxies` over `egress/` under the state directory, and holds each call's snapshot
+   through `LiveConfig.use()` from before its cage waits for a slot until after the cage is removed.
+   It also starts the overflow sweeper, mints each call's ID, and passes the runner each cage's
+   network from `egress.cage_network`. A call's reply never waits on a reload in flight; the item
+   decides whether the reply goes before `use()` exits or the prune on exit runs off the call's
+   thread. A failed script's result goes back as an MCP error result carrying the command shape,
+   never as a refusal.
 
    **Done when** a transport test starts the real server and, through an MCP client, lists only the
    granted tools; runs a test-plugin action in a real cage and gets its result; gets a refusal
    naming the proxy for a bad token, a revoked token, an ungranted action, and an input that fails
    its schema; gets a failing script action's result as an error result that names no refusal; and
-   finds one audit line per call, carrying the call ID its overflow files carry.
-   `agent-proxy reload` against the running server swaps in a changed config, and a reload whose
-   build hits a Docker error gets that error as its reply. A test makes one audit write fail, then
-   asserts the decided outcome for that call and that no later audit line carries a fragment of the
-   failed one.
+   finds one audit line per call, carrying the call ID its overflow files carry. Through the real
+   server, a reload that drops a list while a call on that list runs leaves the list's proxy until
+   the call ends, and a call of a retired snapshot gets its reply while a later reload is held in
+   flight. `agent-proxy reload` against the running server swaps in a changed config, and a reload
+   whose build hits a Docker error gets that error as its reply. A test makes one audit write fail,
+   then asserts the decided outcome for that call and that no later audit line carries a fragment of
+   the failed one.
 6. **root-race** — Close the window between the runner's symbolic-link check on a root and the
    daemon's bind mount of it. The agent owns its tree, so it can swap a checked root for a link in
    that window, and the daemon then mounts whatever the link names that the service user can read,
@@ -101,12 +108,14 @@ decisions each entry builds on.
    sample instance config under `examples/`, and `docs/runbooks/per-agent-instance.md`, which
    explains each provisioning step and carries the deployment acceptance checks `docs/design.md`
    lists. No script runs as root in this item. The instance sees the credential store's directory,
-   the agent tree, and the overflow directory at the host paths the daemon resolves, because the
-   runner bind-mounts a file credential from the store. The runbook says `agent_tree` names its
-   resolved path, because the runner refuses a root or overflow directory under a symbolic link.
+   the state directory, the agent tree, and the overflow directory at the host paths the daemon
+   resolves, because the runner bind-mounts a file credential from the store and each egress proxy's
+   config directory from under the state directory. The runbook says `agent_tree` names its resolved
+   path, because the runner refuses a root or overflow directory under a symbolic link.
 
    **Done when** `shellcheck` passes both scripts; the instance image builds; started on the agent's
    own daemon with the sample config and that daemon's socket, the instance serves an MCP client
    that runs a git-plugin action on a fixture repository and a github-plugin action against a
-   stubbed `gh`, each with its audit line; and the runbook names every acceptance check with the
-   command that runs it.
+   stubbed `gh`, each with its audit line; an egress proxy the instance starts reads the config the
+   instance wrote, and a cage reads a file credential the instance stored, both under the instance's
+   own mapped uid; and the runbook names every acceptance check with the command that runs it.

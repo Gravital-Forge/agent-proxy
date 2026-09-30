@@ -185,9 +185,9 @@ inside the proxy process.
   - iron-proxy is pinned by digest. An upgrade repeats `E9` first.
   - Config: the core bind-mounts a config directory, never a single file, because a replaced file
     under a single-file mount keeps its old inode. It sets `dns.proxy_ip`, which iron-proxy requires
-    even without DNS interception, and passes `-config` on every run, because the image's entrypoint
-    has no default arguments. It sets `tls.mode: "sni-only"` with no CA, so TLS passes through by
-    SNI and is never intercepted. The allowlist is
+    while its DNS listener is enabled, and passes `-config` on every run, because the image's
+    entrypoint has no default arguments. It sets `tls.mode: "sni-only"` with no CA, so TLS passes
+    through by SNI and is never intercepted. The allowlist is
     `transforms: [{name: allowlist, config: {domains: [...]}}]`. The core validates a proxy's config
     before it starts that proxy, so a config iron-proxy refuses (`E8d`) never sits on disk behind a
     running proxy.
@@ -280,7 +280,7 @@ agent-proxy/
 │   ├── agent-proxy/      # the core uv package (Python, FastMCP, Docker SDK)
 │   │   ├── agent_proxy/  # cli, config, auth, credentials, plugins, reload, mcp, runner, egress, results, audit, errors, schemas
 │   │   └── tests/        # unit/, integration/
-│   └── docker/           # the proxy's Dockerfile, iron-proxy pin and base config, provisioning
+│   └── docker/           # the proxy's Dockerfile and provisioning; the iron-proxy pin is in egress
 └── plugins/
     ├── git/              # Dockerfile, describe and the manifest it prints, scripts/, tests/, README.md
     └── github/
