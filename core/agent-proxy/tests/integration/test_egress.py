@@ -14,6 +14,7 @@ from types import MappingProxyType
 import docker.errors
 import pytest
 import yaml
+from conftest import remove_bridge
 from docker import DockerClient
 from docker.models.containers import Container
 from docker.models.networks import Network
@@ -139,7 +140,7 @@ class _Bench:
         with contextlib.ExitStack() as steps:
             for network in self.networks:
                 steps.callback(_remove_network, network)
-            steps.callback(_remove_bridge, self.client)
+            steps.callback(remove_bridge, self.client)
             steps.callback(self.proxies.prune, ())
             for container in self.containers:
                 steps.callback(_remove_container, container)
@@ -220,11 +221,6 @@ def _remove_container(container: Container) -> None:
 def _remove_network(network: Network) -> None:
     with contextlib.suppress(docker.errors.NotFound):
         network.remove()
-
-
-def _remove_bridge(client: DockerClient) -> None:
-    with contextlib.suppress(docker.errors.NotFound):
-        client.networks.get(egress.BRIDGE_NETWORK).remove()
 
 
 def _list_name(domains: Sequence[str]) -> str:

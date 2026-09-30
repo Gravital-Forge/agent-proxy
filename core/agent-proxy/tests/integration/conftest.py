@@ -44,6 +44,12 @@ def _label_containers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(egress, "LABELS", TEST_LABELS)
 
 
+def remove_bridge(client: DockerClient) -> None:
+    """Remove the egress bridge network, when it exists."""
+    with contextlib.suppress(docker.errors.NotFound):
+        client.networks.get(egress.BRIDGE_NETWORK).remove()
+
+
 @pytest.fixture(scope="session")
 def docker_client() -> Iterator[DockerClient]:
     """A client for the daemon DOCKER_HOST names."""
