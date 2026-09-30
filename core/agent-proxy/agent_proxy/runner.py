@@ -283,7 +283,6 @@ class Outcome:
     """What a cage produced: its result, and what an audit record needs of it."""
 
     content: Mapping[str, object]
-    script_failed: bool
     exit_code: int
     duration_ms: int
     stdout_bytes: int
@@ -551,14 +550,11 @@ def _outcome(
     stderr: CapturedStream,
 ) -> Outcome:
     if isinstance(action, ScriptAction):
-        content, script_failed = script_content(
-            action.output_schema, exit_code, stdout, stderr
-        )
+        content = script_content(action.output_schema, exit_code, stdout, stderr)
     else:
-        content, script_failed = command_content(exit_code, stdout, stderr), False
+        content = command_content(exit_code, stdout, stderr)
     return Outcome(
         content=content,
-        script_failed=script_failed,
         exit_code=exit_code,
         duration_ms=duration_ms,
         stdout_bytes=stdout.size,

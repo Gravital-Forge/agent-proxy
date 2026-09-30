@@ -31,6 +31,32 @@
         "properties": {"bytes": {"type": "integer"}},
         "required": ["bytes"]
       }
+    },
+    "sleep": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "seconds": {"type": "integer", "minimum": 0, "maximum": 60}
+        },
+        "required": ["seconds"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "90s",
+      "argv": ["sleep"],
+      "parameters": [
+        {"name": "seconds", "as": "positional"}
+      ],
+      "passthrough_args": false
+    },
+    "fail": {
+      "kind": "script",
+      "input_schema": {"type": "object"},
+      "credentials": [],
+      "timeout": "10s",
+      "executable": "/plugin/fail",
+      "output_schema": {"type": "object"}
     }
   }
 }

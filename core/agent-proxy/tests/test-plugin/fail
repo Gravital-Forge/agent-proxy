@@ -1,0 +1,4 @@
+#!/bin/sh
+yes x | head -c 300000 >&2
+echo 'not json'
+exit 3

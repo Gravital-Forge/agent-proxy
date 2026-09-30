@@ -14,6 +14,7 @@ from types import MappingProxyType
 import docker.errors
 import pytest
 import yaml
+from conftest import remove_bridge
 from docker import DockerClient
 from docker.models.containers import Container
 from docker.models.networks import Network
@@ -61,6 +62,7 @@ PROC_NET_SCRIPT = (
 )
 HELPER_TIMEOUT_SECONDS = 30
 CAGE_START_SECONDS = 30
+PRUNE_SECONDS = 30
 POLL_SECONDS = 0.2
 SOURCE_IP_RANGE = ipaddress.ip_network("172.31.9.0/24")
 AGENT_TREE = "/srv/agents/it"
@@ -138,7 +140,7 @@ class _Bench:
         with contextlib.ExitStack() as steps:
             for network in self.networks:
                 steps.callback(_remove_network, network)
-            steps.callback(_remove_bridge, self.client)
+            steps.callback(remove_bridge, self.client)
             steps.callback(self.proxies.prune, ())
             for container in self.containers:
                 steps.callback(_remove_container, container)
@@ -219,11 +221,6 @@ def _remove_container(container: Container) -> None:
 def _remove_network(network: Network) -> None:
     with contextlib.suppress(docker.errors.NotFound):
         network.remove()
-
-
-def _remove_bridge(client: DockerClient) -> None:
-    with contextlib.suppress(docker.errors.NotFound):
-        client.networks.get(egress.BRIDGE_NETWORK).remove()
 
 
 def _list_name(domains: Sequence[str]) -> str:
@@ -327,6 +324,22 @@ def _wait_for_cage(client: DockerClient, network_name: str) -> None:
         time.sleep(POLL_SECONDS)
     pytest.fail(
         f"no cage joined network {network_name!r} within {CAGE_START_SECONDS} seconds"
+    )
+
+
+def _wait_for_list_pruned(client: DockerClient, domains: Sequence[str]) -> None:
+    """Return once a list's proxy container and network are both gone."""
+    name = _list_name(domains)
+    deadline = time.monotonic() + PRUNE_SECONDS
+    while time.monotonic() < deadline:
+        if _container_status(client, name) is None and not _network_exists(
+            client, name
+        ):
+            return
+        time.sleep(POLL_SECONDS)
+    pytest.fail(
+        f"the proxy and network of list {list(domains)!r} were not pruned"
+        f" within {PRUNE_SECONDS} seconds"
     )
 
 
@@ -455,8 +468,7 @@ def test_a_dropped_lists_proxy_goes_after_its_last_cage(
         assert _network_exists(bench.client, _list_name(ORG))
         cage.result()
 
-    assert _container_status(bench.client, _list_name(ORG)) is None
-    assert not _network_exists(bench.client, _list_name(ORG))
+    _wait_for_list_pruned(bench.client, ORG)
     assert _container_status(bench.client, _list_name(COM)) == "running"
 
 

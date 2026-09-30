@@ -3,9 +3,11 @@ import hashlib
 import io
 import json
 import shutil
+import signal
 import stat
 import sys
 import tempfile
+import threading
 from collections.abc import Callable, Collection, Iterable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,12 +16,14 @@ from unittest import mock
 
 import docker.errors
 import pytest
+import uvicorn
 import yaml
 
 from agent_proxy.audit import AuditRecord, AuditWriter
 from agent_proxy.auth import TokenStore
 from agent_proxy.cli import main, run
 from agent_proxy.config import ConfigError, load_config
+from agent_proxy.mcp import Instance, _Server
 from agent_proxy.reload import CONTROL_SOCKET_NAME, ControlServer, LiveConfig, Snapshot
 
 PREFIX = "agent-proxy: "
@@ -59,6 +63,8 @@ RAW_ACTION = {
     "parameters": [],
     "passthrough_args": True,
 }
+SERVE = ["serve", "--host", "127.0.0.1", "--port", "8765"]
+HANDLED_SIGNALS = (signal.SIGINT, signal.SIGTERM)
 
 
 @pytest.fixture
@@ -173,6 +179,43 @@ def _control_server(
         yield
     finally:
         server.close()
+
+
+class FakeInstance:
+    """Stands in for a started Instance, recording its start and its close."""
+
+    def __init__(self) -> None:
+        """Hold a stand-in app; not started, not closed."""
+        self.app = object()
+        self.started_with: tuple[Path, Path, object] | None = None
+        self.closed = False
+
+    def close(self) -> None:
+        """Record the close."""
+        self.closed = True
+
+
+@pytest.fixture
+def fake_instance(
+    state: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[FakeInstance, mock.MagicMock]:
+    """Make Instance.start record its arguments and return a FakeInstance."""
+    fake = FakeInstance()
+    client = mock.MagicMock()
+    monkeypatch.setattr("agent_proxy.cli.docker.from_env", lambda: client)
+
+    def start(
+        state_dir: Path, config_path: Path, docker_client: object
+    ) -> FakeInstance:
+        fake.started_with = (state_dir, config_path, docker_client)
+        return fake
+
+    monkeypatch.setattr(Instance, "start", start)
+    return fake, client
+
+
+def _handlers() -> dict[int, object]:
+    return {sig: signal.getsignal(sig) for sig in HANDLED_SIGNALS}
 
 
 def test_token_mint_prints_the_token_alone(
@@ -659,6 +702,198 @@ def test_reload_with_nothing_listening_exits_1_naming_the_socket(
     assert repr(str(socket_state / CONTROL_SOCKET_NAME)) in err
 
 
+@pytest.mark.parametrize("variable", ["AGENT_PROXY_STATE_DIR", "AGENT_PROXY_CONFIG"])
+def test_serve_with_a_missing_setting_exits_1_naming_it(
+    state: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    variable: str,
+) -> None:
+    """Serve needs the state directory and the config; stderr names the one unset."""
+    monkeypatch.delenv(variable)
+
+    assert main(SERVE) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    _assert_refusal(captured.err)
+    assert variable in captured.err
+
+
+def test_serve_with_docker_unreachable_exits_1_naming_docker_host(
+    state: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A daemon that cannot be reached is one refusal naming DOCKER_HOST."""
+    monkeypatch.setenv("DOCKER_HOST", "unix:///nonexistent/docker.sock")
+
+    def unreachable() -> mock.MagicMock:
+        raise docker.errors.DockerException("Error while fetching server API version")
+
+    monkeypatch.setattr("agent_proxy.cli.docker.from_env", unreachable)
+
+    assert main(SERVE) == 1
+
+    err = capsys.readouterr().err
+    _assert_refusal(err)
+    assert "DOCKER_HOST" in err
+
+
+@pytest.mark.parametrize("port", ["0", "65536", "http"])
+def test_serve_with_a_port_outside_1_to_65535_exits_2(
+    port: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A port that is not an integer from 1 to 65535 is a usage error naming it."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(["serve", "--host", "127.0.0.1", "--port", port])
+
+    assert excinfo.value.code == 2
+    assert repr(port) in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["serve", "--port", "8765"],
+        ["serve", "--host", "127.0.0.1"],
+    ],
+    ids=["no-host", "no-port"],
+)
+def test_serve_without_host_or_port_exits_2(argv: list[str]) -> None:
+    """Both --host and --port are required."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(argv)
+
+    assert excinfo.value.code == 2
+
+
+def test_serve_help_names_host_and_port(capsys: pytest.CaptureFixture[str]) -> None:
+    """The serve help exits 0 and names both options."""
+    with pytest.raises(SystemExit) as excinfo:
+        main(["serve", "--help"])
+
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "--host" in out
+    assert "--port" in out
+
+
+def test_serve_refuses_a_start_that_raises_a_proxy_error(
+    state: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A refused start prints one refusal line per error and exits 1."""
+    monkeypatch.setattr("agent_proxy.cli.docker.from_env", mock.MagicMock)
+    errors = ("config file 'a.yaml': first", "config file 'a.yaml': second")
+
+    def start(state_dir: Path, config_path: Path, client: object) -> FakeInstance:
+        raise ConfigError(*errors)
+
+    monkeypatch.setattr(Instance, "start", start)
+
+    assert main(SERVE) == 1
+
+    assert capsys.readouterr().err == "".join(f"{PREFIX}{line}\n" for line in errors)
+
+
+def test_serve_runs_the_app_on_host_and_port_then_closes_the_instance(
+    state: Path,
+    fake_instance: tuple[FakeInstance, mock.MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Serve starts the instance, runs its app on host and port, then closes it."""
+    instance, client = fake_instance
+    runs: list[tuple[str, int, object, bool]] = []
+
+    def run(self: _Server, sockets: object = None) -> None:
+        runs.append(
+            (self.config.host, self.config.port, self.config.app, instance.closed)
+        )
+
+    monkeypatch.setattr(_Server, "run", run)
+
+    assert main(SERVE) == 0
+
+    assert instance.started_with == (state, state.parent / "config.yaml", client)
+    assert runs == [("127.0.0.1", 8765, instance.app, False)]
+    assert instance.closed is True
+
+
+def test_serve_closes_the_instance_when_run_raises(
+    fake_instance: tuple[FakeInstance, mock.MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A server that fails still closes the instance on the way out."""
+    instance, _ = fake_instance
+
+    def run(self: _Server, sockets: object = None) -> None:
+        raise RuntimeError("the server failed")
+
+    monkeypatch.setattr(_Server, "run", run)
+
+    with pytest.raises(RuntimeError, match="the server failed"):
+        main(SERVE)
+
+    assert instance.closed is True
+
+
+@pytest.mark.parametrize("sig", HANDLED_SIGNALS, ids=["SIGINT", "SIGTERM"])
+def test_capture_signals_turns_a_signal_into_should_exit_and_restores_handlers(
+    sig: signal.Signals,
+) -> None:
+    """On the main thread a caught signal sets should_exit, and none is re-raised.
+
+    Reaching the last assertion shows the context raised no signal on exit.
+    """
+    before = _handlers()
+    server = _Server(uvicorn.Config(object(), host="127.0.0.1", port=8765))
+
+    with server.capture_signals():
+        signal.raise_signal(sig)
+        assert server.should_exit is True
+
+    assert _handlers() == before
+
+
+def test_capture_signals_off_the_main_thread_installs_no_handler() -> None:
+    """Off the main thread, capture_signals leaves every handler as it was."""
+    before = _handlers()
+    server = _Server(uvicorn.Config(object(), host="127.0.0.1", port=8765))
+    seen: list[dict[int, object]] = []
+    failures: list[ValueError] = []
+
+    def enter() -> None:
+        try:
+            with server.capture_signals():
+                seen.append(_handlers())
+        # signal.signal raises ValueError off the main thread.
+        except ValueError as exc:
+            failures.append(exc)
+
+    thread = threading.Thread(target=enter)
+    thread.start()
+    thread.join()
+
+    assert failures == []
+    assert seen == [before]
+    assert _handlers() == before
+
+
+def test_serve_returns_0_and_closes_the_instance_after_a_sigterm(
+    fake_instance: tuple[FakeInstance, mock.MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A SIGTERM while serving ends the run; serve closes the instance and exits 0."""
+    instance, _ = fake_instance
+
+    def run(self: _Server, sockets: object = None) -> None:
+        with self.capture_signals():
+            signal.raise_signal(signal.SIGTERM)
+
+    monkeypatch.setattr(_Server, "run", run)
+
+    assert main(SERVE) == 0
+    assert instance.closed is True
+
+
 def test_no_command_is_a_usage_error() -> None:
     """A bare invocation exits 2 through argparse."""
     with pytest.raises(SystemExit) as excinfo:
@@ -674,7 +909,7 @@ def test_help_lists_the_command_groups(capsys: pytest.CaptureFixture[str]) -> No
 
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    for noun in ("token", "credential", "audit", "manifest", "reload"):
+    for noun in ("token", "credential", "audit", "manifest", "reload", "serve"):
         assert noun in out
 
 

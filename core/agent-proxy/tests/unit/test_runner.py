@@ -687,7 +687,6 @@ def test_run_returns_the_command_result_and_what_the_cage_measured(
 
     assert outcome == Outcome(
         content={"exit_code": 3, "stdout": "é\n", "stderr": ""},
-        script_failed=False,
         exit_code=3,
         duration_ms=outcome.duration_ms,
         stdout_bytes=3,
@@ -707,19 +706,17 @@ def test_run_returns_a_script_s_own_output_when_it_succeeds(
     outcome = _run(client, store, _cage_call(_SCRIPT, {"path": "/work"}))
 
     assert outcome.content == {"ok": True}
-    assert outcome.script_failed is False
 
 
-def test_run_marks_a_script_that_exits_non_zero_as_failed(
+def test_run_returns_the_command_result_for_a_script_that_exits_non_zero(
     store: CredentialStore,
 ) -> None:
-    """A failed script returns the command result and script_failed."""
+    """A failed script returns the command result."""
     client = _client(err=b"boom", status=1)
 
     outcome = _run(client, store, _cage_call(_SCRIPT, {"path": "/work"}))
 
     assert outcome.content == {"exit_code": 1, "stdout": "", "stderr": "boom"}
-    assert outcome.script_failed is True
 
 
 def test_run_spills_a_stream_over_the_cap_and_reports_it_truncated(

@@ -9,10 +9,10 @@ from types import MappingProxyType
 
 import pytest
 import yaml
+from egress_fakes import RecordingEgress
 
 from agent_proxy.config import ConfigError, Grant, load_config
 from agent_proxy.egress import EgressError
-from agent_proxy.errors import ProxyError
 from agent_proxy.plugins import (
     CommandAction,
     Manifest,
@@ -105,25 +105,6 @@ def _egress_snapshot(tmp_path: Path, domains: tuple[str, ...], name: str) -> Sna
     grant = _grant() | {"domains": list(domains)}
     path = _write(tmp_path, _config({"git.clone": grant}), name)
     return build_snapshot(path, CREDENTIAL_NAMES, LOAD_BOTH)
-
-
-class RecordingEgress:
-    """Records each ensure and prune call with the lists it was given."""
-
-    def __init__(self, ensure_error: ProxyError | None = None) -> None:
-        """Start with no calls; ensure raises ensure_error after recording, if set."""
-        self.calls: list[tuple[str, set[tuple[str, ...]]]] = []
-        self._ensure_error = ensure_error
-
-    def ensure(self, lists: Iterable[Collection[str]]) -> None:
-        """Record the lists, then raise ensure_error if one was given."""
-        self.calls.append(("ensure", {tuple(domains) for domains in lists}))
-        if self._ensure_error is not None:
-            raise self._ensure_error
-
-    def prune(self, lists: Iterable[Collection[str]]) -> None:
-        """Record the lists."""
-        self.calls.append(("prune", {tuple(domains) for domains in lists}))
 
 
 class _CallFailedError(Exception):
@@ -455,6 +436,7 @@ def test_the_last_use_of_a_retired_snapshot_prunes_its_list(tmp_path: Path) -> N
             live.reload(lambda: new)
         assert egress.calls == after_reload
 
+    assert egress.wait_for_calls(3, WAIT_SECONDS)
     assert egress.calls == [*after_reload, ("prune", {NEW_DOMAINS})]
 
 
@@ -467,6 +449,7 @@ def test_a_use_of_the_snapshot_in_force_never_prunes_on_exit(tmp_path: Path) -> 
     with live.use() as held:
         assert held is old
 
+    assert not egress.wait_for_calls(1, 0.2)
     assert egress.calls == []
 
 
@@ -485,13 +468,14 @@ def test_use_releases_its_snapshot_when_the_block_raises(tmp_path: Path) -> None
     with pytest.raises(_CallFailedError):
         failing_call()
 
+    assert egress.wait_for_calls(3, WAIT_SECONDS)
     assert egress.calls[-1] == ("prune", {NEW_DOMAINS})
 
 
-def test_a_retired_use_waits_for_a_reload_in_flight_then_prunes(
+def test_a_retired_use_returns_while_a_reload_is_in_flight_then_prunes(
     tmp_path: Path,
 ) -> None:
-    """The last use's exit blocks on a running reload rather than skip its prune."""
+    """The last use's exit returns at once; its prune waits out the running reload."""
     old = _egress_snapshot(tmp_path, OLD_DOMAINS, "old.yaml")
     new = _egress_snapshot(tmp_path, NEW_DOMAINS, "new.yaml")
     egress = RecordingEgress()
@@ -500,6 +484,10 @@ def test_a_retired_use_waits_for_a_reload_in_flight_then_prunes(
     leave = threading.Event()
     build_started = threading.Event()
     release_build = threading.Event()
+    after_first_reload = [
+        ("ensure", {NEW_DOMAINS}),
+        ("prune", {OLD_DOMAINS, NEW_DOMAINS}),
+    ]
 
     def call() -> None:
         with live.use():
@@ -518,18 +506,30 @@ def test_a_retired_use_waits_for_a_reload_in_flight_then_prunes(
         second_reload = pool.submit(live.reload, blocked_build)
         assert build_started.wait(WAIT_SECONDS)
         leave.set()
-        assert wait([in_flight_call], timeout=0.2).not_done == {in_flight_call}
+        assert wait([in_flight_call], timeout=1).done == {in_flight_call}
+        assert not egress.wait_for_calls(len(after_first_reload) + 1, 0.2)
         release_build.set()
 
     in_flight_call.result()
     assert second_reload.result() is new
-    # The second reload's prune may still see the old snapshot in use if the
-    # call thread had not woken yet, so only the call's own prune is exact.
-    assert len(egress.calls) == 5
-    assert egress.calls[:3] == [
+    assert egress.wait_for_calls(5, WAIT_SECONDS)
+    assert egress.calls == [
+        *after_first_reload,
         ("ensure", {NEW_DOMAINS}),
-        ("prune", {OLD_DOMAINS, NEW_DOMAINS}),
-        ("ensure", {NEW_DOMAINS}),
+        ("prune", {NEW_DOMAINS}),
+        ("prune", {NEW_DOMAINS}),
     ]
-    assert egress.calls[3][0] == "prune"
-    assert egress.calls[4] == ("prune", {NEW_DOMAINS})
+
+
+def test_the_prune_on_exit_runs_on_a_thread_named_egress_prune(tmp_path: Path) -> None:
+    """The last use of a retired snapshot leaves its prune to egress-prune."""
+    old = _egress_snapshot(tmp_path, OLD_DOMAINS, "old.yaml")
+    new = _egress_snapshot(tmp_path, NEW_DOMAINS, "new.yaml")
+    egress = RecordingEgress()
+    live = LiveConfig(old, egress)
+
+    with live.use():
+        live.reload(lambda: new)
+
+    assert egress.wait_for_calls(3, WAIT_SECONDS)
+    assert egress.thread_names[2] == "egress-prune"

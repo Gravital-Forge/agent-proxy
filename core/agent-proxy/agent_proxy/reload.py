@@ -123,8 +123,9 @@ class LiveConfig:
     """The snapshot in force, which a reload replaces whole, and its egress.
 
     The egress of every snapshot in force or in use is kept; a prune follows
-    each reload and the last use of a snapshot no longer in force. The reload
-    lock is always taken before the state lock, never while holding it.
+    each reload and, on a thread of its own, the last use of a snapshot no
+    longer in force. The reload lock is always taken before the state lock,
+    never while holding it.
     """
 
     def __init__(self, snapshot: Snapshot, egress: Egress) -> None:
@@ -159,7 +160,9 @@ class LiveConfig:
 
         A call holds its snapshot this way from its start to its end, so the
         egress that snapshot's grants name stays through a reload. When the
-        last use of a snapshot no longer in force exits, egress is pruned.
+        last use of a snapshot no longer in force exits, a daemon thread named
+        egress-prune prunes egress once no reload holds the reload lock; the
+        exit returns without waiting for it.
         """
         with self._state_lock:
             snapshot = self._current
@@ -169,10 +172,9 @@ class LiveConfig:
             yield snapshot
         finally:
             if self._release(snapshot):
-                # Blocks rather than skips: a reload holding the lock may have
-                # read the kept lists while this snapshot was still in use.
-                with self._reload_lock:
-                    self._prune()
+                threading.Thread(
+                    target=self._prune_after_reload, name="egress-prune", daemon=True
+                ).start()
 
     def reload(self, build: Callable[[], Snapshot]) -> Snapshot:
         """Build a snapshot, ensure its egress, and put it in force.
@@ -206,6 +208,12 @@ class LiveConfig:
                 return False
             del self._uses[id(snapshot)]
             return snapshot is not self._current
+
+    def _prune_after_reload(self) -> None:
+        # Waits rather than skips: a reload holding the lock may have read the
+        # kept lists while the retired snapshot was still in use.
+        with self._reload_lock:
+            self._prune()
 
     def _prune(self) -> None:
         with self._state_lock:

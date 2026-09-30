@@ -106,6 +106,10 @@ exempt, and go into argv as the input gives them.
 
 ## How an action runs
 
+An agent sees each action that its token's scope grants as an MCP tool, with the manifest's
+`input_schema` as the tool's input schema. `docs/design.md` gives the surface, and the tool's name,
+under "Surface".
+
 The proxy runs each call in a new cage built from the plugin's image. `docs/architecture.md` gives
 the cage under `runner.py`, and `docs/design.md` gives it under "The cage". The cage's entrypoint
 replaces the image's entrypoint and command:
@@ -118,10 +122,10 @@ The root filesystem is read-only. Write scratch files under `/tmp`, a small tmpf
 
 A script succeeds when it exits 0 and prints on stdout one JSON object that its `output_schema`
 validates. That stdout must decode as the manifest must, by the rules under "The manifest". The call
-then returns that object. Otherwise the script has failed, and the call returns what a command
-action returns: the exit code, stdout, and stderr. A stdout over the output cap goes to an overflow
-file, so a script whose output passes the cap fails. `docs/design.md` gives the cap and the result
-forms under "Results".
+then returns that object. Otherwise the script has failed. The call then returns a normal result
+that holds what a command action returns: the exit code, stdout, and stderr. A stdout over the
+output cap goes to an overflow file, so a script whose output passes the cap fails. `docs/design.md`
+gives the cap and the result forms under "Results".
 
 The cage's network follows the grant's `domains`. `docs/design.md` gives the egress model under "The
 cage", and `docs/architecture.md` gives the network and its proxy under `egress.py`.
@@ -148,7 +152,7 @@ admin command".
 ## A working example
 
 `core/agent-proxy/tests/test-plugin/` is a working plugin. Its `Dockerfile` copies a `manifest.json`
-into the image, and a `describe` script onto the `PATH` that prints it. The manifest declares a
-command action with a flag and a positional parameter, and a script action whose executable the
-image also holds. `COPY` keeps each file's mode, so an executable must already be executable in the
-build context.
+into the image, and a `describe` script onto the `PATH` that prints it. The manifest shows both
+action kinds. Among its actions are a command action with a flag and a positional parameter, and a
+script action whose executable the image also holds. `COPY` keeps each file's mode, so an executable
+must already be executable in the build context.

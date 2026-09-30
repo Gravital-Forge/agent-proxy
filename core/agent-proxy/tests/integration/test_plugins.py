@@ -59,5 +59,5 @@ def test_manifest_check_passes_the_pulled_plugin(
 
     captured = capsys.readouterr()
     assert status == 0
-    assert captured.out == f"manifest ok: {pinned_plugin} declares 2 actions\n"
+    assert captured.out == f"manifest ok: {pinned_plugin} declares 4 actions\n"
     assert captured.err == ""

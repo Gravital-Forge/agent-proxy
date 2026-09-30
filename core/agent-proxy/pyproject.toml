@@ -5,12 +5,14 @@ description = "Per-agent MCP proxy that runs scoped, credentialed actions in cag
 authors = [{name = "Matt Krainski", email = "matt@gravitalforge.com"}]
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "anyio>=4.15.1,<5.0.0",
     "docker>=7.2.0,<8.0.0",
     "fastmcp>=4.0.10,<5.0.0",
     "jsonschema>=4.26.0,<5.0.0",
     "pydantic>=2.13.5,<3.0.0",
     "pyyaml>=6.0.3,<7.0.0",
     "requests>=2.34.2,<3.0.0",
+    "uvicorn>=0.54.0,<0.55.0",
 ]
 
 [project.scripts]
@@ -69,6 +71,9 @@ convention = "google"
 [tool.uv]
 add-bounds = "major"
 preview = true
+
+[tool.pytest.ini_options]
+pythonpath = ["tests/unit"]
 
 [tool.poe.executor]
 type = "uv"

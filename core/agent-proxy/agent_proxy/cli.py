@@ -1,4 +1,4 @@
-"""The agent-proxy admin command: token, credential, audit, manifest check, reload."""
+"""The agent-proxy command: token, credential, audit, manifest check, reload, serve."""
 
 import argparse
 import os
@@ -10,12 +10,14 @@ from pathlib import Path
 
 import docker
 import docker.errors
+import uvicorn
 
 from agent_proxy.audit import tail
 from agent_proxy.auth import TokenStore
 from agent_proxy.config import ConfigError, load_config, parse_duration
 from agent_proxy.credentials import CredentialStore
 from agent_proxy.errors import ProxyError
+from agent_proxy.mcp import Instance, _Server
 from agent_proxy.plugins import ManifestError, check_image
 from agent_proxy.reload import CONTROL_SOCKET_NAME, request_reload
 
@@ -23,6 +25,7 @@ STATE_DIR_VARIABLE = "AGENT_PROXY_STATE_DIR"
 CONFIG_VARIABLE = "AGENT_PROXY_CONFIG"
 DOCKER_HOST_VARIABLE = "DOCKER_HOST"
 _COUNT_PATTERN = r"[1-9][0-9]*"
+_MAX_PORT = 65535
 
 
 class SettingError(ProxyError):
@@ -78,7 +81,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-proxy",
         description="Administer the tokens, credentials, and audit log of one"
-        " proxy instance, check plugin manifests, and reload its config.",
+        " proxy instance, check plugin manifests, reload its config, and serve"
+        " its MCP surface.",
     )
     nouns = parser.add_subparsers(dest="noun", required=True)
     _add_token_commands(
@@ -95,6 +99,9 @@ def _parser() -> argparse.ArgumentParser:
         "reload", help="ask the running proxy to reload its config"
     )
     reload_parser.set_defaults(handler=_reload)
+    _add_serve_command(
+        nouns.add_parser("serve", help="serve the MCP surface until SIGINT or SIGTERM")
+    )
     return parser
 
 
@@ -151,10 +158,29 @@ def _add_manifest_commands(parser: argparse.ArgumentParser) -> None:
     check.set_defaults(handler=_check_manifest)
 
 
+def _add_serve_command(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--host", required=True, help="the address to listen on")
+    parser.add_argument(
+        "--port",
+        required=True,
+        type=_port,
+        help=f"the TCP port to listen on, 1 to {_MAX_PORT}",
+    )
+    parser.set_defaults(handler=_serve)
+
+
 def _positive_count(text: str) -> int:
     if re.fullmatch(_COUNT_PATTERN, text) is None:
         raise argparse.ArgumentTypeError(
             f"COUNT must be a positive integer, got {text!r}"
+        )
+    return int(text)
+
+
+def _port(text: str) -> int:
+    if re.fullmatch(_COUNT_PATTERN, text) is None or int(text) > _MAX_PORT:
+        raise argparse.ArgumentTypeError(
+            f"PORT must be an integer from 1 to {_MAX_PORT}, got {text!r}"
         )
     return int(text)
 
@@ -228,6 +254,14 @@ def _reload(args: argparse.Namespace) -> None:
     for warning in reply.warnings:
         print(f"agent-proxy: warning: {warning}", file=sys.stderr)
     print("reloaded")
+
+
+def _serve(args: argparse.Namespace) -> None:
+    instance = Instance.start(_state_dir(), _config_path(), _docker_client())
+    try:
+        _Server(uvicorn.Config(instance.app, host=args.host, port=args.port)).run()
+    finally:
+        instance.close()
 
 
 def _state_dir() -> Path:
