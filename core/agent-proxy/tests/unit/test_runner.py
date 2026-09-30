@@ -820,6 +820,23 @@ def test_run_goes_on_when_the_script_stops_reading_its_input(
     assert outcome.content == {}
 
 
+def test_run_fails_the_cage_on_another_error_of_the_stdin_socket(
+    store: CredentialStore,
+) -> None:
+    """A socket error other than a timeout or a closed pipe raises CageFailedError."""
+    client = _client()
+    _stdin(client).shutdown.side_effect = OSError(
+        107, "Transport endpoint is not connected"
+    )
+
+    with pytest.raises(CageFailedError, match="not connected"):
+        _run(client, store, _cage_call(_SCRIPT, {"path": "/work"}))
+
+    _container(client).wait.assert_not_called()
+    _stdin(client).close.assert_called_once_with()
+    _container(client).remove.assert_called_once_with(force=True)
+
+
 @pytest.mark.parametrize(
     "error",
     [

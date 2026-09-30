@@ -374,6 +374,7 @@ class _StdinFeed:
 
         Raises:
             CageTimeoutError: the time runs out before or while sending.
+            CageFailedError: the socket fails otherwise.
         """
         self.raw.settimeout(deadline.remaining())
         try:
@@ -384,6 +385,10 @@ class _StdinFeed:
         except (BrokenPipeError, ConnectionResetError):
             # The script stopped reading its input; its exit tells the rest.
             return
+        except OSError as exc:
+            raise CageFailedError(
+                f"action {deadline.action!r}: the cage's input could not be sent: {exc}"
+            ) from exc
 
 
 def _set_up(call: CageCall, store: CredentialStore) -> _CageSetup:
