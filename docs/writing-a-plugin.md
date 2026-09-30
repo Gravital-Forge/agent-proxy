@@ -29,6 +29,10 @@ The manifest is a JSON object. No key repeats in one object, and every number is
 object that the manifest format defines refuses a member it does not name. `input_schema` and
 `output_schema` are JSON Schemas, so they take any member that JSON Schema allows.
 
+The parser refuses what it cannot check. The manifest and each schema it embeds must nest shallowly
+enough for Python's recursion limit, and each integer must stay within Python's digit limit for
+converting text to an integer.
+
 The manifest has one member, `actions`. It is an object with at least one member. Each key is an
 action name, which matches `ACTION_NAME_PATTERN` in `config.py`. Each value is an action. An
 operator grants an action to a scope under the key `<plugin>.<action>`, where `<plugin>` is the name
