@@ -10,7 +10,7 @@ import pytest
 from docker import DockerClient
 from docker.models.containers import Container
 
-from agent_proxy import plugins, runner
+from agent_proxy import egress, plugins, runner
 
 TEST_LABELS = {"agent-proxy.test": "1"}
 REGISTRY_IMAGE = (
@@ -25,6 +25,8 @@ RUNNER_IMAGE_TAG = f"{PLUGIN_NAME}:runner"
 # The extra label gives this build its own image ID, apart from the image the
 # pinned_plugin fixture force-removes by ID.
 RUNNER_IMAGE_LABELS = TEST_LABELS | {"agent-proxy.test.fixture": "runner"}
+PROBE_DIR = Path(__file__).parent.parent / "egress-probe"
+PROBE_IMAGE_TAG = "apx-egress-probe:it"
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
@@ -39,6 +41,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 def _label_containers(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(plugins, "CONTAINER_LABELS", TEST_LABELS)
     monkeypatch.setattr(runner, "CONTAINER_LABELS", TEST_LABELS)
+    monkeypatch.setattr(egress, "LABELS", TEST_LABELS)
 
 
 @pytest.fixture(scope="session")
@@ -99,6 +102,22 @@ def runner_image(docker_client: DockerClient) -> Iterator[str]:
     )
     try:
         yield RUNNER_IMAGE_TAG
+    finally:
+        docker_client.images.remove(image.id, force=True)
+
+
+@pytest.fixture(scope="session")
+def probe_image(docker_client: DockerClient) -> Iterator[str]:
+    """The tag of the curl probe image every egress test cage runs."""
+    image, _ = docker_client.images.build(
+        path=str(PROBE_DIR),
+        tag=PROBE_IMAGE_TAG,
+        labels=TEST_LABELS,
+        rm=True,
+        forcerm=True,
+    )
+    try:
+        yield PROBE_IMAGE_TAG
     finally:
         docker_client.images.remove(image.id, force=True)
 
