@@ -3,7 +3,8 @@
 The pipeline is four jobs — PM, Plan, Build, and Merge — one worker each, supervised by baton, with
 the repository's files on `task/poc`, each item worktree's `.local/impl/` files, the pull request
 record, and baton's event log as the only memory between jobs. Every job document in this directory
-repeats the rules its job needs, so a worker reads its own job document and this one.
+adds what its job alone does and cites this one for the rest, so a worker reads its own job document
+and this one.
 
 The cycle is PM, then Plan, then Build, then Merge, then PM again. PM checks the project is on track
 and picks the next item; Plan writes the item's spec and plan; Build implements them and opens the
@@ -71,14 +72,15 @@ sidecar's `git_log` has no first-parent option. The roadmap stores no status.
   reason outside its item — writes it in the current durable home and hands off to PM with a
   `Blocker:` line. PM decides: fold a fix into the current item, add a roadmap entry, replan, or
   report `blocked`.
-- **Deployment is out of scope.** A check that needs root, a second user, or a real credential is a
-  deployment acceptance check: it is written into `docs/runbooks/per-agent-instance.md` and is not
-  run. A job never asks the operator to run one.
-- **Decisions have durable homes.** A pull request body carries two fixed headings, `## Fork log`
-  and `## Plan tasks`, copied from the item's spec and plan. Blockers, their resolutions, and Merge
-  verdicts are pull request comments. Before a pull request exists, a blocker and its resolution go
-  under a dated `## Decisions` heading in the item's spec. A roadmap change and its reason go in
-  PM's roadmap commit message. Handoff prompts point at these homes and repeat nothing from them.
+- **Deployment is out of scope.** A job handles a deployment acceptance check as
+  `.dev/verification.md` defines it, and never asks the operator to run one.
+- **Decisions have durable homes.** A pull request body carries the fixed headings
+  `.dev/task-management.md` sets: `## Fork log` and `## Decisions` from the item's spec, and
+  `## Plan tasks` from its plan. Blockers, their resolutions, and Merge verdicts are pull request
+  comments. Before a pull request exists, a blocker and its resolution go under a dated
+  `## Decisions` heading in the item's spec, which the body then copies. A roadmap or design change
+  and its reason go in PM's commit message. Handoff prompts point at these homes and repeat nothing
+  from them.
 - **Handoff prompts are short**, one line each:
 
   ```text
@@ -107,7 +109,7 @@ sidecar's `git_log` has no first-parent option. The roadmap stores no status.
 
 ## Rules that keep a context small
 
-These come from the retrospective on the saas-starter run. Each is an instruction, not a tool.
+Each is an instruction, not a tool.
 
 - **Read sections, not documents.** A dispatch names the section it wants read: the *How to use it*
   section of `.dev/verification.md`, one task of the plan. A lead receives its own task and the
@@ -123,14 +125,14 @@ These come from the retrospective on the saas-starter run. Each is an instructio
   fetch lines through the `source-reader` agent, which returns each hit as a path, a line range, and
   the lines; choose what to examine, and decide what it means, yourself.
 - **Package archaeology is delegated.** Reading a dependency's source or a container image's
-  contents is a subagent's job; the coordinator receives the conclusion and a citation, never the
+  contents is a subagent's job; the job worker receives the conclusion and a citation, never the
   dump.
 - **Wait by ending the turn.** After a background dispatch, an agent with nothing else to do ends
   its turn; the completion notification re-invokes it. A poll turn is never how to wait.
-- **Mutate tracked files with the edit tools.** Read however you like, batched. Change a tracked
-  file only with `Edit` or `Write`, which refuse and report on a mismatch; a heredoc or inline
-  script that asserts and exits discards the batch silently. Read a multi-edit batch back before
-  calling it landed.
+- **Change every file only with `Edit` or `Write`.** That covers untracked files too: the item's
+  spec, its plan, and the dry-run record. Read however you like, batched. `Edit` and `Write` refuse
+  and report on a mismatch; a heredoc or inline script that asserts and exits discards the batch
+  silently. Read a multi-edit batch back before calling it landed.
 - **Check the sidecar before the first write.** A job's first sidecar call on any route is
   `git_status`. A bare `Invalid request parameters` is a stale connection: reconnect with `/mcp` and
   retry before concluding anything else. Load the sidecar tools the job needs in one `ToolSearch`
@@ -179,8 +181,6 @@ binding stops for a person.
   PM. PM answers from the design and the bindings or reports `blocked`.
 - **A new vendor, credential, or runtime dependency outside the design** — the design's Decision
   directives send it to the operator: a blocker to PM, which reports `blocked`.
-- **The `version-control` binding's inconclusive threshold for the CI watch** — the threshold
-  `.dev/version-control.md` gives.
 - **A denied tool call, as the auto-mode classifier's own denial or as the hook's
   `auto mode rejected that command`** — route around it: vary the call, or reach the outcome another
   sanctioned way. When no route exists, a blocker to PM. Never a silent end of turn.
@@ -190,6 +190,8 @@ binding stops for a person.
 
 - **Job** — one of PM, Plan, Build, or Merge: one worker, one concrete goal, starting from named
   artifacts and ending by leaving named artifacts.
+- **Job worker** — the main agent of a job's baton session. It reads the job document, dispatches
+  every subagent the job uses, and makes the job's lifecycle report.
 - **Primary clone**, **project worktree**, **item worktree** — the three checkouts
   `.dev/version-control.md` places.
 - **Project route**, **item route**, **primary route** — the sidecar routes
@@ -203,9 +205,8 @@ binding stops for a person.
 - **Light bar** — the light bar `.dev/verification.md` defines.
 - **Heavy bar** — the heavy bar `.dev/verification.md` defines.
 - **Full bar** — the full bar `.dev/verification.md` defines.
-- **Deployment acceptance checks** — the checks that need root, a second user, or a real credential.
-  The design lists them, `docs/runbooks/per-agent-instance.md` carries them as steps, and no job
-  runs them.
+- **Deployment acceptance checks** — the checks `.dev/verification.md` defines. The design lists the
+  project's own.
 - **Fork walk** — the Plan job's enumeration of every fork an interactive grilling would have put to
   the operator, each resolved against the design's closed decisions, then its Decision directives in
   order, then `docs/architecture.md` when it exists.

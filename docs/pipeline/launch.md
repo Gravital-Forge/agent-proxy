@@ -5,17 +5,7 @@ pipeline, and on to its end. `<workspace root>` is the harness clone's absolute 
 `<state directory>` is baton's state directory; `BATON_STATE_DIR` names it, and it is
 `~/.local/state/baton` when that variable is unset.
 
-## 1 · Retire the pre-spike design
-
-Do this step once the seed has merged into `task/poc`.
-
-1. Delete `<workspace root>/projects/agent-proxy-poc/CLAUDE.local.md`.
-2. Delete `<workspace root>/projects/agent-proxy-poc/.local/impl/spec.md`.
-
-Both files describe the design as it stood before the spike. `docs/design.md` replaces them, so the
-deletion is deliberate. **Pass:** prerequisite 7 below holds.
-
-## 2 · Prerequisites
+## 1 · Prerequisites
 
 These hold before a worker launches. Each names the command that confirms it.
 
@@ -36,11 +26,8 @@ These hold before a worker launches. Each names the command that confirms it.
 6. The seed merge is on `task/poc`. **Pass:** after
    `git -C <workspace root>/projects/agent-proxy-poc pull`,
    `git -C <workspace root>/projects/agent-proxy-poc log -1 --oneline` shows the seed's merge.
-7. The project worktree holds no pre-spike design, because `docs/design.md` supersedes it. **Pass:**
-   `ls <workspace root>/projects/agent-proxy-poc/CLAUDE.local.md` fails, and
-   `ls <workspace root>/projects/agent-proxy-poc/.local/impl/spec.md` fails.
 
-## 3 · Dry run
+## 2 · Dry run
 
 The dry run is a short project. It runs every command shape a job needs and records which ones auto
 mode rejects.
@@ -66,7 +53,7 @@ mode rejects.
 
    --- initial_prompt begins ---
    Job: dry run
-   Read first: <workspace root>/projects/agent-proxy-poc/docs/pipeline/launch.md, section 3.
+   Read first: <workspace root>/projects/agent-proxy-poc/docs/pipeline/launch.md, section 2.
    Create the worktree projects/agent-proxy-dry-run on branch task/dry-run through the sidecar
    on the project route, with the path in the route form .dev/version-control.md gives.
    In it, run every command in the dry-run list, in order, and after each record the command
@@ -82,7 +69,7 @@ mode rejects.
 3. Wait for the dry-run worker to report. Then ask the setup agent to call `close_project` with the
    project id. **Pass:** `list_projects` no longer lists the project.
 
-`project_path` is `<workspace root>` here and in section 4, not the project worktree. Workers start
+`project_path` is `<workspace root>` here and in section 3, not the project worktree. Workers start
 in the harness root, where the `baton-worker` skill and the harness load.
 
 The dry-run list, run from the dry-run worktree root:
@@ -117,7 +104,7 @@ hook's denial reads `auto mode rejected that command`. The record names which fo
 command. Every rejection in the record is either routed around in a job document or removed from
 what a job runs.
 
-## 4 · Start the pipeline
+## 3 · Start the pipeline
 
 Paste this whole message into the same setup-agent session:
 
@@ -146,7 +133,7 @@ The project model is `claude-opus-5-5`, and every worker runs on it: the first P
 handoff starts, and each diagnosis or resumed worker baton starts on its own. No handoff names a
 model. `.dev/models.md` holds the rule.
 
-## 5 · Operating
+## 4 · Operating
 
 Three places say where the project stands:
 
@@ -155,7 +142,9 @@ Three places say where the project stands:
   finished item.
 - The repository's pull request list holds one open item pull request at most.
 
-Notification reaches the operator three ways, and `docs/pipeline/index.md` holds the rule.
+`docs/pipeline/index.md` says how the pipeline notifies the operator.
+
+To watch a worker, or to act on one that is stuck:
 
 - **Attach.** Run `tmux attach -t =baton-agent-proxy`. The `=` is tmux's exact-match prefix. Detach
   with the tmux prefix, then `d`.
@@ -165,9 +154,9 @@ Notification reaches the operator three ways, and `docs/pipeline/index.md` holds
   diagnosis worker.
 - **A blocked PM.** The phase reads `blocked`. Attach and type the answer into the pane.
 - **A parked project.** The phase reads `failed`. Call `resume_project` with the project id and the
-  PM prompt from section 4.
+  PM prompt from section 3.
 
-## 6 · Ending
+## 5 · Ending
 
 1. PM reports `completed`. **Pass:** the first-parent log of `task/poc` carries one merge for every
    entry in `docs/roadmap.md`.

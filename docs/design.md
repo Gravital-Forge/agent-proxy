@@ -307,8 +307,8 @@ bars that run them.
 
 ### Deployment acceptance checks
 
-These need a service user, a second agent, or root. `docs/runbooks/per-agent-instance.md` carries
-them as steps, and the project does not run them.
+`.dev/verification.md` defines a deployment acceptance check and how the project handles one. These
+are the design's, and `docs/runbooks/per-agent-instance.md` carries them as steps.
 
 - The provisioning script is run twice on a clean host with no change on the second run.
 - A cage on the service user's daemon writes the agent's tree with the owner, group, and mode that
@@ -333,9 +333,8 @@ The `S` checks need no counterpart on the agent's daemon: in a deployment, cages
 - Credential masking or TLS interception in the egress proxy.
 - Deployment. The operator, on 2026-09-30: "deployment is out of scope. Focus on implementation".
   The project builds the application and its deployment artifacts, and runs neither on a host.
-  Provisioning a host, running the checks that need root or a second user, configuring an instance
-  for a real agent, switching the harness to agent-proxy, and retiring git-sidecar come after the
-  project.
+  Provisioning a host, running the deployment acceptance checks, configuring an instance for a real
+  agent, switching the harness to agent-proxy, and retiring git-sidecar come after the project.
 
 ## Known gaps
 

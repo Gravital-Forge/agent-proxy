@@ -35,43 +35,40 @@ the light bar, and gives the model `.dev/models.md` sets for the lead and for ev
 dispatches. Each lead's checkpoint runs the light bar. After a dispatch, end the turn and wait for
 the completion notification. A sidecar index-lock error is a retry, not an anomaly.
 
-### Wrap
+### Close out
 
-Run `/wrap`: the closing checkpoint with code review and documentation review, the light bar on
-every fix commit. Each reviewer dispatch tells the reviewer to fetch files through the
-`source-reader` agent and keep its own judgment; a later round goes back to the same reviewer with
-`SendMessage` inside five minutes.
+Run step 1 of `/wrap` alone: the closing checkpoint on the full changeset, with code review and
+documentation review, and the light bar on every fix commit. Dispatch each reviewer under
+`index.md`'s rules *Reviewers delegate retrieval and keep judgment* and
+*A later review round is a follow-up*. Build's own steps below replace wrap's submit, CI-watch, and
+notify steps, and run in this order.
 
-After wrap's last fix, run the heavy bar once, as `.dev/verification.md` defines it, leftover check
-included. A red inside the item is fixed, checkpointed, and the heavy bar runs again. A red for a
-reason outside the item is something broken under `index.md`.
-
-Open the pull request on the item route with `gh_pr_create` and `base="task/poc"`. Its body carries
-the two fixed headings: `## Fork log` copied from `.local/impl/spec.md`, and `## Plan tasks` copied
-from `.local/impl/plan.md`.
-
-### Watch CI
-
-Watch the pull request's checks to green with `gh_pr_checks` on the item route, by the CI watch
-`.dev/version-control.md` sets. A round is one red verdict answered by a fix, a checkpoint, and a
-push. A third red round on one pull request is a blocker to PM. A red by timeout counts toward no
-round.
+1. **Heavy bar.** After the last fix, run the heavy bar once, as `.dev/verification.md` defines it,
+   leftover check included. A red inside the item is fixed, checkpointed, and the heavy bar runs
+   again. A red for a reason outside the item is something broken under `index.md`.
+2. **Pull request.** With no `PR` line in the prompt, open the pull request with `gh_pr_create` on
+   the item route and `base="task/poc"`. With a `PR` line, that pull request exists: push the fixes
+   to `task/<slug>` with `git_push` on the item route, and rewrite its body with `gh_pr_edit`.
+   Create no second pull request. The body carries the fixed headings `.dev/task-management.md`
+   sets: `## Fork log` copied from `.local/impl/spec.md`, `## Plan tasks` copied from
+   `.local/impl/plan.md`, and `## Decisions` copied from `.local/impl/spec.md` when the spec has
+   one.
+3. **Notify.** Notify that the pull request opened, or that it was updated when the prompt carried a
+   `PR` line. Notify means what `index.md` defines.
+4. **Watch CI.** Watch the pull request's checks to green with `gh_pr_checks` on the item route, by
+   the CI watch `.dev/version-control.md` sets. Count each red round under `index.md`'s rule
+   *CI rounds are counted*.
 
 ## Out
 
-A pull request open against `task/poc`, the heavy bar and CI green on its head commit, carrying
-`## Fork log` and `## Plan tasks` in its body.
+A pull request open against `task/poc`, the heavy bar and CI green on its head commit, carrying the
+fixed headings `.dev/task-management.md` sets in its body.
 
 ## Handoff
 
-The report is the last act. A job lands every artifact, confirms each one by reading it back through
-git or the pull request, and then calls
-`report_lifecycle(worker_id, state="success", message, next_prompt)` once. `worker_id` is the
-`BATON_WORKER_ID` environment variable. The call omits `model`. Nothing follows the call.
-
-Before that call, run the usage check `index.md` sets.
-
-The next prompt takes the pinned shape, one line each:
+Hand off under `index.md`'s rules *The report is the last act* and
+*Usage is checked before every `success` report*. The next prompt takes the pinned shape, one line
+each:
 
 ```text
 Job: <PM | Plan | Build | Merge>
@@ -83,6 +80,4 @@ Read first: <workspace root>/projects/agent-proxy-poc/docs/pipeline/index.md
 Build writes one prompt: `Job: Merge`, the slug, and `PR: #<number>`.
 
 A blocker instead sends `Job: PM` with the slug, the `PR` line where a pull request exists, and one
-added line, `Blocker: <one sentence>`, naming the durable home where the blocker is written: a pull
-request comment once one exists, and a dated `## Decisions` heading in `.local/impl/spec.md` before
-that.
+added line, `Blocker: <one sentence>`, naming the durable home `index.md` sets for the blocker.

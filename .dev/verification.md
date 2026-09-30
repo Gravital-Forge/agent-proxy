@@ -11,7 +11,7 @@ runs it and when.
   from the repository root. An implementer-lead runs it at every task checkpoint. A package that
   declares fewer than `lint` and `test` is a gap the bar reports, never a pass.
 - The **heavy bar** is `poe test-integration` in every package, run against the agent's own rootless
-  Docker daemon, which `DOCKER_HOST` names. The orchestrator alone runs it, once per Build and once
+  Docker daemon, which `DOCKER_HOST` names. The job worker alone runs it, once per Build and once
   per Merge. A package that declares no `test-integration` is a gap the bar reports, never a pass.
 - The **full bar** is the light bar, the heavy bar, and CI green on the head commit.
 
@@ -27,9 +27,9 @@ runs it and when.
   docker volume ls -q --filter label=agent-proxy.test=1
   ```
 
-- Every check runs as the agent's own user. A check that needs root or another user belongs to
-  deployment: write it into the deployment acceptance checks in
-  `docs/runbooks/per-agent-instance.md`, and leave it unrun here.
+- Every check runs as the agent's own user. A **deployment acceptance check** is a check that needs
+  root, a second user, or a real credential. Write it into `docs/runbooks/per-agent-instance.md` as
+  a step, and never run it in the project.
 
 Everything else resolves to the workspace root's `verification` topic, which owns how a package
 declares its checks.

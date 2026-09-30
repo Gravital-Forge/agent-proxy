@@ -67,10 +67,10 @@ decisions each entry builds on.
 7. **github-plugin** — Build `plugins/github`: an action for every GitHub tool git-sidecar offers,
    with `api.github.com` and `github.com` as its grant's domains and `GH_TOKEN` as its credential.
    Then review the image-based plugin form against the two built plugins; the outcome replaces the
-   provisional line in `docs/design.md`.
+   provisional line in `docs/design.md`'s Plugins and actions section.
 
    **Done when** each action passes against a stubbed `gh`; `manifest check` passes in CI; and
-   `docs/design.md` records the plugin form as settled.
+   `docs/design.md`'s Plugins and actions section records the plugin form as settled.
 8. **packaging** — Build the deployment artifacts and exercise them without root: the instance
    image, `core/docker/provision-instance.sh <agent> <port> <config-file>` and its teardown, a
    sample instance config under `examples/`, and `docs/runbooks/per-agent-instance.md`, which

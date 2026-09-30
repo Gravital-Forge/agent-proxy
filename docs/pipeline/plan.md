@@ -48,25 +48,22 @@ roadmap entry, a pointer to the roadmap entry by slug and to the design by secti
 `## Fork log` heading carrying each fork, its resolution, and the section or directive that decided
 it. Copy nothing else from the design; cite it. A fork nothing resolves is a blocker to PM.
 
-A done-when clause that needs root, a second user, or a real credential is a deployment acceptance
-check under `index.md`'s rule: the spec places it in `docs/runbooks/per-agent-instance.md`, and no
-task runs it.
+A done-when clause that is a deployment acceptance check, as `.dev/verification.md` defines one, is
+placed by the spec in `docs/runbooks/per-agent-instance.md`, and no task runs it.
 
 ### Write the plan
 
 Run `/writing-plans` to produce `.local/impl/plan.md`. Every task names the paths it writes. A claim
 about a dependency's API, or about Docker, iron-proxy, git, or `gh` behavior, is confirmed by a
 subagent that reads the source or runs the pinned version and returns the finding with a citation;
-the coordinator never reads a dependency's source or a container image's contents itself. A claim no
+the job worker never reads a dependency's source or a container image's contents itself. A claim no
 subagent can confirm becomes a spike task that opens the plan, or a blocker to PM when a spike
 cannot settle it.
 
 Dispatch every reviewer `writing-plans` names, in parallel, each with the model `.dev/models.md`
-gives. Each dispatch tells the reviewer to fetch files through the `source-reader` agent and keep
-its own judgment. A later round goes back to the same reviewer with `SendMessage`, inside five
-minutes of the fixes, carrying what changed and asking for a diff against its prior round. Every
-reviewer returning Approved is the approval: append a `## Review` heading to the plan carrying each
-reviewer's status line, and continue.
+gives, under `index.md`'s rules *Reviewers delegate retrieval and keep judgment* and
+*A later review round is a follow-up*. Every reviewer returning Approved is the approval: append a
+`## Review` heading to the plan carrying each reviewer's status line, and continue.
 
 ## Out
 
@@ -76,13 +73,9 @@ reviewer's status line, and continue.
 
 ## Handoff
 
-The report is the last act. A job lands every artifact, confirms each one by reading it back, and
-then calls `report_lifecycle(worker_id, state="success", message, next_prompt)` once. `worker_id` is
-the `BATON_WORKER_ID` environment variable. The call omits `model`. Nothing follows the call.
-
-Before that call, run the usage check `index.md` sets.
-
-The next prompt takes the pinned shape, one line each:
+Hand off under `index.md`'s rules *The report is the last act* and
+*Usage is checked before every `success` report*. The next prompt takes the pinned shape, one line
+each:
 
 ```text
 Job: <PM | Plan | Build | Merge>
@@ -94,5 +87,5 @@ Read first: <workspace root>/projects/agent-proxy-poc/docs/pipeline/index.md
 Plan writes one prompt: `Job: Build`, the slug, and no `PR` line.
 
 A blocker instead sends `Job: PM` with the slug and one added line, `Blocker: <one sentence>`,
-naming the durable home where the blocker is written. Before a pull request exists that home is a
-dated `## Decisions` heading in the item's `.local/impl/spec.md`.
+naming the durable home where the blocker is written: a dated `## Decisions` heading in the item's
+`.local/impl/spec.md`, as `index.md` sets.

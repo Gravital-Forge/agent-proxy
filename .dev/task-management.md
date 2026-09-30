@@ -7,8 +7,9 @@ The Merge job merges a ready pull request into `task/poc`. An item is done when
 `git log --first-parent --oneline task/poc`, run in the project worktree, carries a merge commit
 naming `task/<slug>`.
 
-A pull request body carries two fixed headings, `## Fork log` and `## Plan tasks`, copied from the
-item worktree's spec and plan.
+A pull request body carries three fixed headings, copied from the item worktree's spec and plan:
+`## Fork log` from the spec, `## Plan tasks` from the plan, and `## Decisions` from the spec when
+the spec has one.
 
 `docs/pipeline/index.md` defines what notification means inside the pipeline.
 
