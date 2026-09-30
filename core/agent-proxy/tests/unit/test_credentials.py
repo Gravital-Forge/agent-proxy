@@ -151,6 +151,47 @@ def test_names_are_the_stored_names(directory: Path) -> None:
     assert store.names() == frozenset({"alpha", "zulu"})
 
 
+def test_read_returns_the_stored_bytes(directory: Path) -> None:
+    """read() returns the value verbatim, trailing newline included."""
+    store = CredentialStore(directory)
+    store.set("github-token", b"s3cret\n")
+
+    assert store.read("github-token") == b"s3cret\n"
+
+
+def test_path_is_the_credential_file(directory: Path) -> None:
+    """path() names the file the store keeps the credential in."""
+    store = CredentialStore(directory)
+    store.set("github-token", b"s3cret")
+
+    assert store.path("github-token") == directory / "github-token"
+
+
+@pytest.mark.parametrize("method", ["read", "path"])
+def test_read_and_path_refuse_an_unknown_name(directory: Path, method: str) -> None:
+    """A valid name the store does not hold is refused and named."""
+    store = CredentialStore(directory)
+    store.set("alpha", b"a")
+
+    with pytest.raises(UnknownCredentialError, match="github-token"):
+        getattr(store, method)("github-token")
+
+
+@pytest.mark.parametrize("method", ["read", "path"])
+@pytest.mark.parametrize("name", ["Bad_Name", "../escape", "github-token\n"])
+def test_read_and_path_refuse_an_invalid_name(
+    tmp_path: Path, directory: Path, method: str, name: str
+) -> None:
+    """A name outside NAME_PATTERN is refused as invalid, even if a file matches it."""
+    (tmp_path / "escape").write_bytes(b"outside")
+    store = CredentialStore(directory)
+
+    with pytest.raises(InvalidNameError) as raised:
+        getattr(store, method)(name)
+
+    assert repr(name) in str(raised.value)
+
+
 def test_remove_deletes_the_credential(directory: Path) -> None:
     """A removed credential's file is gone and it is no longer an entry."""
     store = CredentialStore(directory)

@@ -19,6 +19,8 @@ def test_build_snapshot_pulls_a_pinned_plugin_and_loads_its_manifest(
         yaml.safe_dump(
             {
                 "agent_tree": "/srv/agents/it",
+                "overflow_dir": "/srv/agents/it/overflow",
+                "max_cages": 4,
                 "plugins": {"apx-test": pinned_plugin},
                 "scopes": {
                     "it": {

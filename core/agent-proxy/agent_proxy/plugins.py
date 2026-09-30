@@ -40,13 +40,13 @@ DESCRIBE_TIMEOUT_SECONDS = 30
 DESCRIBE_STDOUT_LIMIT = 1024 * 1024
 STDERR_EXCERPT_LIMIT = 1024
 CONTAINER_LABELS: Mapping[str, str] = types.MappingProxyType({})
-_DOCKER_FAILURES = (
+DOCKER_FAILURES = (
     docker.errors.DockerException,
     requests.exceptions.RequestException,
 )
 # Over a Unix socket the SDK's wait raises ConnectionError on timeout, not the
 # ReadTimeout its docstring names; another transport may raise the latter.
-_WAIT_TIMEOUTS = (
+WAIT_TIMEOUTS = (
     requests.exceptions.ConnectionError,
     requests.exceptions.ReadTimeout,
 )
@@ -166,7 +166,7 @@ def parse_manifest(data: bytes) -> Manifest:
             cannot state, or embeds a schema nested too deep to check. It
             holds one message per failure.
     """
-    document = _decode(data)
+    document = decode_json_object(data)
     failures = _schema_failures(document)
     if failures:
         raise ManifestError(*failures)
@@ -177,7 +177,7 @@ def parse_manifest(data: bytes) -> Manifest:
     return _to_manifest(manifest)
 
 
-def _decode(data: bytes) -> dict[str, object]:
+def decode_json_object(data: bytes) -> dict[str, object]:
     """Return the JSON object data holds.
 
     Raises:
@@ -324,21 +324,29 @@ def _command_failures(where: str, action: _CommandDoc) -> Iterator[str]:
 def _parameter_failures(
     where: str, parameters: list[_ParameterDoc], properties: Mapping[str, object]
 ) -> Iterator[str]:
-    seen: set[str] = set()
+    seen_names: set[str] = set()
+    seen_flags: set[str] = set()
     for index, parameter in enumerate(parameters):
         at = f"{where}.parameters[{index}]"
         name = parameter["name"]
         if name == "args":
             yield f"{at}.name: parameter name must not be 'args', got {name!r}"
-        if name in seen:
+        if name in seen_names:
             yield (
                 f"{at}.name: parameter name must not repeat an earlier "
                 f"parameter's, got {name!r}"
             )
-        seen.add(name)
+        seen_names.add(name)
         flag = parameter.get("flag")
-        if flag is not None and re.fullmatch(FLAG_PATTERN, flag) is None:
-            yield f"{at}.flag: flag must match {FLAG_PATTERN!r}, got {flag!r}"
+        if flag is not None:
+            if re.fullmatch(FLAG_PATTERN, flag) is None:
+                yield f"{at}.flag: flag must match {FLAG_PATTERN!r}, got {flag!r}"
+            if flag in seen_flags:
+                yield (
+                    f"{at}.flag: flag must not repeat an earlier parameter's, "
+                    f"got {flag!r}"
+                )
+            seen_flags.add(flag)
         if name not in properties:
             yield (
                 f"{at}.name: parameter name must be a property of input_schema, "
@@ -469,7 +477,7 @@ def ensure_image(client: DockerClient, reference: str) -> None:
         client.images.get(reference)
     except docker.errors.ImageNotFound:
         _pull(client, reference)
-    except _DOCKER_FAILURES as exc:
+    except DOCKER_FAILURES as exc:
         raise PluginImageError(
             f"image {reference!r} could not be looked up: {exc}"
         ) from exc
@@ -497,7 +505,7 @@ def describe(client: DockerClient, image: str) -> bytes:
 def _pull(client: DockerClient, reference: str) -> None:
     try:
         client.images.pull(reference)
-    except _DOCKER_FAILURES as exc:
+    except DOCKER_FAILURES as exc:
         raise PluginImageError(
             f"image {reference!r} could not be pulled: {exc}"
         ) from exc
@@ -516,7 +524,7 @@ def _create_describe_container(client: DockerClient, image: str) -> Container:
         )
     except docker.errors.ImageNotFound as exc:
         raise PluginImageError(f"image {image!r} is not present") from exc
-    except _DOCKER_FAILURES as exc:
+    except DOCKER_FAILURES as exc:
         raise PluginImageError(
             f"image {image!r}: the describe container could not be created: {exc}"
         ) from exc
@@ -533,7 +541,7 @@ def _run_describe(container: Container, image: str) -> bytes:
                 f"stderr {excerpt!r}"
             )
         stdout = container.logs(stdout=True, stderr=False)
-    except _DOCKER_FAILURES as exc:
+    except DOCKER_FAILURES as exc:
         raise PluginImageError(f"image {image!r}: describe failed: {exc}") from exc
     if len(stdout) > DESCRIBE_STDOUT_LIMIT:
         raise PluginImageError(
@@ -546,7 +554,7 @@ def _run_describe(container: Container, image: str) -> bytes:
 def _wait(container: Container, image: str) -> int:
     try:
         result = container.wait(timeout=DESCRIBE_TIMEOUT_SECONDS)
-    except _WAIT_TIMEOUTS as exc:
+    except WAIT_TIMEOUTS as exc:
         raise PluginImageError(
             f"image {image!r}: describe did not exit within "
             f"{DESCRIBE_TIMEOUT_SECONDS} seconds"
@@ -562,7 +570,7 @@ def _stderr_excerpt(container: Container) -> str:
 def _remove_container(container: Container, image: str) -> None:
     try:
         container.remove(force=True)
-    except _DOCKER_FAILURES as exc:
+    except DOCKER_FAILURES as exc:
         raise PluginImageError(
             f"image {image!r}: the describe container could not be removed: {exc}"
         ) from exc

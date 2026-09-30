@@ -77,8 +77,35 @@ class CredentialStore:
         """Return the names of the stored credentials."""
         return frozenset(entry.name for entry in self.entries())
 
+    def read(self, name: str) -> bytes:
+        """Return the value stored under name.
+
+        Raises:
+            InvalidNameError: name does not match NAME_PATTERN.
+            UnknownCredentialError: no credential is stored under name.
+        """
+        return self.path(name).read_bytes()
+
+    def path(self, name: str) -> Path:
+        """Return the file that holds the credential stored under name.
+
+        Raises:
+            InvalidNameError: name does not match NAME_PATTERN.
+            UnknownCredentialError: no credential is stored under name.
+        """
+        check_name(name)
+        return self._stored_path(name)
+
     def remove(self, name: str) -> None:
         """Delete the credential stored under name.
+
+        Raises:
+            UnknownCredentialError: no credential is stored under name.
+        """
+        self._stored_path(name).unlink()
+
+    def _stored_path(self, name: str) -> Path:
+        """Return the file of the credential stored under name.
 
         Raises:
             UnknownCredentialError: no credential is stored under name.
@@ -88,4 +115,4 @@ class CredentialStore:
             raise UnknownCredentialError(
                 f"no credential named {name!r}; stored names are {sorted(stored)!r}"
             )
-        (self._directory / name).unlink()
+        return self._directory / name

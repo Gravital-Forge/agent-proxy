@@ -16,6 +16,8 @@ from agent_proxy.config import (
 )
 
 AGENT_TREE = "/srv/agents/alpha"
+OVERFLOW_DIR = f"{AGENT_TREE}/overflow"
+MAX_CAGES = 4
 IMAGE = "ghcr.io/example/git@sha256:" + "a" * 64
 CREDENTIAL_NAMES = frozenset({"gh-token", "ssh-key"})
 LONG_DOMAIN = ".".join(["a" * 63] * 4)
@@ -41,12 +43,15 @@ def _scopes(grants: dict[str, object]) -> dict[str, object]:
 
 
 def _config(**overrides: object) -> dict[str, object]:
-    """Return a valid config with top-level overrides applied."""
-    return {
+    """Return a valid config with top-level overrides applied; OMIT drops a field."""
+    fields: dict[str, object] = {
         "agent_tree": AGENT_TREE,
+        "overflow_dir": OVERFLOW_DIR,
+        "max_cages": MAX_CAGES,
         "plugins": {"git": IMAGE},
         "scopes": _scopes({"git.clone": _grant()}),
     } | overrides
+    return {key: value for key, value in fields.items() if value is not OMIT}
 
 
 def _with_grant(**overrides: object) -> dict[str, object]:
@@ -96,6 +101,19 @@ def test_load_config_returns_a_frozen_config(tmp_path: Path) -> None:
         config.agent_tree = "/srv/agents/beta"
 
 
+def test_load_config_returns_the_overflow_dir_and_the_cage_cap(tmp_path: Path) -> None:
+    """overflow_dir and max_cages load as the file states them."""
+    config = _load(tmp_path, _config())
+
+    assert config.overflow_dir == OVERFLOW_DIR
+    assert config.max_cages == MAX_CAGES
+
+
+def test_load_config_accepts_a_cage_cap_of_one(tmp_path: Path) -> None:
+    """The smallest cap max_cages allows is 1."""
+    assert _load(tmp_path, _config(max_cages=1)).max_cages == 1
+
+
 def test_load_config_accepts_empty_grant_fields(tmp_path: Path) -> None:
     """A grant may state roots, domains, and credentials as empty."""
     config = _load(tmp_path, _with_grant(roots=[], domains=[], credentials={}))
@@ -113,12 +131,13 @@ def test_load_config_leaves_an_omitted_timeout_unset(tmp_path: Path) -> None:
     assert config.scopes["dev"].grants["git.clone"].timeout is None
 
 
-def test_load_config_accepts_the_agent_tree_itself_as_a_root(tmp_path: Path) -> None:
-    """A root equal to agent_tree lies inside it."""
-    config = _load(tmp_path, _with_grant(roots=[{"path": AGENT_TREE, "mode": "ro"}]))
+def test_load_config_accepts_a_root_beside_the_overflow_dir(tmp_path: Path) -> None:
+    """A root whose path starts with overflow_dir's text, but lies beside it, loads."""
+    root = {"path": f"{OVERFLOW_DIR}-archive", "mode": "rw"}
+    config = _load(tmp_path, _with_grant(roots=[root]))
 
     assert config.scopes["dev"].grants["git.clone"].roots == [
-        Root(path=AGENT_TREE, mode="ro")
+        Root(path=f"{OVERFLOW_DIR}-archive", mode="rw")
     ]
 
 
@@ -290,6 +309,137 @@ def test_load_config_refuses_an_invalid_config(
     assert all(
         repr(str(tmp_path / "config.yaml")) in message for message in error.errors
     )
+
+
+INSTANCE_FIELD_REFUSALS = [
+    pytest.param(
+        _config(overflow_dir=OMIT),
+        "overflow_dir: Field required",
+        id="omitted-overflow-dir",
+    ),
+    pytest.param(
+        _config(max_cages=OMIT), "max_cages: Field required", id="omitted-max-cages"
+    ),
+    pytest.param(
+        _config(max_cages=True),
+        "max_cages: Input should be a valid integer, got True",
+        id="max-cages-boolean",
+    ),
+    pytest.param(
+        _config(max_cages=2.0),
+        "max_cages: Input should be a valid integer, got 2.0",
+        id="max-cages-float",
+    ),
+    pytest.param(
+        _config(max_cages="2"),
+        "max_cages: Input should be a valid integer, got '2'",
+        id="max-cages-string",
+    ),
+    pytest.param(
+        _config(max_cages=0),
+        "max_cages: Input should be greater than or equal to 1, got 0",
+        id="max-cages-zero",
+    ),
+    pytest.param(
+        _config(overflow_dir="overflow"),
+        "overflow_dir must be an absolute path with no '..' segment, got 'overflow'",
+        id="relative-overflow-dir",
+    ),
+    pytest.param(
+        _config(overflow_dir=f"{AGENT_TREE}/../overflow"),
+        "overflow_dir must be an absolute path with no '..' segment,"
+        f" got '{AGENT_TREE}/../overflow'",
+        id="overflow-dir-dotdot",
+    ),
+    pytest.param(
+        _config(overflow_dir="/srv/other/overflow"),
+        f"overflow_dir must lie inside agent_tree {AGENT_TREE!r},"
+        " got '/srv/other/overflow'",
+        id="overflow-dir-outside-agent-tree",
+    ),
+    pytest.param(
+        _config(
+            overflow_dir=AGENT_TREE, scopes=_scopes({"git.clone": _grant(roots=[])})
+        ),
+        f"overflow_dir must differ from agent_tree {AGENT_TREE!r}, got {AGENT_TREE!r}",
+        id="overflow-dir-equals-agent-tree",
+    ),
+    pytest.param(
+        _config(
+            overflow_dir=f"{AGENT_TREE}/",
+            scopes=_scopes({"git.clone": _grant(roots=[])}),
+        ),
+        f"overflow_dir must differ from agent_tree {AGENT_TREE!r}, got '{AGENT_TREE}/'",
+        id="overflow-dir-equals-agent-tree-after-cleaning",
+    ),
+]
+
+
+@pytest.mark.parametrize(("document", "expected"), INSTANCE_FIELD_REFUSALS)
+def test_load_config_refuses_a_bad_overflow_dir_or_cage_cap(
+    tmp_path: Path, document: object, expected: str
+) -> None:
+    """Each bad overflow_dir or max_cages is one failure, located at its field."""
+    error = _refusal(tmp_path, document)
+
+    assert error.errors == (
+        f"config file {str(tmp_path / 'config.yaml')!r}: {expected}",
+    )
+
+
+ROOT_PATH_FIELD = "scopes.dev.grants.git.clone.roots.0.path"
+
+ROOT_OVERFLOW_REFUSALS = [
+    pytest.param(
+        OVERFLOW_DIR,
+        f"{ROOT_PATH_FIELD} must not equal overflow_dir {OVERFLOW_DIR!r},"
+        f" got {OVERFLOW_DIR!r}",
+        id="root-equals-overflow-dir",
+    ),
+    pytest.param(
+        f"{OVERFLOW_DIR}/",
+        f"{ROOT_PATH_FIELD} must not equal overflow_dir {OVERFLOW_DIR!r},"
+        f" got '{OVERFLOW_DIR}/'",
+        id="root-equals-overflow-dir-after-cleaning",
+    ),
+    pytest.param(
+        AGENT_TREE,
+        f"{ROOT_PATH_FIELD} must not contain overflow_dir {OVERFLOW_DIR!r},"
+        f" got {AGENT_TREE!r}",
+        id="root-contains-overflow-dir",
+    ),
+    pytest.param(
+        f"{OVERFLOW_DIR}/calls",
+        f"{ROOT_PATH_FIELD} must not lie inside overflow_dir {OVERFLOW_DIR!r},"
+        f" got '{OVERFLOW_DIR}/calls'",
+        id="root-inside-overflow-dir",
+    ),
+]
+
+
+@pytest.mark.parametrize(("root_path", "expected"), ROOT_OVERFLOW_REFUSALS)
+def test_load_config_refuses_a_root_that_overlaps_the_overflow_dir(
+    tmp_path: Path, root_path: str, expected: str
+) -> None:
+    """A root equal to, containing, or inside overflow_dir is one failure there."""
+    error = _refusal(tmp_path, _with_grant(roots=[{"path": root_path, "mode": "ro"}]))
+
+    assert error.errors == (
+        f"config file {str(tmp_path / 'config.yaml')!r}: {expected}",
+    )
+
+
+def test_load_config_refuses_a_dotdot_root_only_for_its_segment(
+    tmp_path: Path,
+) -> None:
+    """A root with a '..' segment is not compared with overflow_dir."""
+    error = _refusal(
+        tmp_path,
+        _with_grant(roots=[{"path": f"{OVERFLOW_DIR}/../repo", "mode": "ro"}]),
+    )
+
+    assert len(error.errors) == 1
+    assert "no '..' segment" in error.errors[0]
 
 
 def test_load_config_leaves_the_parent_mapping_out_of_a_missing_field(

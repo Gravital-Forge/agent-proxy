@@ -600,6 +600,19 @@ RULE_CASES = [
         id="parameter-repeated",
     ),
     pytest.param(
+        _echo(
+            input_schema=_echo_input(quiet={"type": "boolean"}),
+            parameters=[
+                LOUD,
+                MESSAGE,
+                {"name": "quiet", "as": "flag", "flag": "--loud"},
+            ],
+        ),
+        f"{ECHO}.parameters[2].flag: flag must not repeat an earlier parameter's,"
+        " got '--loud'",
+        id="flag-repeated",
+    ),
+    pytest.param(
         _echo(parameters=[LOUD]),
         f"{ECHO}.input_schema.properties: each property other than 'args' must be"
         " a parameter, got 'message'",

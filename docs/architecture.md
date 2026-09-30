@@ -15,8 +15,9 @@ The core is the uv package in `core/agent-proxy/`, placed as `docs/design.md` se
   and none of them touches Docker.
 - `core/agent-proxy/tests/integration/` holds the integration tests. They run on the Docker daemon
   that `DOCKER_HOST` names. `conftest.py` there builds the test plugin, pushes it to a `registry:3`
-  container that keeps its storage on a tmpfs, and removes the local image, so a test pulls the
-  plugin by digest.
+  container that keeps its storage on a tmpfs, and removes the local image, so a plugin test pulls
+  the plugin by digest. For the cage tests, it also builds the test plugin locally under its own
+  tag, and creates an internal network that each of their cages joins.
 - `core/agent-proxy/tests/test-plugin/` holds the source of the test plugin image.
 
 ## Modules
@@ -38,14 +39,22 @@ token, and credential names, and `check_name` refuses a name that does not match
 `InvalidNameError`. `PLUGIN_NAME_PATTERN` governs plugin names. `parse_duration` turns a duration
 such as `120s` or `7d` into a `timedelta`, and refuses anything else with `DurationError`.
 
-`load_config` reads one YAML file and returns an `InstanceConfig`: the agent tree, the plugins
-pinned by image digest, and the scopes with their grants. `read_yaml` parses the file with a safe
-loader that also refuses a key repeated in one mapping and a YAML merge key (`<<`). The pydantic
-models refuse unknown fields and check each field's form. The `InstanceConfig` validator then checks
-the rules that span fields, such as a root lying inside the agent tree. `docs/design.md` sets the
-validation rules under "Config". The models and the validator together check each rule that the file
-and the credential store can settle. For example, the models make a grant state `roots`, `domains`,
-and `credentials`, because `Grant` gives none of them a default.
+`load_config` reads one YAML file and returns an `InstanceConfig`: the agent tree, the overflow
+directory, the cap on running cages, the plugins pinned by image digest, and the scopes with their
+grants. `read_yaml` parses the file with a safe loader that also refuses a key repeated in one
+mapping and a YAML merge key (`<<`). The pydantic models refuse unknown fields and check each
+field's form. The `InstanceConfig` validator then checks the rules that span fields, such as a root
+lying inside the agent tree. `docs/design.md` sets the validation rules under "Config". The models
+and the validator together check each rule that the file and the credential store can settle. For
+example, the models make a grant state `roots`, `domains`, and `credentials`, because `Grant` gives
+none of them a default.
+
+Two fields of `InstanceConfig` serve the cage runner. `max_cages` is the instance's cap on running
+cages, an integer of 1 or more; `docs/design.md` gives the cap under "The cage". `overflow_dir` is
+the directory that takes a stream over the output cap; `docs/design.md` gives it under "Results". It
+is an absolute path with no `..` segment, inside the agent tree, and it must not equal the agent
+tree. A grant's root must not equal the overflow directory, contain it, or lie inside it, so no cage
+mounts it and the sweep never reaches a root.
 
 A config that fails raises `ConfigError`, which holds one message per failure. Each message names
 the file, and a failure inside the file also names its location.
@@ -58,8 +67,10 @@ the file, and a failure inside the file also names its location.
 holding its value verbatim. `set` writes a value to a staging file whose name begins with a dot,
 then renames it into place, so `entries` never lists a half-written credential. `entries` reports
 each name with its set time, read from the file's modification time. `names` returns the stored
-names, which is the set `load_config` checks grants against. `docs/design.md` gives the credential
-model under "Credentials".
+names, which is the set `load_config` checks grants against. `read` returns a stored value as bytes,
+and `path` returns the file that holds it. Each refuses a name that breaks `NAME_PATTERN` with
+`InvalidNameError`, and a name the store does not hold with `UnknownCredentialError`.
+`docs/design.md` gives the credential model under "Credentials".
 
 ### `auth.py`
 
@@ -97,9 +108,11 @@ action by name as a `CommandAction` or a `ScriptAction`. It checks in three stag
 the first stage that fails. First it decodes the bytes as a JSON object. Then it validates the
 document against the manifest schema. Last it checks the rules the schema cannot state, reusing the
 name, duration, and credential-path checks of `config.py`. `docs/writing-a-plugin.md` gives every
-rule each stage checks. A failure raises `ManifestError`, which holds one message per failure. Each
-message from the schema stage or the rule stage is located by its JSON path. `Manifest.warnings`
-returns one message per action that declares pass-through args.
+rule each stage checks; among them, no two parameters of one action share a flag. A failure raises
+`ManifestError`, which holds one message per failure. Each message from the schema stage or the rule
+stage is located by its JSON path. `Manifest.warnings` returns one message per action that declares
+pass-through args. `decode_json_object` is the first stage, and `results.py` also uses it to read a
+script's output.
 
 `describe` runs an image's `describe` entrypoint in a container and returns its stdout. The
 container has no network, a read-only root filesystem, no capabilities, and `no-new-privileges`, and
@@ -112,6 +125,83 @@ and the start of stderr, at most `STDERR_EXCERPT_LIMIT` bytes. Every describe co
 `load_manifest` makes the image present, then describes it and parses the output. `check_image`
 describes a local image and parses the output, and never pulls. A Docker failure raises
 `PluginImageError`. Each function takes the Docker client as an argument; the module opens none.
+`DOCKER_FAILURES` holds the error classes that a Docker call can raise. `WAIT_TIMEOUTS` holds the
+error classes that a container wait raises when its timeout passes, which depend on the transport.
+`runner.py` catches both.
+
+### `results.py`
+
+This module turns what a cage printed into a call's result, and removes old overflow files.
+
+`capture_stream` reads one stream of a cage as chunks and returns a `CapturedStream`. A stream of at
+most `OUTPUT_CAP_BYTES` stays inline. A stream over the cap goes in full to a new file named
+`<call_id>.stdout` or `<call_id>.stderr` in the overflow directory, and the `CapturedStream` holds
+that path and the stream's size in place of the bytes. The module holds at most the cap and one more
+chunk in memory. It opens the overflow directory one component at a time from `/`, and refuses a
+symbolic link at any component. It creates the file with mode `0o660` and refuses a file that
+already exists. A file it cannot create or write raises `OverflowWriteError`. `new_call_id` returns
+a fresh ID that matches `CALL_ID_PATTERN`, the form that names the file.
+
+`command_content` forms a command's result from the exit code and the two streams. An inline stream
+appears as text, decoded as UTF-8 with each bad byte replaced. An overflowed stream appears as its
+file and size, and the result then carries `truncated`. `script_content` forms a script's result by
+the rule `docs/writing-a-plugin.md` gives under "How an action runs", and reports whether the script
+failed. A failed script's result is the command result. `docs/design.md` gives the result forms and
+the cap under "Results".
+
+`sweep_overflow` removes each entry directly in a directory that is not a directory itself and that
+was last modified more than `OVERFLOW_MAX_AGE` before the time it is given. It judges and removes a
+symbolic link as itself, never its target, and skips an entry that is gone before it acts.
+`OverflowSweeper` runs the sweep on a daemon thread once at start, then every `SWEEP_INTERVAL`. It
+reads the directory and the time through the callables it takes, fresh for each sweep. A sweep that
+fails logs a warning, and the thread keeps its schedule. `docs/design.md` gives the retention under
+"Results".
+
+### `runner.py`
+
+This module runs one action call in one cage, a container that exists for that call only.
+`docs/design.md` gives the cage under "The cage".
+
+A `CageCall` holds the call ID, the image, the action, the grant, the arguments, the Docker network,
+and the config's `overflow_dir` and `max_cages`. `CageRunner.run` takes a call and returns an
+`Outcome`. It refuses a bad call before it takes a slot under the cap:
+
+1. The call ID must match `CALL_ID_PATTERN`.
+2. `validate_input` checks the arguments against the action's input schema, draft 2020-12, and
+   raises `InputError` with one message per violation.
+3. For a command action, `form_argv` forms argv as `docs/writing-a-plugin.md` gives under "How argv
+   is formed", and raises `InputError` for a value that begins with `-`. For a script action, the
+   entrypoint is the executable, and `script_stdin` gives the arguments as compact UTF-8 JSON.
+4. `check_roots` raises `RootError` for a root that has a symbolic link at any component of its
+   path, because the daemon follows a link in a bind source.
+5. `cage_environment` reads each credential the grant gives as an environment variable.
+   `cage_mounts` binds each root at its own path with the grant's mode, then binds each credential
+   the grant gives as a file, read-only, from its file in the credential store. A credential that is
+   not stored, or an environment value that is not UTF-8 or holds a NUL, raises `CredentialError`.
+
+The run then waits for a slot, creates the cage, starts it, and removes it by force whatever
+happens. The slot stays taken until the cage is removed. The cage's entrypoint is the argv or the
+executable, which also clears the image's command. The cage runs as `CONTAINER_USER`, with a
+read-only root filesystem, every capability dropped, `no-new-privileges`, a tmpfs at `TMPFS_PATH`
+with `TMPFS_OPTIONS`, the call's network, `CONTAINER_LABELS`, and the `LOG_DRIVER` log driver. A
+script's input goes to the cage's stdin, then end of file. A script that stops reading its input is
+not a failure in itself.
+
+The timeout is the grant's, or else the action's. It runs from the start, and covers the input and
+the wait for the exit. After the exit, the run reads stdout and stderr from the cage's log through
+`capture_stream`, and forms the result in `results.py`. The `Outcome` holds the result, whether a
+script failed, the exit code, the duration in milliseconds, the size of each stream, and whether a
+stream overflowed.
+
+Every refusal and failure that `runner.py` raises itself is a `RunnerError`. A create, an attach of
+stdin, or a start that fails raises `CageStartError`. A cage past its timeout raises
+`CageTimeoutError`. Any other failure after the start, a failed removal included, raises
+`CageFailedError`. An `OverflowWriteError` passes through unchanged.
+
+`CageLimiter` counts the running cages of an instance, and every call shares one. `slot` waits with
+no bound until fewer cages run than the limit it is given. Each call brings its own limit, so calls
+that started under different configs still share one count. `CageRunner` takes the Docker client,
+the credential store, and the limiter; the module opens none of them.
 
 ### `reload.py`
 
@@ -151,7 +241,8 @@ another; within the package, the stores import only `config.py` and `errors.py`.
 
 ## Where state lives
 
-Environment variables place everything the admin command reads and writes.
+Environment variables place everything the admin command reads and writes. The config file places
+the one directory outside the state directory that the cage runner writes.
 
 `AGENT_PROXY_STATE_DIR` names the state directory. The directory must already exist, and the command
 does not change its mode. The command keeps its state beneath it:
@@ -173,6 +264,10 @@ is a refusal that names the variable.
 `manifest check` reaches the Docker daemon through `DOCKER_HOST`, which the Docker SDK reads from
 the environment. With `DOCKER_HOST` unset, the SDK uses its default socket. A daemon it cannot reach
 is a refusal that names `DOCKER_HOST` and its value, or says that it is unset.
+
+The cage runner mounts credential files from the credential store's directory, as `runner.py` gives
+above. It writes each overflow file under the config's `overflow_dir`, in the agent's tree, and the
+sweep removes old entries there. The runner creates neither directory.
 
 ## The admin command
 

@@ -49,6 +49,8 @@ def _grant(timeout: str = "120s") -> dict[str, object]:
 def _config(grants: dict[str, object]) -> dict[str, object]:
     return {
         "agent_tree": AGENT_TREE,
+        "overflow_dir": f"{AGENT_TREE}/overflow",
+        "max_cages": 4,
         "plugins": {"git": GIT_IMAGE, "fs": FS_IMAGE},
         "scopes": {"dev": {"grants": grants}},
     }

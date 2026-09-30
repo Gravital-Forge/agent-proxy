@@ -3,7 +3,7 @@
 A plugin is an OCI image that declares actions in a manifest. The proxy runs each action in a cage
 built from that image. `docs/design.md` gives the plugin model under "Plugins and actions" and the
 cage under "The cage". This document tells a plugin author what the image holds, how to write its
-manifest, and how to check it.
+manifest, how an action runs, and how to check the manifest.
 
 ## The image
 
@@ -69,6 +69,7 @@ A command action also keeps these rules:
 - `input_schema` sets `additionalProperties` to `false`.
 - Each parameter's `name` is a property of `input_schema`. No two parameters share a name, and no
   parameter is named `args`.
+- No two parameters share a `flag`.
 - Each property of `input_schema` is a parameter, or is `args`.
 - A flag parameter's property sets `type` to one of `"boolean"`, `"string"`, or `"integer"`. A
   positional parameter's property sets `type` to `"string"` or `"integer"`.
@@ -86,8 +87,7 @@ A script action runs an executable in the image. It states these members, and do
 - `output_schema` is a JSON Schema whose `type` is `"object"`, and it passes the draft 2020-12
   meta-schema check.
 
-`docs/design.md` gives how a script receives its input and returns its output under "Plugins and
-actions".
+"How an action runs" gives how a script receives its input and returns its output.
 
 ## How argv is formed
 
@@ -98,6 +98,30 @@ it, then the items of `args`:
 - A string or integer flag adds the flag, then the value.
 - A positional parameter adds the value.
 - An optional property that the input leaves out adds nothing.
+
+An integer value goes into argv as its decimal text. A value that a parameter places in argv must
+not begin with `-`, so it cannot pass as an option. A value that does begin with `-` refuses the
+call, and no cage starts; a negative integer is such a value. The items of pass-through `args` are
+exempt, and go into argv as the input gives them.
+
+## How an action runs
+
+The proxy runs each call in a new cage built from the plugin's image. `docs/architecture.md` gives
+the cage under `runner.py`, and `docs/design.md` gives it under "The cage". The cage's entrypoint
+replaces the image's entrypoint and command:
+
+- A command action's entrypoint is the argv above.
+- A script action's entrypoint is its `executable`, with no arguments. The script reads its input on
+  stdin as one compact UTF-8 JSON object, then end of file.
+
+The root filesystem is read-only. Write scratch files under `/tmp`, a small tmpfs.
+
+A script succeeds when it exits 0 and prints on stdout one JSON object that its `output_schema`
+validates. That stdout must decode as the manifest must, by the rules under "The manifest". The call
+then returns that object. Otherwise the script has failed, and the call returns what a command
+action returns: the exit code, stdout, and stderr. A stdout over the output cap goes to an overflow
+file, so a script whose output passes the cap fails. `docs/design.md` gives the cap and the result
+forms under "Results".
 
 ## Checking a manifest
 
