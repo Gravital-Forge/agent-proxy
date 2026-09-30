@@ -1,5 +1,9 @@
+import errno
 import json
+import os
 import stat
+import threading
+from collections.abc import Buffer
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -8,6 +12,7 @@ import pytest
 from agent_proxy.audit import (
     AUDIT_BACKUP_COUNT,
     AUDIT_MAX_BYTES,
+    AuditError,
     AuditRecord,
     AuditWriter,
     tail,
@@ -27,6 +32,8 @@ FIELD_NAMES = [
     "truncated",
     "refusal",
 ]
+
+_REAL_WRITE = os.write
 
 
 @pytest.fixture
@@ -182,18 +189,98 @@ def test_writer_narrows_an_existing_wider_directory(directory: Path) -> None:
     assert stat.S_IMODE(directory.stat().st_mode) == 0o700
 
 
+def test_writer_creates_the_log_owner_only(directory: Path) -> None:
+    """A log file the writer creates has mode 0o600."""
+    _write(directory, [_record()])
+
+    assert stat.S_IMODE((directory / "audit.log").stat().st_mode) == 0o600
+
+
+def test_a_line_past_max_bytes_into_an_empty_log_does_not_rotate(
+    directory: Path,
+) -> None:
+    """An empty log takes a line longer than max_bytes without rotating."""
+    _write(directory, [_record()], max_bytes=1)
+
+    assert [path.name for path in directory.iterdir()] == ["audit.log"]
+
+
+def test_a_failed_rotation_raises_and_writes_nothing(directory: Path) -> None:
+    """A rotation that cannot rename leaves the log as it was, the writer available."""
+    writer = AuditWriter(directory, max_bytes=1, backup_count=1)
+    writer.write(_record("call-0001"))
+    (directory / "audit.log.1").mkdir()
+    (directory / "audit.log.1" / "keep").touch()
+    before = (directory / "audit.log").read_bytes()
+
+    with pytest.raises(AuditError, match="Is a directory"):
+        writer.write(_record("call-0002"))
+
+    assert (directory / "audit.log").read_bytes() == before
+    assert writer.available is True
+
+
+def test_concurrent_writes_each_land_as_one_line(directory: Path) -> None:
+    """Eight threads of fifty writes leave four hundred whole JSON lines."""
+    writer = AuditWriter(directory, max_bytes=16_384, backup_count=10)
+
+    def write_fifty(thread_index: int) -> None:
+        for index in range(50):
+            writer.write(_record(f"call-{thread_index}-{index:02d}"))
+
+    threads = [
+        threading.Thread(target=write_fifty, args=(thread_index,))
+        for thread_index in range(8)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    writer.close()
+
+    lines = [
+        line
+        for path in directory.iterdir()
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    assert len(lines) == 400
+    assert len(set(_call_ids(lines))) == 400
+
+
+def test_opening_cuts_a_trailing_fragment(directory: Path) -> None:
+    """A log ending in a partial line is cut back to just after its last newline."""
+    _write(directory, [_record("call-0001")])
+    whole = (directory / "audit.log").read_bytes()
+    with (directory / "audit.log").open("ab") as log:
+        log.write(b'{"call_id":"frag' + b"x" * 10_000)
+
+    AuditWriter(directory).close()
+
+    assert (directory / "audit.log").read_bytes() == whole
+
+
+def test_opening_empties_a_log_that_holds_only_a_fragment(directory: Path) -> None:
+    """A log with no newline at all is cut to empty."""
+    directory.mkdir()
+    (directory / "audit.log").write_bytes(b'{"call_id":"frag')
+
+    AuditWriter(directory).close()
+
+    assert (directory / "audit.log").read_bytes() == b""
+
+
 def _full_log_writer(directory: Path) -> AuditWriter:
-    """Return a writer whose log is /dev/full, so every flush fails with ENOSPC."""
+    """Return a writer whose log is /dev/full, so every write fails with ENOSPC."""
     directory.mkdir()
     (directory / "audit.log").symlink_to("/dev/full")
     return AuditWriter(directory)
 
 
 def test_a_write_the_log_cannot_take_raises(directory: Path) -> None:
-    """A write that fails reaches the caller instead of passing as written."""
+    """A write that fails reaches the caller as an AuditError naming the OS error."""
     writer = _full_log_writer(directory)
 
-    with pytest.raises(OSError, match="No space left on device"):
+    with pytest.raises(AuditError, match="No space left on device"):
         writer.write(_record())
 
 
@@ -203,10 +290,136 @@ def test_a_failed_write_prints_nothing_to_stderr(
     """A failed write leaves stderr empty, so no record argument leaks there."""
     writer = _full_log_writer(directory)
 
-    with pytest.raises(OSError, match="No space left on device"):
+    with pytest.raises(AuditError, match="No space left on device"):
         writer.write(_record())
 
     assert capsys.readouterr().err == ""
+
+
+def test_a_failed_rollback_on_dev_full_latches_the_writer(directory: Path) -> None:
+    """The rollback's ftruncate fails on a character device, so the writer latches."""
+    writer = _full_log_writer(directory)
+
+    with pytest.raises(AuditError):
+        writer.write(_record())
+
+    assert writer.available is False
+
+
+def test_a_fresh_writer_is_available(directory: Path) -> None:
+    """A writer that has not failed is available."""
+    assert AuditWriter(directory).available is True
+
+
+def test_a_log_that_cannot_be_opened_raises_and_stays_available(
+    directory: Path,
+) -> None:
+    """A log the writer cannot create raises AuditError and latches nothing."""
+    writer = AuditWriter(directory)
+    directory.chmod(0o500)
+    try:
+        with pytest.raises(AuditError, match="Permission denied"):
+            writer.write(_record())
+    finally:
+        directory.chmod(0o700)
+
+    assert writer.available is True
+
+
+def _fail_once_after_half(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the next os.write land half its buffer and raise ENOSPC; later ones pass."""
+    failed = False
+
+    def write(fd: int, data: Buffer) -> int:
+        nonlocal failed
+        if failed:
+            return _REAL_WRITE(fd, data)
+        failed = True
+        view = memoryview(data)
+        _REAL_WRITE(fd, view[: len(view) // 2])
+        raise OSError(errno.ENOSPC, os.strerror(errno.ENOSPC))
+
+    monkeypatch.setattr("agent_proxy.audit.os.write", write)
+
+
+def test_a_failed_write_leaves_the_log_as_it_was(
+    directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A write that lands half its line and then fails leaves no byte of that line."""
+    writer = AuditWriter(directory)
+    writer.write(_record("call-0001"))
+    before = (directory / "audit.log").read_bytes()
+    _fail_once_after_half(monkeypatch)
+
+    with pytest.raises(AuditError, match="No space left on device"):
+        writer.write(_record("call-0002"))
+
+    assert (directory / "audit.log").read_bytes() == before
+
+
+def test_the_write_after_a_rolled_back_failure_succeeds(
+    directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rolled-back failure leaves the writer available, and the next line lands."""
+    writer = AuditWriter(directory)
+    writer.write(_record("call-0001"))
+    _fail_once_after_half(monkeypatch)
+    with pytest.raises(AuditError):
+        writer.write(_record("call-0002"))
+
+    writer.write(_record("call-0003"))
+
+    assert writer.available is True
+    assert _call_ids(_log_lines(directory)) == ["call-0001", "call-0003"]
+
+
+def test_a_failed_write_error_names_the_path_and_not_the_record(
+    directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The error names the log path and carries no field of the record."""
+    writer = AuditWriter(directory)
+    _fail_once_after_half(monkeypatch)
+
+    with pytest.raises(AuditError) as caught:
+        writer.write(_record("call-0002"))
+
+    message = str(caught.value)
+    assert str(directory / "audit.log") in message
+    assert "call-0002" not in message
+    assert "ci-runner" not in message
+
+
+def test_a_failed_rollback_latches_the_writer(
+    directory: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the rollback fails too, every later write raises without opening a file."""
+    writer = AuditWriter(directory)
+    _fail_once_after_half(monkeypatch)
+
+    def ftruncate(fd: int, length: int) -> None:
+        raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+    monkeypatch.setattr("agent_proxy.audit.os.ftruncate", ftruncate)
+    with pytest.raises(AuditError):
+        writer.write(_record("call-0001"))
+    opened: list[str | os.PathLike[str]] = []
+    real_open = os.open
+
+    def counting_open(
+        path: str | os.PathLike[str],
+        flags: int,
+        mode: int = 0o777,
+    ) -> int:
+        opened.append(path)
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr("agent_proxy.audit.os.open", counting_open)
+
+    with pytest.raises(AuditError):
+        writer.write(_record("call-0002"))
+
+    assert writer.available is False
+    assert opened == []
 
 
 def test_tail_reads_back_across_a_rotation(directory: Path) -> None:

@@ -2,17 +2,27 @@
 
 import dataclasses
 import json
-import logging
-import logging.handlers
+import os
+import stat
+import threading
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import override
+from typing import BinaryIO
+
+from agent_proxy.errors import ProxyError
 
 AUDIT_MAX_BYTES = 10 * 1024 * 1024
 AUDIT_BACKUP_COUNT = 5
 _LOG_NAME = "audit.log"
+_LOG_FLAGS = os.O_WRONLY | os.O_APPEND | os.O_CREAT
+_LOG_MODE = 0o600
+_SCAN_CHUNK = 4096
+
+
+class AuditError(ProxyError):
+    """The audit log could not record a line."""
 
 
 @dataclass(frozen=True)
@@ -31,19 +41,6 @@ class AuditRecord:
     refusal: str | None
 
 
-class _RaisingRotatingFileHandler(logging.handlers.RotatingFileHandler):
-    """A rotating handler that lets a failed write reach its caller."""
-
-    @override
-    def handleError(self, record: logging.LogRecord) -> None:
-        """Re-raise the exception emit is handling, printing nothing.
-
-        Raises:
-            Exception: the exception emit caught while writing record.
-        """
-        raise
-
-
 class AuditWriter:
     def __init__(
         self,
@@ -51,31 +48,114 @@ class AuditWriter:
         max_bytes: int = AUDIT_MAX_BYTES,
         backup_count: int = AUDIT_BACKUP_COUNT,
     ) -> None:
-        """Open directory/audit.log for appending, narrowing directory to 0o700."""
+        """Prepare directory/audit.log for appending, narrowing directory to 0o700.
+
+        A regular-file log whose last byte is not a newline is cut back to
+        just after its last newline, so a fragment never prefixes a later line.
+        """
         directory.mkdir(exist_ok=True)
         directory.chmod(0o700)
-        self._handler = _RaisingRotatingFileHandler(
-            directory / _LOG_NAME,
-            maxBytes=max_bytes,
-            backupCount=backup_count,
-            encoding="utf-8",
-        )
-        self._handler.setFormatter(logging.Formatter("%(message)s"))
+        self._path = directory / _LOG_NAME
+        self._max_bytes = max_bytes
+        self._backup_count = backup_count
+        self._lock = threading.Lock()
+        self._latched = False
+        _cut_trailing_fragment(self._path)
+
+    @property
+    def available(self) -> bool:
+        """Whether the writer accepts lines; False once a rollback has failed."""
+        return not self._latched
 
     def write(self, record: AuditRecord) -> None:
         """Append record to the log as one JSON line, rotating a full file first.
 
+        A line that fails part way is truncated away, so the log holds no
+        byte of it.
+
         Raises:
-            OSError: the log cannot take the line or cannot be rotated.
+            AuditError: the writer is latched, the log cannot be rotated, or
+                the log cannot take the line.
         """
-        line = _render_line(record)
-        self._handler.handle(
-            logging.makeLogRecord({"msg": line, "levelno": logging.INFO})
-        )
+        line = f"{_render_line(record)}\n".encode()
+        with self._lock:
+            if self._latched:
+                raise AuditError(
+                    f"audit log {str(self._path)!r} is unavailable after a"
+                    " failed rollback"
+                )
+            self._rotate_if_due(len(line))
+            self._append(line)
 
     def close(self) -> None:
-        """Close the log file."""
-        self._handler.close()
+        """Release the writer; no file stays open between writes."""
+
+    def _rotate_if_due(self, line_size: int) -> None:
+        """Rotate the log when line would take a non-empty file to max_bytes.
+
+        Raises:
+            AuditError: the log cannot be measured or renamed.
+        """
+        try:
+            size = self._path.stat().st_size if self._path.exists() else 0
+            if size and size + line_size >= self._max_bytes:
+                self._rotate()
+        except OSError as exc:
+            raise AuditError(
+                f"audit log {str(self._path)!r} cannot be rotated: {exc}"
+            ) from exc
+
+    def _rotate(self) -> None:
+        for index in range(self._backup_count, 0, -1):
+            source = self._path if index == 1 else self._backup(index - 1)
+            if source.exists():
+                source.replace(self._backup(index))
+
+    def _backup(self, index: int) -> Path:
+        return self._path.with_name(f"{_LOG_NAME}.{index}")
+
+    def _append(self, line: bytes) -> None:
+        """Append line to the log, truncating it away when the write fails.
+
+        Raises:
+            AuditError: the log cannot be opened or cannot take the line.
+        """
+        try:
+            fd = os.open(self._path, _LOG_FLAGS, _LOG_MODE)
+        except OSError as exc:
+            raise AuditError(
+                f"audit log {str(self._path)!r} cannot be opened: {exc}"
+            ) from exc
+        try:
+            self._write_or_roll_back(fd, line)
+        finally:
+            os.close(fd)
+
+    def _write_or_roll_back(self, fd: int, line: bytes) -> None:
+        """Write line to fd, cutting fd back to its prior size on failure.
+
+        Raises:
+            AuditError: the log cannot be measured or cannot take the line.
+        """
+        try:
+            size_before = os.fstat(fd).st_size
+        except OSError as exc:
+            raise AuditError(
+                f"audit log {str(self._path)!r} cannot be measured: {exc}"
+            ) from exc
+        try:
+            _write_all(fd, line)
+        except OSError as exc:
+            self._roll_back(fd, size_before)
+            raise AuditError(
+                f"audit log {str(self._path)!r} cannot take a line: {exc}"
+            ) from exc
+
+    def _roll_back(self, fd: int, size: int) -> None:
+        try:
+            os.ftruncate(fd, size)
+        except OSError:
+            self._latched = True
 
 
 def tail(directory: Path, count: int) -> list[str]:
@@ -109,3 +189,47 @@ def _log_files_newest_first(directory: Path) -> Iterator[Path]:
         yield path
         index += 1
         path = directory / f"{_LOG_NAME}.{index}"
+
+
+def _write_all(fd: int, line: bytes) -> None:
+    """Write every byte of line to fd.
+
+    Raises:
+        OSError: a write fails.
+    """
+    unwritten = memoryview(line)
+    while unwritten:
+        unwritten = unwritten[os.write(fd, unwritten) :]
+
+
+def _cut_trailing_fragment(path: Path) -> None:
+    """Cut a regular-file log back to just after its last newline.
+
+    A missing log and anything that is not a regular file are left alone.
+    """
+    try:
+        status = path.stat()
+    except FileNotFoundError:
+        return
+    if not stat.S_ISREG(status.st_mode):
+        return
+    with path.open("r+b") as log:
+        end = _end_of_last_line(log, status.st_size)
+        if end < status.st_size:
+            log.truncate(end)
+
+
+def _end_of_last_line(log: BinaryIO, size: int) -> int:
+    """Return the offset just past log's last newline, or 0 when it holds none.
+
+    The file is read backwards from size, one chunk at a time.
+    """
+    end = size
+    while end > 0:
+        start = max(end - _SCAN_CHUNK, 0)
+        log.seek(start)
+        newline = log.read(end - start).rfind(b"\n")
+        if newline >= 0:
+            return start + newline + 1
+        end = start
+    return 0
