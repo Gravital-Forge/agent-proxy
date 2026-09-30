@@ -1,22 +1,35 @@
 import dataclasses
 import hashlib
 import re
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from types import MappingProxyType, SimpleNamespace
+from unittest import mock
 
+import docker.errors
+import docker.types
 import pytest
+import requests
 import yaml
 
+from agent_proxy import egress
 from agent_proxy.config import InstanceConfig
 from agent_proxy.egress import (
     BRIDGE_NETWORK,
+    IRON_PROXY_IMAGE,
+    LABELS,
+    PROXY_LOG_EXCERPT_BYTES,
+    PROXY_READY_TIMEOUT_SECONDS,
     CageNetwork,
     EgressConfigError,
     EgressError,
+    EgressStartError,
     cage_network,
     domain_lists,
     list_key,
     network_name,
     render_config,
+    start_proxy,
 )
 from agent_proxy.errors import ProxyError
 
@@ -30,6 +43,87 @@ RENDERED_LISTS = [
         ["b.example.org", "a.example.org", "c.example.net"], id="three-domains"
     ),
 ]
+KEY = "0123456789abcdef"
+PROXY_NAME = "apx-egress-0123456789abcdef"
+CONFIG_DIR = Path("/srv/egress/0123456789abcdef")
+TUNNEL_LINE = (
+    b'{"time":"2026-09-30T11:46:12.482870049Z","level":"INFO",'
+    b'"msg":"tunnel proxy starting","addr":"[::]:1080"}\n'
+)
+EARLIER_LINE = (
+    b'{"time":"2026-09-30T11:46:12.402Z","level":"INFO","msg":"iron-proxy starting"}\n'
+)
+DOCKER_ERRORS = [
+    pytest.param(docker.errors.APIError("daemon said no"), id="api-error"),
+    pytest.param(
+        requests.exceptions.ConnectionError("daemon said no"), id="connection-error"
+    ),
+]
+
+
+class _FakeClock:
+    """A monotonic clock that only sleep advances."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        """Return the time the sleeps so far add up to."""
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        """Record the sleep and advance the clock by it."""
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> _FakeClock:
+    """Replace the time module egress reads with a fake clock."""
+    fake = _FakeClock()
+    monkeypatch.setattr(
+        egress, "time", SimpleNamespace(monotonic=fake.monotonic, sleep=fake.sleep)
+    )
+    return fake
+
+
+def _client(*logs: bytes, status: str = "running") -> mock.MagicMock:
+    """Return a client whose proxy reads each log in turn, then the last forever."""
+    client = mock.MagicMock()
+    container = _container(client)
+    container.status = status
+    reads = [*logs] or [b""]
+
+    def read_log() -> bytes:
+        return reads.pop(0) if len(reads) > 1 else reads[0]
+
+    container.logs.side_effect = read_log
+    return client
+
+
+def _container(client: mock.MagicMock) -> mock.MagicMock:
+    return client.containers.create.return_value
+
+
+def _failing_bridge_lookup(client: mock.MagicMock, error: Exception) -> None:
+    client.networks.get.side_effect = error
+
+
+def _failing_connect(client: mock.MagicMock, error: Exception) -> None:
+    client.networks.get.return_value.connect.side_effect = error
+
+
+def _failing_start(client: mock.MagicMock, error: Exception) -> None:
+    _container(client).start.side_effect = error
+
+
+def _failing_log_read(client: mock.MagicMock, error: Exception) -> None:
+    _container(client).logs.side_effect = error
+
+
+def _failing_reload(client: mock.MagicMock, error: Exception) -> None:
+    _container(client).reload.side_effect = error
 
 
 def _instance_config(scopes: dict[str, dict[str, list[str]]]) -> InstanceConfig:
@@ -67,12 +161,16 @@ def _keys(node: object) -> Iterator[object]:
 
 @pytest.mark.parametrize(
     ("error_class", "base"),
-    [(EgressError, ProxyError), (EgressConfigError, EgressError)],
+    [
+        (EgressError, ProxyError),
+        (EgressConfigError, EgressError),
+        (EgressStartError, EgressError),
+    ],
 )
 def test_each_egress_error_derives_from_its_base(
     error_class: type[Exception], base: type[Exception]
 ) -> None:
-    """EgressError subclasses ProxyError, and EgressConfigError subclasses it."""
+    """Each egress error subclasses the error its name says it refines."""
     assert issubclass(error_class, base)
 
 
@@ -206,3 +304,246 @@ def test_render_config_refuses_a_domain_the_pattern_does_not_fully_match(
     """The refusal names the offending domain."""
     with pytest.raises(EgressConfigError, match=re.escape(repr(domain))):
         render_config(["github.com", domain])
+
+
+def test_the_proxy_image_is_the_pinned_iron_proxy() -> None:
+    """The proxy runs iron-proxy 0.52.0, pinned by digest."""
+    assert IRON_PROXY_IMAGE == (
+        "ironsh/iron-proxy:0.52.0"
+        "@sha256:004fdc067dc4cc47cebfc0dab3c63ab9a5e21a3230c965e69775a565df99efc6"
+    )
+
+
+def test_the_start_limits_are_the_spec_s() -> None:
+    """Ten seconds to become ready, and a 2 KiB log tail in a refusal."""
+    assert PROXY_READY_TIMEOUT_SECONDS == 10
+    assert PROXY_LOG_EXCERPT_BYTES == 2048
+
+
+def test_labels_are_an_empty_read_only_mapping() -> None:
+    """Production adds no labels; the integration conftest patches them in."""
+    assert isinstance(LABELS, MappingProxyType)
+    assert dict(LABELS) == {}
+
+
+@pytest.mark.usefixtures("clock")
+def test_start_proxy_creates_the_hardened_proxy_on_its_network() -> None:
+    """Pinned image, config command, root, no writes, no capabilities, one mount."""
+    client = _client(TUNNEL_LINE)
+
+    start_proxy(client, KEY, CONFIG_DIR)
+
+    client.api.create_endpoint_config.assert_called_once_with(aliases=["egress"])
+    client.containers.create.assert_called_once_with(
+        IRON_PROXY_IMAGE,
+        command=["-config", "/etc/iron-proxy/proxy.yaml"],
+        name=PROXY_NAME,
+        user="0:0",
+        read_only=True,
+        cap_drop=["ALL"],
+        security_opt=["no-new-privileges"],
+        mounts=[
+            docker.types.Mount(
+                target="/etc/iron-proxy",
+                source=str(CONFIG_DIR),
+                type="bind",
+                read_only=True,
+            )
+        ],
+        network=PROXY_NAME,
+        networking_config={PROXY_NAME: client.api.create_endpoint_config.return_value},
+        labels={"agent-proxy.egress": KEY},
+    )
+
+
+@pytest.mark.usefixtures("clock")
+def test_start_proxy_adds_labels_to_the_proxy_s_own(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The patched labels join the key label."""
+    monkeypatch.setattr(egress, "LABELS", MappingProxyType({"agent-proxy.test": "1"}))
+    client = _client(TUNNEL_LINE)
+
+    start_proxy(client, KEY, CONFIG_DIR)
+
+    assert client.containers.create.call_args.kwargs["labels"] == {
+        "agent-proxy.egress": KEY,
+        "agent-proxy.test": "1",
+    }
+
+
+@pytest.mark.usefixtures("clock")
+def test_start_proxy_joins_the_bridge_before_it_starts() -> None:
+    """The proxy connects to the bridge network, then starts."""
+    client = _client(TUNNEL_LINE)
+
+    start_proxy(client, KEY, CONFIG_DIR)
+
+    client.networks.get.assert_called_once_with(BRIDGE_NETWORK)
+    client.networks.get.return_value.connect.assert_called_once_with(_container(client))
+    names = [name for name, _, _ in client.mock_calls]
+    assert names.index("networks.get().connect") < names.index(
+        "containers.create().start"
+    )
+
+
+def test_start_proxy_returns_the_proxy_once_its_log_holds_the_tunnel_line(
+    clock: _FakeClock,
+) -> None:
+    """It polls every tenth of a second until the tunnel line appears."""
+    client = _client(b"", EARLIER_LINE, EARLIER_LINE + TUNNEL_LINE)
+
+    assert start_proxy(client, KEY, CONFIG_DIR) is _container(client)
+
+    assert clock.sleeps == [0.1, 0.1]
+    _container(client).remove.assert_not_called()
+
+
+@pytest.mark.usefixtures("clock")
+def test_start_proxy_reads_past_a_line_that_is_not_json() -> None:
+    """A line that is not JSON, or not UTF-8, is not the tunnel line."""
+    client = _client(b"not json\n\xff\xfe\n" + TUNNEL_LINE)
+
+    assert start_proxy(client, KEY, CONFIG_DIR) is _container(client)
+
+
+@pytest.mark.usefixtures("clock")
+@pytest.mark.parametrize(
+    "log",
+    [
+        pytest.param(b"tunnel proxy starting\n", id="plain-text"),
+        pytest.param(b'"tunnel proxy starting"\n', id="json-string"),
+        pytest.param(
+            b'{"msg":"listener failed","detail":"tunnel proxy starting"}\n',
+            id="another-field",
+        ),
+        pytest.param(EARLIER_LINE, id="earlier-line"),
+    ],
+)
+def test_start_proxy_is_not_ready_without_a_json_line_whose_msg_is_the_tunnel_s(
+    log: bytes,
+) -> None:
+    """Only a JSON object whose msg is the tunnel's message marks readiness."""
+    client = _client(log)
+
+    with pytest.raises(EgressStartError):
+        start_proxy(client, KEY, CONFIG_DIR)
+
+
+def test_start_proxy_refuses_a_proxy_not_ready_in_time_and_removes_it(
+    clock: _FakeClock,
+) -> None:
+    """After ten seconds of polling, the proxy is removed and refused."""
+    client = _client(EARLIER_LINE)
+
+    with pytest.raises(EgressStartError, match="within 10 seconds") as excinfo:
+        start_proxy(client, KEY, CONFIG_DIR)
+
+    assert PROXY_NAME in str(excinfo.value)
+    assert set(clock.sleeps) == {0.1}
+    assert PROXY_READY_TIMEOUT_SECONDS <= clock.now < PROXY_READY_TIMEOUT_SECONDS + 0.2
+    _container(client).remove.assert_called_once_with(force=True)
+
+
+@pytest.mark.parametrize(
+    "log",
+    [
+        pytest.param(EARLIER_LINE, id="before-the-tunnel-line"),
+        pytest.param(EARLIER_LINE + TUNNEL_LINE, id="after-the-tunnel-line"),
+    ],
+)
+def test_start_proxy_refuses_a_proxy_that_stops_and_removes_it(
+    clock: _FakeClock, log: bytes
+) -> None:
+    """A stopped proxy is a failed start, whatever its log holds."""
+    client = _client(log, status="exited")
+
+    with pytest.raises(EgressStartError, match="stopped") as excinfo:
+        start_proxy(client, KEY, CONFIG_DIR)
+
+    assert PROXY_NAME in str(excinfo.value)
+    assert clock.sleeps == []
+    _container(client).remove.assert_called_once_with(force=True)
+
+
+@pytest.mark.usefixtures("clock")
+def test_start_proxy_reloads_the_proxy_s_state_before_it_reads_it() -> None:
+    """A proxy that stops is seen on the poll after it stops."""
+    client = _client(EARLIER_LINE + TUNNEL_LINE)
+    container = _container(client)
+    container.reload.side_effect = lambda: setattr(container, "status", "exited")
+
+    with pytest.raises(EgressStartError, match="stopped"):
+        start_proxy(client, KEY, CONFIG_DIR)
+
+
+@pytest.mark.usefixtures("clock")
+def test_a_start_refusal_carries_the_tail_of_the_proxy_s_log() -> None:
+    """The refusal holds the last 2 KiB of the log and nothing before it."""
+    client = _client(b"<" * 10 + b"z" * PROXY_LOG_EXCERPT_BYTES, status="exited")
+
+    with pytest.raises(EgressStartError) as excinfo:
+        start_proxy(client, KEY, CONFIG_DIR)
+
+    message = str(excinfo.value)
+    assert "z" * PROXY_LOG_EXCERPT_BYTES in message
+    assert "<" not in message
+
+
+@pytest.mark.usefixtures("clock")
+@pytest.mark.parametrize("error", DOCKER_ERRORS)
+@pytest.mark.parametrize(
+    "break_step",
+    [
+        pytest.param(_failing_bridge_lookup, id="bridge-lookup"),
+        pytest.param(_failing_connect, id="bridge-connect"),
+        pytest.param(_failing_start, id="start"),
+        pytest.param(_failing_log_read, id="log-read"),
+        pytest.param(_failing_reload, id="reload"),
+    ],
+)
+def test_a_docker_failure_after_the_create_removes_the_proxy(
+    break_step: Callable[[mock.MagicMock, Exception], None], error: Exception
+) -> None:
+    """The refusal is a plain EgressError naming the proxy and the cause."""
+    client = _client(TUNNEL_LINE)
+    break_step(client, error)
+
+    with pytest.raises(EgressError) as excinfo:
+        start_proxy(client, KEY, CONFIG_DIR)
+
+    assert type(excinfo.value) is EgressError
+    assert PROXY_NAME in str(excinfo.value)
+    assert "daemon said no" in str(excinfo.value)
+    _container(client).remove.assert_called_once_with(force=True)
+
+
+@pytest.mark.usefixtures("clock")
+@pytest.mark.parametrize("error", DOCKER_ERRORS)
+def test_a_refused_create_raises_egress_error_and_goes_no_further(
+    error: Exception,
+) -> None:
+    """With no container made, nothing joins the bridge or is removed."""
+    client = _client(TUNNEL_LINE)
+    client.containers.create.side_effect = error
+
+    with pytest.raises(EgressError) as excinfo:
+        start_proxy(client, KEY, CONFIG_DIR)
+
+    assert type(excinfo.value) is EgressError
+    assert PROXY_NAME in str(excinfo.value)
+    assert "daemon said no" in str(excinfo.value)
+    client.networks.get.assert_not_called()
+
+
+@pytest.mark.usefixtures("clock")
+def test_a_failed_removal_raises_egress_error_naming_the_proxy() -> None:
+    """A proxy Docker will not remove is reported, not left silently."""
+    client = _client(EARLIER_LINE, status="exited")
+    _container(client).remove.side_effect = docker.errors.APIError("daemon said no")
+
+    with pytest.raises(EgressError, match="could not be removed") as excinfo:
+        start_proxy(client, KEY, CONFIG_DIR)
+
+    assert type(excinfo.value) is EgressError
+    assert PROXY_NAME in str(excinfo.value)
