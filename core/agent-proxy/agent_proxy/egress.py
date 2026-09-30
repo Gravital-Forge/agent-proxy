@@ -3,9 +3,7 @@
 import hashlib
 import json
 import logging
-import os
 import re
-import secrets
 import shutil
 import time
 import types
@@ -21,6 +19,7 @@ from docker.models.containers import Container
 from docker.models.networks import Network
 
 from agent_proxy.config import DOMAIN_PATTERN, PROXY_ENV_NAME, InstanceConfig
+from agent_proxy.credentials import write_owner_only
 from agent_proxy.errors import ProxyError
 from agent_proxy.plugins import DOCKER_FAILURES, ensure_image
 
@@ -372,7 +371,7 @@ class EgressProxies:
         try:
             directory.mkdir(mode=0o700, parents=True, exist_ok=True)
             directory.chmod(0o700)
-            _write_staged(directory / _CONFIG_FILE, config)
+            write_owner_only(directory / _CONFIG_FILE, config)
         except OSError as exc:
             raise EgressError(
                 f"config for proxy {network_name(key)!r} could not be written: {exc}"
@@ -440,19 +439,3 @@ def _egress_filters() -> dict[str, list[str]]:
             *(f"{name}={value}" for name, value in LABELS.items()),
         ]
     }
-
-
-def _write_staged(target: Path, content: bytes) -> None:
-    """Write content to target, mode 0o600, through a staging file renamed over it."""
-    staging = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
-    fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as staged:
-            os.fchmod(fd, 0o600)
-            staged.write(content)
-            staged.flush()
-            os.fsync(fd)
-        staging.replace(target)
-    except BaseException:
-        staging.unlink(missing_ok=True)
-        raise

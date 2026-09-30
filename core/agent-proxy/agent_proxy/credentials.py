@@ -44,20 +44,9 @@ class CredentialStore:
             raise EmptyCredentialError(
                 f"credential {name!r} needs a non-empty value, got {value!r}"
             )
-        # The leading dot keeps the staging name outside NAME_PATTERN, so
+        # The staging name begins with a dot, outside NAME_PATTERN, so
         # entries() never lists a half-written credential.
-        staging = self._directory / f".{name}.{secrets.token_hex(8)}.tmp"
-        fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            with os.fdopen(fd, "wb") as staged:
-                os.fchmod(fd, 0o600)
-                staged.write(value)
-                staged.flush()
-                os.fsync(fd)
-            staging.replace(self._directory / name)
-        except BaseException:
-            staging.unlink(missing_ok=True)
-            raise
+        write_owner_only(self._directory / name, value)
 
     def entries(self) -> list[CredentialEntry]:
         """Return the stored credentials, sorted by name."""
@@ -116,3 +105,23 @@ class CredentialStore:
                 f"no credential named {name!r}; stored names are {sorted(stored)!r}"
             )
         return self._directory / name
+
+
+def write_owner_only(target: Path, content: bytes) -> None:
+    """Write content to target, mode 0o600, through a staging file renamed over it.
+
+    The staging file sits beside target under a name beginning with a dot, and
+    is removed if the write fails.
+    """
+    staging = target.with_name(f".{target.name}.{secrets.token_hex(8)}.tmp")
+    fd = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as staged:
+            os.fchmod(fd, 0o600)
+            staged.write(content)
+            staged.flush()
+            os.fsync(fd)
+        staging.replace(target)
+    except BaseException:
+        staging.unlink(missing_ok=True)
+        raise
