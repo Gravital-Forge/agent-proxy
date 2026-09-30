@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "agent-proxy plugin manifest",
+  "type": "object",
+  "required": ["actions"],
+  "properties": {
+    "actions": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"pattern": "^[a-z][a-z0-9_]*$"},
+      "additionalProperties": {"$ref": "#/$defs/action"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "action": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {"kind": {"enum": ["command", "script"]}},
+      "allOf": [
+        {
+          "if": {"required": ["kind"], "properties": {"kind": {"const": "command"}}},
+          "then": {"$ref": "#/$defs/command_action"}
+        },
+        {
+          "if": {"required": ["kind"], "properties": {"kind": {"const": "script"}}},
+          "then": {"$ref": "#/$defs/script_action"}
+        }
+      ]
+    },
+    "command_action": {
+      "required": [
+        "kind",
+        "input_schema",
+        "credentials",
+        "timeout",
+        "argv",
+        "parameters",
+        "passthrough_args"
+      ],
+      "properties": {
+        "kind": {"const": "command"},
+        "input_schema": {"$ref": "#/$defs/object_schema"},
+        "credentials": {"$ref": "#/$defs/credentials"},
+        "timeout": {"$ref": "#/$defs/timeout"},
+        "argv": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "parameters": {"type": "array", "items": {"$ref": "#/$defs/parameter"}},
+        "passthrough_args": {"type": "boolean"}
+      },
+      "additionalProperties": false
+    },
+    "script_action": {
+      "required": [
+        "kind",
+        "input_schema",
+        "credentials",
+        "timeout",
+        "executable",
+        "output_schema"
+      ],
+      "properties": {
+        "kind": {"const": "script"},
+        "input_schema": {"$ref": "#/$defs/object_schema"},
+        "credentials": {"$ref": "#/$defs/credentials"},
+        "timeout": {"$ref": "#/$defs/timeout"},
+        "executable": {"type": "string", "pattern": "^/"},
+        "output_schema": {"$ref": "#/$defs/object_schema"}
+      },
+      "additionalProperties": false
+    },
+    "object_schema": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {"type": {"const": "object"}}
+    },
+    "credentials": {"type": "array", "items": {"$ref": "#/$defs/credential"}},
+    "credential": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 1,
+      "properties": {
+        "env": {"type": "string", "pattern": "^[A-Z_][A-Z0-9_]*$"},
+        "file": {"type": "string", "pattern": "^/run/credentials/"}
+      },
+      "additionalProperties": false
+    },
+    "timeout": {"type": "string", "pattern": "^[1-9][0-9]*[smhd]$"},
+    "parameter": {
+      "type": "object",
+      "required": ["name", "as"],
+      "properties": {
+        "name": {"type": "string"},
+        "as": {"enum": ["flag", "positional"]},
+        "flag": {"type": "string", "pattern": "^--?[A-Za-z0-9][A-Za-z0-9-]*$"}
+      },
+      "additionalProperties": false,
+      "if": {"required": ["as"], "properties": {"as": {"const": "flag"}}},
+      "then": {"required": ["flag"]},
+      "else": {"not": {"required": ["flag"]}}
+    }
+  }
+}
