@@ -238,6 +238,11 @@ def _docker_client() -> docker.DockerClient:
         return docker.from_env()
     except docker.errors.DockerException as exc:
         value = os.environ.get(DOCKER_HOST_VARIABLE)
+        if value is None:
+            raise DockerUnreachableError(
+                f"{DOCKER_HOST_VARIABLE} is unset, and the default Docker socket"
+                f" is unreachable: {exc}"
+            ) from exc
         raise DockerUnreachableError(
             f"{DOCKER_HOST_VARIABLE} must name a reachable Docker daemon,"
             f" got {value!r}: {exc}"

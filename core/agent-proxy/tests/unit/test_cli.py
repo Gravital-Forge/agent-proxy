@@ -532,6 +532,25 @@ def test_manifest_check_exits_1_naming_docker_host_when_docker_is_unreachable(
     assert "unix:///nonexistent/docker.sock" in captured.err
 
 
+def test_manifest_check_says_docker_host_is_unset_when_the_default_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """With DOCKER_HOST unset, the refusal says so rather than printing None."""
+    monkeypatch.delenv("DOCKER_HOST", raising=False)
+
+    def unreachable() -> mock.MagicMock:
+        raise docker.errors.DockerException("Error while fetching server API version")
+
+    monkeypatch.setattr("agent_proxy.cli.docker.from_env", unreachable)
+
+    assert main(["manifest", "check", MANIFEST_IMAGE]) == 1
+
+    captured = capsys.readouterr()
+    _assert_refusal(captured.err)
+    assert "DOCKER_HOST is unset" in captured.err
+    assert "None" not in captured.err
+
+
 def test_no_command_is_a_usage_error() -> None:
     """A bare invocation exits 2 through argparse."""
     with pytest.raises(SystemExit) as excinfo:
