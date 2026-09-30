@@ -1,0 +1,84 @@
+[project]
+name = "agent-proxy"
+version = "0.0.1"
+description = "Per-agent MCP proxy that runs scoped, credentialed actions in cages"
+authors = [{name = "Matt Krainski", email = "matt@gravitalforge.com"}]
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "docker>=7.2.0,<8.0.0",
+    "fastmcp>=4.0.10,<5.0.0",
+    "pydantic>=2.13.5,<3.0.0",
+    "pyyaml>=6.0.3,<7.0.0",
+]
+
+[dependency-groups]
+dev = [
+    "coverage>=7.16.2,<8.0.0",
+    "pytest>=9.1.1,<10.0.0",
+    "ruff>=0.16.9,<0.17.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 88
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "B",    # flake8-bugbear
+    "A",    # flake8-builtins
+    "C4",   # flake8-comprehensions
+    "D",    # pydocstyle (flake8-docstrings)
+    "ERA",  # eradicate
+    "S",    # flake8-bandit
+    "PGH003",  # blanket `# type: ignore` without a code
+    "PGH004",  # blanket `# noqa` without a code
+    "RUF100",  # unused or stale suppression
+    "TID251",  # banned API; see flake8-tidy-imports.banned-api below
+    "BLE001",  # blind `except Exception`
+    "UP",      # pyupgrade: legacy typing constructs
+    "PTH",     # flake8-use-pathlib
+    "ANN401",  # bare `Any`; the ANN family as a whole is not selected
+]
+ignore = ["D104", "D100", "D101", "D106"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"__future__.annotations" = { msg = "PEP 563 stringization is deprecated; PEP 649 handles forward references natively." }
+
+[tool.ruff.lint.flake8-builtins]
+builtins-ignorelist = ["id"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.uv]
+add-bounds = "major"
+preview = true
+
+[tool.poe.executor]
+type = "uv"
+
+[tool.poe.tasks.lint]
+sequence = [
+    { cmd = "ruff check ." },
+    { cmd = "ruff format --check ." },
+]
+
+[tool.poe.tasks.test]
+sequence = [
+    { cmd = "coverage run -m pytest --showlocals tests/unit" },
+    { cmd = "coverage report" },
+]
+
+[tool.poe.tasks.test-integration]
+cmd = "pytest --showlocals tests/integration"
