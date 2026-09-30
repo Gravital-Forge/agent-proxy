@@ -152,13 +152,14 @@ def start_proxy(client: DockerClient, key: str, config_dir: Path) -> Container:
         EgressStartError: the proxy stops, or is not ready within
             PROXY_READY_TIMEOUT_SECONDS; it is removed.
         EgressError: Docker refuses a step; a proxy already created is removed.
+            A refused removal names the failure that called for it.
     """
     name = network_name(key)
     container = _create_proxy(client, key, config_dir)
     try:
         _start_proxy(client, container, name)
-    except EgressError:
-        _remove_proxy(container, name)
+    except EgressError as failure:
+        _remove_failed_proxy(container, name, failure)
         raise
     return container
 
@@ -254,6 +255,15 @@ def _remove_proxy(container: Container, name: str) -> None:
         container.remove(force=True)
     except DOCKER_FAILURES as exc:
         raise EgressError(f"proxy {name!r} could not be removed: {exc}") from exc
+
+
+def _remove_failed_proxy(container: Container, name: str, failure: EgressError) -> None:
+    try:
+        _remove_proxy(container, name)
+    except EgressError as removal_failure:
+        raise EgressError(
+            f"{removal_failure}; it was being removed because {failure}"
+        ) from failure
 
 
 class EgressProxies:

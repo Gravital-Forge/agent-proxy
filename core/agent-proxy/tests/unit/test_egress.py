@@ -678,16 +678,19 @@ def test_a_refused_create_raises_egress_error_and_goes_no_further(
 
 
 @pytest.mark.usefixtures("clock")
-def test_a_failed_removal_raises_egress_error_naming_the_proxy() -> None:
-    """A proxy Docker will not remove is reported, not left silently."""
+def test_a_failed_removal_names_the_removal_and_the_start_failure() -> None:
+    """A proxy Docker will not remove is reported with the failure behind it."""
     client = _client(EARLIER_LINE, status="exited")
-    _container(client).remove.side_effect = docker.errors.APIError("daemon said no")
+    _container(client).remove.side_effect = docker.errors.APIError("remove refused")
 
-    with pytest.raises(EgressError, match="could not be removed") as excinfo:
+    with pytest.raises(EgressError) as excinfo:
         start_proxy(client, KEY, CONFIG_DIR)
 
+    message = str(excinfo.value)
     assert type(excinfo.value) is EgressError
-    assert PROXY_NAME in str(excinfo.value)
+    assert f"proxy {PROXY_NAME!r} could not be removed: remove refused" in message
+    assert f"proxy {PROXY_NAME!r} stopped before it was ready" in message
+    assert type(excinfo.value.__cause__) is EgressStartError
 
 
 @pytest.mark.usefixtures("started")
