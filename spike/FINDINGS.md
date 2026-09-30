@@ -10,7 +10,8 @@ of three runs. It is not updated after the spike.
 - **Agent cage run**: `spike/cage.py` on the agent's own rootless daemon,
   2026-09-29.
 - **Operator run**: `spike/service-user/checks.sh` run by the operator with
-  sudo, stamped `2026-09-30T03:38:45Z`. It runs the file-access checks and then
+  sudo, stamped `2026-09-30T03:38:45Z` (UTC; still 2026-09-29 on the host's
+  clock). It runs the file-access checks and then
   the egress script on the rootless daemon of the scratch service user
   `apxspike`, with a real GitHub token.
 
@@ -29,8 +30,8 @@ by `<agent>`.
   works, and hot reload works.
 - **git over HTTPS and `gh` work through the proxy with an environment token**:
   confirmed.
-- **Per-call cage cost**: measured. The median is 458.5 ms with a network,
-  inside the half-second estimate made during design. The tail is not.
+- **Per-call cage cost**: confirmed. The median is 458.5 ms with a network,
+  inside the half-second estimate made during design. The maximum is not.
 
 ## Claim 1: the cage works the agent's tree through the user ACL
 
@@ -44,6 +45,8 @@ Operator run:
 <!-- rumdl-disable MD013 -->
 
 ```text
+MEASURE F1 path=agent-002.txt owner=<agent> group=<agent> mode=660 acl=user::rw-,user:<agent>:rwx#effective:rw-,user:apxspike:rwx#effective:rw-,group::rwx#effective:rw-,mask::rw-,other::---
+MEASURE F1 path=agent-022.txt owner=<agent> group=<agent> mode=660 acl=user::rw-,user:<agent>:rwx#effective:rw-,user:apxspike:rwx#effective:rw-,group::rwx#effective:rw-,mask::rw-,other::---
 MEASURE S1 uid=0(root) gid=0(root) groups=0(root),0(root),1(bin),2(daemon),3(sys),4(adm),6(disk),10(wheel),11(floppy),20(dialout),26(tape),27(video)
 CHECK S2 expected=002:read=ok,append=ok;022:read=ok,append=ok observed=002:read=ok,append=ok;022:read=ok,append=ok PASS
 CHECK S3 expected=file=ok,nested=ok observed=file=ok,nested=ok PASS
@@ -78,12 +81,11 @@ How to read it:
 - `S5` shows that container root has no reach past the ACL. A `0600` file of
   the agent's with no ACL entry is denied.
 - `S11` must be read with `S8`. `S8a` shows that `cage-made.txt` existed, so
-  the denial is real: the check prints `error`, not `denied`, for a missing
-  file. But `S11` cannot say which barrier stopped the second agent. `S12`
-  shows it cannot list the agent's home, and the spec gives it no traverse
-  there either, so it may have been stopped at the home directory. The file's
-  own barrier, `other::---`, is shown by the `S8` ACL line. No access attempt
-  tested that barrier on its own.
+  the denial is real. But `S11` cannot say which barrier stopped the second
+  agent. `S12` shows it cannot list the agent's home, and the spec gives it no
+  traverse there either, so it may have been stopped at the home directory.
+  The file's own barrier, `other::---`, is shown by the `S8` ACL line. No
+  access attempt tested that barrier on its own.
 
 **Forced design change:** none to the ACL layout. The uid-0 cage does force a
 change on the git plugin; see "git refuses a repository it does not own" below.
@@ -156,8 +158,8 @@ CHECK E9b expected=exit56 observed=exit56 PASS
 
 iron-proxy accepts the rule and enforces its `host`, but it ignores
 `source_ip`. A `source_ip` rule therefore passes validation and widens access.
-`E9` prints `PASS` for every observed value except `accepted-and-enforced`, so
-its `PASS` means "not enforced".
+`E9` prints `PASS` only for `refused-at-start`, `reload-422`, and
+`accepted-and-ignored`, so its `PASS` means "not enforced".
 
 ### One proxy per domain list
 
@@ -183,8 +185,10 @@ CHECK E7b expected=fail observed=exit7 PASS
 ```
 
 - `E1` to `E4`: each network reaches its own allowlist and nothing else.
-- `E5`: a cage that bypasses the proxy has no direct route out.
-- `E6a` and `E6b`: a network with no proxy has no egress at all.
+- `E5` and `E6b`: a cage that bypasses the proxy cannot resolve an outside
+  name (exit 6), so it has no direct way out by name. No check tried an
+  outside address directly.
+- `E6a`: on a network with no proxy, there is no proxy to reach (exit 5).
 - `E7a` and `E7b`: a cage cannot reach another network's proxy, by name or by
   address.
 
@@ -265,9 +269,9 @@ used this form, which clears any inherited helper before it adds its own:
 
 ## Claim 5: the per-call cost of starting a cage
 
-**Verdict: measured.** A cage call on an internal network has a median of
-458.5 ms, inside the half-second estimate made during design. The p95 is at
-the estimate and the maximum is over it.
+**Verdict: confirmed.** A cage per call fits the half-second estimate made
+during design at the median. A cage call on an internal network has a median
+of 458.5 ms. The p95 is at the estimate and the maximum is over it.
 
 Agent cage run, 30 timed calls after 3 warm-up calls, each one a create,
 start, wait, and remove of a cage running `true`, through the Docker SDK for
@@ -289,9 +293,9 @@ full output was kept. The figures cover the cage alone. They leave out the
 action's own work and any image pull. They come from the agent's daemon; the
 cost on the service user's daemon was not measured.
 
-**Forced design change:** none. A cage per call stands. Every action call pays
-about half a second before its tool starts, so a sequence of calls pays it
-once per call.
+**Forced design change:** none. A cage per call stands. Every action call adds
+about half a second around its tool's own run time, so a sequence of calls
+pays it once per call.
 
 ## Facts the core must honor that the spec does not state
 
@@ -322,9 +326,10 @@ busybox `wget` ignores `HTTPS_PROXY` and connects directly. On an internal
 network that connection fails, so a deny check made with `wget` passes for the
 wrong reason. The core's egress tests use curl.
 
-### A refused CONNECT is exit 56 in this curl only
+### A refused CONNECT is exit 56 in this curl
 
-The pinned tools image has this curl, in both runs:
+The tools image, built from the pinned alpine base with unpinned packages, had
+this curl in both runs:
 
 <!-- rumdl-disable MD013 -->
 
@@ -336,7 +341,8 @@ MEASURE M0 curl_version_line="curl 8.14.1 (x86_64-alpine-linux-musl) libcurl/8.1
 
 It exits 56 on a refused CONNECT (`E2`, `E4`, `E8c`, `E9b`). Newer curl exits
 7, the code it also uses for a failed connection (`E7b`). The core matches on
-the proxy's 403, not on the exit code.
+the proxy's 403, not on the exit code, because a rebuild can bring a different
+curl.
 
 ### git refuses a repository it does not own
 
@@ -388,7 +394,8 @@ flags but did not repeat these checks.
   agent write each file, strip its ACL, and set its mode. Root then changes
   only the group, with `chown -h`, so root never writes through a path the
   agent controls. The `F1` lines show the result the plan asked for.
-- `E11` expects `http401` with the dummy token and `exit0` with the real one.
+- `E9` prints `FAIL` for an `inconclusive-<value>` result as well as for
+  `accepted-and-enforced`. The plan passed every value except the latter.
 
 ## Not run
 
