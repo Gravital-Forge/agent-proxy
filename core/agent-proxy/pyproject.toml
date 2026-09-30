@@ -70,6 +70,9 @@ convention = "google"
 add-bounds = "major"
 preview = true
 
+[tool.pytest.ini_options]
+pythonpath = ["tests/unit"]
+
 [tool.poe.executor]
 type = "uv"
 

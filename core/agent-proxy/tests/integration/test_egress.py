@@ -61,6 +61,7 @@ PROC_NET_SCRIPT = (
 )
 HELPER_TIMEOUT_SECONDS = 30
 CAGE_START_SECONDS = 30
+PRUNE_SECONDS = 30
 POLL_SECONDS = 0.2
 SOURCE_IP_RANGE = ipaddress.ip_network("172.31.9.0/24")
 AGENT_TREE = "/srv/agents/it"
@@ -330,6 +331,22 @@ def _wait_for_cage(client: DockerClient, network_name: str) -> None:
     )
 
 
+def _wait_for_list_pruned(client: DockerClient, domains: Sequence[str]) -> None:
+    """Return once a list's proxy container and network are both gone."""
+    name = _list_name(domains)
+    deadline = time.monotonic() + PRUNE_SECONDS
+    while time.monotonic() < deadline:
+        if _container_status(client, name) is None and not _network_exists(
+            client, name
+        ):
+            return
+        time.sleep(POLL_SECONDS)
+    pytest.fail(
+        f"the proxy and network of list {list(domains)!r} were not pruned"
+        f" within {PRUNE_SECONDS} seconds"
+    )
+
+
 def _write_proxy_config(directory: Path, transforms: list[dict[str, object]]) -> Path:
     """Write the config render_config gives example.com, with transforms replaced."""
     document = yaml.safe_load(egress.render_config(COM))
@@ -455,8 +472,7 @@ def test_a_dropped_lists_proxy_goes_after_its_last_cage(
         assert _network_exists(bench.client, _list_name(ORG))
         cage.result()
 
-    assert _container_status(bench.client, _list_name(ORG)) is None
-    assert not _network_exists(bench.client, _list_name(ORG))
+    _wait_for_list_pruned(bench.client, ORG)
     assert _container_status(bench.client, _list_name(COM)) == "running"
 
 
