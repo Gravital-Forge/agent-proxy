@@ -13,7 +13,11 @@ The core is the uv package in `core/agent-proxy/`, placed as `docs/design.md` se
 - `core/agent-proxy/agent_proxy/` holds the source.
 - `core/agent-proxy/tests/unit/` holds the unit tests. They are plain pytest with `unittest.mock`,
   and none of them touches Docker.
-- `core/agent-proxy/tests/integration/` holds the integration tests.
+- `core/agent-proxy/tests/integration/` holds the integration tests. They run on the Docker daemon
+  that `DOCKER_HOST` names. `conftest.py` there builds the test plugin, pushes it to a `registry:3`
+  container that keeps its storage on a tmpfs, and removes the local image, so a test pulls the
+  plugin by digest.
+- `core/agent-proxy/tests/test-plugin/` holds the source of the test plugin image.
 
 ## Modules
 
@@ -76,12 +80,74 @@ A write that fails raises its error to the caller and prints nothing. `tail` ret
 lines in write order, and reads the rotated files only while it needs more lines. `docs/design.md`
 gives what a record holds and what it never holds under "Audit".
 
+### `schemas/manifest.schema.json`
+
+This file is the manifest schema, a JSON Schema of draft 2020-12 that ships in the package as data.
+It fixes the members of a manifest and of each action kind, their types, and the patterns their
+strings match. `plugins.py` checks the rules the schema cannot state. `docs/writing-a-plugin.md`
+explains the manifest to a plugin author, and `docs/design.md` gives what a manifest declares under
+"Plugins and actions".
+
+### `plugins.py`
+
+This module reads a plugin's manifest from its image and checks it.
+
+`parse_manifest` takes the bytes a `describe` printed and returns a `Manifest`, which holds each
+action by name as a `CommandAction` or a `ScriptAction`. It checks in three stages and stops after
+the first stage that fails. First it decodes the bytes, which must be UTF-8 JSON with an object at
+the top level, no key repeated in one object, and only finite numbers. Then it validates the
+document against the manifest schema. Last it checks the rules the schema cannot state, which read
+`ACTION_NAME_PATTERN`, `ENV_NAME_PATTERN`, and `parse_duration` from `config.py`. A failure raises
+`ManifestError`, which holds one message per failure, each located by its JSON path.
+`Manifest.warnings` returns one message per action that declares pass-through args.
+
+`describe` runs an image's `describe` entrypoint in a container and returns its stdout. The
+container has no network, a read-only root filesystem, no capabilities, and `no-new-privileges`, and
+it is removed whatever happens. `DESCRIBE_TIMEOUT_SECONDS` bounds the run, and
+`DESCRIBE_STDOUT_LIMIT` bounds the stdout. A non-zero exit is a refusal that carries the exit status
+and the start of stderr, at most `STDERR_EXCERPT_LIMIT` bytes. Every describe container carries
+`CONTAINER_LABELS`, which the integration tests set to the test label.
+
+`ensure_image` pulls an image by its reference only when the daemon does not hold it.
+`load_manifest` makes the image present, then describes it and parses the output. `check_image`
+describes a local image and parses the output, and never pulls. A Docker failure raises
+`PluginImageError`. Each function takes the Docker client as an argument; the module opens none.
+
+### `reload.py`
+
+This module holds the config in force and replaces it on request.
+
+A `Snapshot` holds an `InstanceConfig`, the manifest of each of its plugins, and the warnings of
+those manifests. `build_snapshot` loads the config file with `load_config`, then loads each plugin's
+manifest through the `load_manifest` callable it takes. A `load_config` refusal propagates
+unchanged, and no plugin loads. Otherwise `build_snapshot` gathers each plugin that fails to load
+and each grant whose action its plugin's manifest does not declare into one `ConfigError`, and every
+message names the config file. It checks a grant only against a plugin whose manifest loaded. The
+callable is the seam to Docker: a caller binds `plugins.load_manifest` to a client, and a unit test
+passes a fake.
+
+`LiveConfig` holds the snapshot in force. A call reads `current` once when it starts and uses that
+snapshot to its end. `reload` builds a snapshot and puts it in force with one reference assignment,
+one reload at a time. A build that fails raises, and the snapshot in force stays. `docs/design.md`
+gives the reload decisions under "Config".
+
+`ControlServer` serves reload requests for a `LiveConfig` on a Unix socket, from a daemon thread. It
+binds the socket, sets its mode to `0o600`, and only then listens. It replaces a socket left at the
+path, and refuses a path that holds anything else. A path it cannot bind raises `ControlError`. A
+request is the line `reload`. The reply is one JSON line, `{"ok": true, "warnings": [...]}` or
+`{"ok": false, "errors": [...]}`.
+
+`request_reload` is the client. It sends the request, waits at most `RELOAD_REPLY_TIMEOUT_SECONDS`
+for the reply, and returns it as a `ReloadReply`. A socket with nothing listening or out of reach, a
+connection that closes with no reply, and a reply of another form each raise `ControlError`, which
+names the socket path.
+
 ### `cli.py`
 
-This module is the admin command, and it is the one module that joins the others. It reads the
-environment, opens each store under the state directory, and hands the credential store's names to
-`load_config`. No store imports another; within the package, the stores import only `config.py` and
-`errors.py`.
+This module is the admin command, and it is the one module that reads the environment. It opens each
+store under the state directory, and hands the credential store's names to `load_config`. It opens
+the Docker client for `manifest check`, and calls `request_reload` for `reload`. No store imports
+another; within the package, the stores import only `config.py` and `errors.py`.
 
 ## Where state lives
 
@@ -95,11 +161,18 @@ does not change its mode. The command keeps its state beneath it:
   `0o700`, and writes each credential file with mode `0o600`.
 - `audit/` holds `audit.log` and its rotated files, `audit.log.1` onward. The writer creates the
   directory and narrows it to mode `0o700`. `tail` reads a missing directory or log as no lines.
+- `control.sock` is the control socket. The process that serves reloads binds it with mode `0o600`,
+  and `reload` connects to it.
 
 `AGENT_PROXY_CONFIG` names the config file. Only `token mint` reads it. `docs/design.md` gives where
 the file comes from under "Config".
 
-An unset variable, or a state directory that does not exist, is a refusal that names the variable.
+An unset `AGENT_PROXY_STATE_DIR` or `AGENT_PROXY_CONFIG`, or a state directory that does not exist,
+is a refusal that names the variable.
+
+`manifest check` reaches the Docker daemon through `DOCKER_HOST`, which the Docker SDK reads from
+the environment. With `DOCKER_HOST` unset, the SDK uses its default socket. A daemon it cannot reach
+is a refusal that names `DOCKER_HOST` and its value, or says that it is unset.
 
 ## The admin command
 
@@ -115,10 +188,18 @@ The `agent-proxy` command is `agent_proxy.cli:run`. It takes a noun and a verb:
 - `credential list` prints each credential's name and set time, never the value.
 - `credential rm NAME` deletes a credential.
 - `audit tail [-n COUNT]` prints the newest audit lines, ten unless `-n` says otherwise.
+- `manifest check IMAGE` runs the `describe` of a local image and checks the manifest it prints. It
+  never pulls, so an absent image is a refusal. On a pass it prints a line that names the image and
+  the number of actions it declares.
+- `reload` asks the process serving `control.sock` to reload its config, and prints `reloaded` when
+  the new config is in force. When that process refuses, the command prints each error it sent as a
+  refusal.
 
 A listing prints a header row, then one tab-separated row per entry, with `-` for a time that is not
 set.
 
 The command exits 0 on success. A refusal prints one line per failure to stderr, each beginning
-`agent-proxy:`, and exits 1. A usage error exits 2. `docs/design.md` gives who runs the command and
-how under "Tokens", "Credentials", and "Audit".
+`agent-proxy:`, and exits 1. A usage error exits 2. A warning is not a failure: `manifest check` and
+`reload` print each warning to stderr as a line beginning `agent-proxy: warning:`, and exit 0.
+`docs/design.md` gives who runs the command and how under "Tokens", "Credentials", "Audit",
+"Config", and "Plugins and actions".

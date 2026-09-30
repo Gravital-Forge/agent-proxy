@@ -1,4 +1,4 @@
-"""The agent-proxy admin command: tokens, credentials, audit, manifests, reload."""
+"""The agent-proxy admin command: token, credential, audit, manifest check, reload."""
 
 import argparse
 import os
