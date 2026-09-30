@@ -43,7 +43,8 @@ decisions each entry builds on.
    carries only its pointer and size; a call over the cap waits; and the heavy bar's output prints
    the cage cost median over 30 calls.
 4. **egress** — Build the egress proxies and their networks as `docs/design.md` states them, reload
-   reconciliation included.
+   reconciliation included. The runner's caller names each cage's network and gives the cage
+   `HTTPS_PROXY` when its grant has a proxy; the runner itself sets neither.
 
    **Done when**, on the agent's daemon, a cage reaches its list's domain and is refused another,
    asserted on the proxy's refusal; a `domains: []` cage has no route out; a cage reaches no other
@@ -56,16 +57,31 @@ decisions each entry builds on.
    schemas, the proxy's refusal errors, last-used updates, and one audit line per call. The item
    decides what a failed audit write does to its call, and what the writer does after the failure.
    The serving process starts the reload control server, and every Docker error in a reload's build
-   reaches the caller as a `ProxyError`.
+   reaches the caller as a `ProxyError`. It also starts the overflow sweeper, mints each call's ID,
+   and passes the runner each cage's network. A failed script's result goes back as an MCP error
+   result carrying the command shape, never as a refusal.
 
    **Done when** a transport test starts the real server and, through an MCP client, lists only the
    granted tools; runs a test-plugin action in a real cage and gets its result; gets a refusal
    naming the proxy for a bad token, a revoked token, an ungranted action, and an input that fails
-   its schema; and finds one audit line per call. `agent-proxy reload` against the running server
-   swaps in a changed config, and a reload whose build hits a Docker error gets that error as its
-   reply. A test makes one audit write fail, then asserts the decided outcome for that call and that
-   no later audit line carries a fragment of the failed one.
-6. **git-plugin** — Build `plugins/git`: an action for every git and git LFS tool git-sidecar
+   its schema; gets a failing script action's result as an error result that names no refusal; and
+   finds one audit line per call, carrying the call ID its overflow files carry.
+   `agent-proxy reload` against the running server swaps in a changed config, and a reload whose
+   build hits a Docker error gets that error as its reply. A test makes one audit write fail, then
+   asserts the decided outcome for that call and that no later audit line carries a fragment of the
+   failed one.
+6. **root-race** — Close the window between the runner's symbolic-link check on a root and the
+   daemon's bind mount of it. The agent owns its tree, so it can swap a checked root for a link in
+   that window, and the daemon then mounts whatever the link names that the service user can read,
+   the credential store included. A root must never mount a path other than the one the runner
+   checked. The item decides the mechanism, and a spike on the pinned Docker proves it first.
+
+   **Done when**, on the agent's daemon, a test that swaps a root for a link to an outside directory
+   between the check and the mount finds that the cage never sees that directory's content, whether
+   the call is refused or the mount keeps the checked path; and `docs/architecture.md` states the
+   mechanism. When no mechanism closes the window on the pinned Docker, the item hands PM a blocker,
+   and the gap goes to the operator.
+7. **git-plugin** — Build `plugins/git`: an action for every git and git LFS tool git-sidecar
    offers, `safe.directory` per root, the credential helper, and git-sidecar's rules — protected
    branches unpushable, force-push refused, the `task/` branch prefix — as `script` actions.
 
@@ -73,18 +89,21 @@ decisions each entry builds on.
    a push to `main`, a force push, and a branch without the prefix are refused; the behavior of a
    checkout that changes an agent-owned file's executable bit is tested, and recorded in
    `docs/design.md`'s Known gaps when it fails; and `manifest check` passes in CI.
-7. **github-plugin** — Build `plugins/github`: an action for every GitHub tool git-sidecar offers,
+8. **github-plugin** — Build `plugins/github`: an action for every GitHub tool git-sidecar offers,
    with `api.github.com` and `github.com` as its grant's domains and `GH_TOKEN` as its credential.
    Then review the image-based plugin form against the two built plugins; the outcome replaces the
    provisional line in `docs/design.md`'s Plugins and actions section.
 
    **Done when** each action passes against a stubbed `gh`; `manifest check` passes in CI; and
    `docs/design.md`'s Plugins and actions section records the plugin form as settled.
-8. **packaging** — Build the deployment artifacts and exercise them without root: the instance
+9. **packaging** — Build the deployment artifacts and exercise them without root: the instance
    image, `core/docker/provision-instance.sh <agent> <port> <config-file>` and its teardown, a
    sample instance config under `examples/`, and `docs/runbooks/per-agent-instance.md`, which
    explains each provisioning step and carries the deployment acceptance checks `docs/design.md`
-   lists. No script runs as root in this item.
+   lists. No script runs as root in this item. The instance sees the credential store's directory,
+   the agent tree, and the overflow directory at the host paths the daemon resolves, because the
+   runner bind-mounts a file credential from the store. The runbook says `agent_tree` names its
+   resolved path, because the runner refuses a root or overflow directory under a symbolic link.
 
    **Done when** `shellcheck` passes both scripts; the instance image builds; started on the agent's
    own daemon with the sample config and that daemon's socket, the instance serves an MCP client
