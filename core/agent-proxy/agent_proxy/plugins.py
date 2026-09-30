@@ -162,8 +162,9 @@ def parse_manifest(data: bytes) -> Manifest:
     Raises:
         ManifestError: data is not UTF-8 JSON with an object at the top level,
             repeats a key in one object, holds a number that is not finite,
-            breaks the manifest schema, or breaks a manifest rule the schema
-            cannot state. It holds one message per failure.
+            breaks the manifest schema, breaks a manifest rule the schema
+            cannot state, or embeds a schema nested too deep to check. It
+            holds one message per failure.
     """
     document = _decode(data)
     failures = _schema_failures(document)
@@ -298,6 +299,10 @@ def _embedded_schema_failures(
         Draft202012Validator.check_schema(schema)
     except SchemaError as exc:
         yield f"{where}{exc.json_path.removeprefix('$')}: {exc.message}"
+    # The checker recurses once per schema level, so a schema the decoder
+    # accepted can still nest deeper than the interpreter's recursion limit.
+    except RecursionError as exc:
+        yield f"{where}: schema must nest shallowly enough to check: {exc}"
 
 
 def _command_failures(where: str, action: _CommandDoc) -> Iterator[str]:
@@ -385,10 +390,12 @@ def _passthrough_failures(
 def _to_manifest(document: _ManifestDoc) -> Manifest:
     """Return the typed manifest a document that passes every manifest rule declares."""
     return Manifest(
-        actions={
-            name: _to_action(name, action)
-            for name, action in document["actions"].items()
-        }
+        actions=types.MappingProxyType(
+            {
+                name: _to_action(name, action)
+                for name, action in document["actions"].items()
+            }
+        )
     )
 
 

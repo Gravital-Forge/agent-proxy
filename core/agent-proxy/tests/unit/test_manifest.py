@@ -206,6 +206,14 @@ def test_parsed_manifest_is_frozen() -> None:
         manifest.actions["echo"].timeout = timedelta(seconds=1)
 
 
+def test_parsed_manifest_actions_take_no_new_entry() -> None:
+    """The actions mapping of a parsed manifest refuses an assignment."""
+    manifest = parse_manifest(_encode(_echo()))
+
+    with pytest.raises(TypeError):
+        manifest.actions["other"] = manifest.actions["echo"]
+
+
 SCHEMA_RULE_CASES = [
     pytest.param({}, "$: 'actions' is a required property", id="actions-required"),
     pytest.param(
@@ -661,6 +669,43 @@ def test_parse_manifest_refuses_a_parameter_named_args() -> None:
         f"{ECHO}.parameters[2]: a positional parameter's property must set type to"
         f" one of ['string', 'integer'], got {ARGS_PROPERTY!r}",
     )
+
+
+def _nested_schema(levels: int) -> dict[str, object]:
+    """Return an object schema whose one property nests levels deep."""
+    schema: dict[str, object] = {"type": "object"}
+    for _ in range(levels):
+        schema = {"type": "object", "properties": {"a": schema}}
+    return schema
+
+
+@pytest.mark.parametrize(
+    ("document", "where"),
+    [
+        pytest.param(
+            _report(input_schema=_nested_schema(200)),
+            f"{REPORT}.input_schema",
+            id="script-input",
+        ),
+        pytest.param(
+            _report(output_schema=_nested_schema(200)),
+            f"{REPORT}.output_schema",
+            id="script-output",
+        ),
+        pytest.param(
+            _echo(input_schema=_nested_schema(200)),
+            f"{ECHO}.input_schema",
+            id="command-input",
+        ),
+    ],
+)
+def test_parse_manifest_refuses_a_schema_nested_too_deep_to_check(
+    document: object, where: str
+) -> None:
+    """An embedded schema too deep for the checker to recurse is refused at its path."""
+    (message,) = _refusal(_encode(document)).errors
+
+    assert message.startswith(f"{where}: schema must nest shallowly enough to check: ")
 
 
 def test_parse_manifest_checks_nothing_else_in_an_action_whose_name_is_refused() -> (
