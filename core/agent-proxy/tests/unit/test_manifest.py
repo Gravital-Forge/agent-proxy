@@ -31,6 +31,10 @@ ECHO_INPUT_SCHEMA = {
     "properties": {"loud": {"type": "boolean"}, "message": {"type": "string"}},
     "additionalProperties": False,
 }
+REPORT_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {"score": {"type": "number", "maximum": 1.5}},
+}
 COMMAND_MEMBERS = (
     "input_schema",
     "credentials",
@@ -73,7 +77,7 @@ def _script(**overrides: object) -> dict[str, object]:
         "credentials": [],
         "timeout": "5m",
         "executable": "/usr/local/bin/report",
-        "output_schema": {"type": "object"},
+        "output_schema": REPORT_OUTPUT_SCHEMA,
     } | overrides
     return {key: value for key, value in members.items() if value is not OMIT}
 
@@ -167,7 +171,7 @@ def test_parse_manifest_returns_each_action_as_a_typed_object() -> None:
                 credentials=(),
                 timeout=timedelta(minutes=5),
                 executable="/usr/local/bin/report",
-                output_schema={"type": "object"},
+                output_schema=REPORT_OUTPUT_SCHEMA,
             ),
         }
     )
