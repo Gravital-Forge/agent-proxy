@@ -12,6 +12,7 @@ dependencies = [
     { name = "jsonschema" },
     { name = "pydantic" },
     { name = "pyyaml" },
+    { name = "requests" },
 ]
 
 [package.dev-dependencies]
@@ -28,6 +29,7 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.26.0,<5.0.0" },
     { name = "pydantic", specifier = ">=2.13.5,<3.0.0" },
     { name = "pyyaml", specifier = ">=6.0.3,<7.0.0" },
+    { name = "requests", specifier = ">=2.34.2,<3.0.0" },
 ]
 
 [package.metadata.requires-dev]

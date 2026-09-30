@@ -5,7 +5,9 @@ import stat
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
+from unittest import mock
 
+import docker.errors
 import pytest
 import yaml
 
@@ -19,6 +21,34 @@ CONFIG = {
     "agent_tree": "/srv/agents/alpha",
     "plugins": {},
     "scopes": {"ci": {"grants": {}}},
+}
+
+MANIFEST_IMAGE = "example/echo:dev"
+ECHO_ACTION = {
+    "kind": "command",
+    "input_schema": {
+        "type": "object",
+        "properties": {"message": {"type": "string"}},
+        "additionalProperties": False,
+    },
+    "credentials": [],
+    "timeout": "30s",
+    "argv": ["echo"],
+    "parameters": [{"name": "message", "as": "positional"}],
+    "passthrough_args": False,
+}
+RAW_ACTION = {
+    "kind": "command",
+    "input_schema": {
+        "type": "object",
+        "properties": {"args": {"type": "array", "items": {"type": "string"}}},
+        "additionalProperties": False,
+    },
+    "credentials": [],
+    "timeout": "30s",
+    "argv": ["echo"],
+    "parameters": [],
+    "passthrough_args": True,
 }
 
 
@@ -73,6 +103,18 @@ def _assert_refusal(err: str) -> None:
     assert err
     assert all(line.startswith(PREFIX) for line in err.splitlines())
     assert "Traceback" not in err
+
+
+def _docker_describing(
+    monkeypatch: pytest.MonkeyPatch, stdout: bytes
+) -> mock.MagicMock:
+    """Make docker.from_env return a client whose describe container exits 0."""
+    client = mock.MagicMock()
+    container = client.containers.create.return_value
+    container.wait.return_value = {"StatusCode": 0}
+    container.logs.return_value = stdout
+    monkeypatch.setattr("agent_proxy.cli.docker.from_env", lambda: client)
+    return client
 
 
 def test_token_mint_prints_the_token_alone(
@@ -420,6 +462,76 @@ def test_a_state_dir_that_does_not_exist_exits_1_and_creates_nothing(
     assert not absent.exists()
 
 
+def test_manifest_check_prints_warnings_and_the_pass_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A pass prints each warning on stderr and one pass line on stdout."""
+    manifest = {"actions": {"echo": ECHO_ACTION, "raw": RAW_ACTION}}
+    _docker_describing(monkeypatch, json.dumps(manifest).encode())
+
+    assert main(["manifest", "check", MANIFEST_IMAGE]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == f"manifest ok: {MANIFEST_IMAGE} declares 2 actions\n"
+    assert captured.err == (
+        "agent-proxy: warning: actions.raw: declares pass-through args\n"
+    )
+
+
+def test_manifest_check_prints_one_line_per_manifest_failure(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Each manifest failure is one prefixed stderr line, and the exit is 1."""
+    broken = {key: value for key, value in ECHO_ACTION.items() if key != "credentials"}
+    broken["timeout"] = "soon"
+    _docker_describing(monkeypatch, json.dumps({"actions": {"echo": broken}}).encode())
+
+    assert main(["manifest", "check", MANIFEST_IMAGE]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    _assert_refusal(captured.err)
+    assert len(captured.err.splitlines()) == 2
+    assert "credentials" in captured.err
+    assert "'soon'" in captured.err
+
+
+def test_manifest_check_refuses_an_absent_image_without_pulling(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An absent image is refused, and manifest check never pulls."""
+    client = _docker_describing(monkeypatch, b"")
+    client.containers.create.side_effect = docker.errors.ImageNotFound("No such image")
+
+    assert main(["manifest", "check", MANIFEST_IMAGE]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"agent-proxy: image {MANIFEST_IMAGE!r} is not present\n"
+    client.images.pull.assert_not_called()
+
+
+def test_manifest_check_exits_1_naming_docker_host_when_docker_is_unreachable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A daemon that cannot be reached is one refusal naming DOCKER_HOST."""
+    monkeypatch.setenv("DOCKER_HOST", "unix:///nonexistent/docker.sock")
+
+    def unreachable() -> mock.MagicMock:
+        raise docker.errors.DockerException("Error while fetching server API version")
+
+    monkeypatch.setattr("agent_proxy.cli.docker.from_env", unreachable)
+
+    assert main(["manifest", "check", MANIFEST_IMAGE]) == 1
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    _assert_refusal(captured.err)
+    assert len(captured.err.splitlines()) == 1
+    assert "DOCKER_HOST" in captured.err
+    assert "unix:///nonexistent/docker.sock" in captured.err
+
+
 def test_no_command_is_a_usage_error() -> None:
     """A bare invocation exits 2 through argparse."""
     with pytest.raises(SystemExit) as excinfo:
@@ -435,7 +547,7 @@ def test_help_lists_the_command_groups(capsys: pytest.CaptureFixture[str]) -> No
 
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    for noun in ("token", "credential", "audit"):
+    for noun in ("token", "credential", "audit", "manifest"):
         assert noun in out
 
 

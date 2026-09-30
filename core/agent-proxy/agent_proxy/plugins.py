@@ -1,8 +1,9 @@
-"""Plugin manifests: the actions a plugin declares, checked and typed."""
+"""Plugin manifests: the actions a plugin declares, read from its image and checked."""
 
 import json
 import math
 import re
+import types
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
@@ -10,6 +11,10 @@ from importlib.resources import files
 from pathlib import PurePosixPath
 from typing import Literal, NoReturn, NotRequired, TypedDict, cast
 
+import docker.errors
+import requests
+from docker import DockerClient
+from docker.models.containers import Container
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
 
@@ -31,6 +36,20 @@ _PROPERTY_TYPES: Mapping[str, list[str]] = {
     "flag": ["boolean", "string", "integer"],
     "positional": ["string", "integer"],
 }
+DESCRIBE_TIMEOUT_SECONDS = 30
+DESCRIBE_STDOUT_LIMIT = 1024 * 1024
+STDERR_EXCERPT_LIMIT = 1024
+CONTAINER_LABELS: Mapping[str, str] = types.MappingProxyType({})
+_DOCKER_FAILURES = (
+    docker.errors.DockerException,
+    requests.exceptions.RequestException,
+)
+# Over a Unix socket the SDK's wait raises ConnectionError on timeout, not the
+# ReadTimeout its docstring names; another transport may raise the latter.
+_WAIT_TIMEOUTS = (
+    requests.exceptions.ConnectionError,
+    requests.exceptions.ReadTimeout,
+)
 
 _VALIDATOR = Draft202012Validator(
     json.loads(
@@ -48,6 +67,10 @@ class ManifestError(ProxyError):
         """Hold one message per failure; str() prints them one per line."""
         self.errors = errors
         super().__init__("\n".join(errors))
+
+
+class PluginImageError(ProxyError):
+    """A plugin image cannot be found, pulled, or described."""
 
 
 @dataclass(frozen=True)
@@ -406,3 +429,133 @@ def _to_parameter(document: _ParameterDoc) -> Parameter:
         placement=document["as"],
         flag=document.get("flag"),
     )
+
+
+def load_manifest(client: DockerClient, reference: str) -> Manifest:
+    """Return the manifest of the image at reference, pulling it when absent.
+
+    Raises:
+        PluginImageError: the image cannot be looked up, pulled, or described.
+        ManifestError: the image's describe output breaks the manifest format.
+    """
+    ensure_image(client, reference)
+    return parse_manifest(describe(client, reference))
+
+
+def check_image(client: DockerClient, image: str) -> Manifest:
+    """Return the manifest of a local image, never pulling it.
+
+    Raises:
+        PluginImageError: the image is absent or cannot be described.
+        ManifestError: the image's describe output breaks the manifest format.
+    """
+    return parse_manifest(describe(client, image))
+
+
+def ensure_image(client: DockerClient, reference: str) -> None:
+    """Make the image at reference present, pulling it only when it is absent.
+
+    Raises:
+        PluginImageError: the image cannot be looked up or pulled.
+    """
+    try:
+        client.images.get(reference)
+    except docker.errors.ImageNotFound:
+        _pull(client, reference)
+    except _DOCKER_FAILURES as exc:
+        raise PluginImageError(
+            f"image {reference!r} could not be looked up: {exc}"
+        ) from exc
+
+
+def describe(client: DockerClient, image: str) -> bytes:
+    """Run the image's describe entrypoint and return its stdout.
+
+    The container has no network, a read-only root filesystem, no capabilities,
+    and no-new-privileges, and it is removed whatever happens.
+
+    Raises:
+        PluginImageError: the image is absent; describe cannot run, exits
+            non-zero, outlasts DESCRIBE_TIMEOUT_SECONDS, or writes more than
+            DESCRIBE_STDOUT_LIMIT bytes to stdout; or the container cannot be
+            removed.
+    """
+    container = _create_describe_container(client, image)
+    try:
+        return _run_describe(container, image)
+    finally:
+        _remove_container(container, image)
+
+
+def _pull(client: DockerClient, reference: str) -> None:
+    try:
+        client.images.pull(reference)
+    except _DOCKER_FAILURES as exc:
+        raise PluginImageError(
+            f"image {reference!r} could not be pulled: {exc}"
+        ) from exc
+
+
+def _create_describe_container(client: DockerClient, image: str) -> Container:
+    try:
+        return client.containers.create(
+            image,
+            entrypoint=["describe"],
+            network_mode="none",
+            read_only=True,
+            cap_drop=["ALL"],
+            security_opt=["no-new-privileges"],
+            labels=dict(CONTAINER_LABELS),
+        )
+    except docker.errors.ImageNotFound as exc:
+        raise PluginImageError(f"image {image!r} is not present") from exc
+    except _DOCKER_FAILURES as exc:
+        raise PluginImageError(
+            f"image {image!r}: the describe container could not be created: {exc}"
+        ) from exc
+
+
+def _run_describe(container: Container, image: str) -> bytes:
+    try:
+        container.start()
+        status = _wait(container, image)
+        if status != 0:
+            excerpt = _stderr_excerpt(container)
+            raise PluginImageError(
+                f"image {image!r}: describe exited with status {status}, "
+                f"stderr {excerpt!r}"
+            )
+        stdout = container.logs(stdout=True, stderr=False)
+    except _DOCKER_FAILURES as exc:
+        raise PluginImageError(f"image {image!r}: describe failed: {exc}") from exc
+    if len(stdout) > DESCRIBE_STDOUT_LIMIT:
+        raise PluginImageError(
+            f"image {image!r}: describe wrote {len(stdout)} bytes to stdout, "
+            f"over the limit of {DESCRIBE_STDOUT_LIMIT}"
+        )
+    return stdout
+
+
+def _wait(container: Container, image: str) -> int:
+    try:
+        result = container.wait(timeout=DESCRIBE_TIMEOUT_SECONDS)
+    except _WAIT_TIMEOUTS as exc:
+        raise PluginImageError(
+            f"image {image!r}: describe did not exit within "
+            f"{DESCRIBE_TIMEOUT_SECONDS} seconds"
+        ) from exc
+    return result["StatusCode"]
+
+
+def _stderr_excerpt(container: Container) -> str:
+    stderr = container.logs(stdout=False, stderr=True)
+    return stderr[:STDERR_EXCERPT_LIMIT].decode("utf-8", errors="replace")
+
+
+def _remove_container(container: Container, image: str) -> None:
+    try:
+        container.remove(force=True)
+    except _DOCKER_FAILURES as exc:
+        raise PluginImageError(
+            f"image {image!r}: the describe container could not be removed: {exc}"
+        ) from exc

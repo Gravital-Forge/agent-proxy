@@ -1,4 +1,4 @@
-"""The agent-proxy admin command: tokens, credentials, and the audit log."""
+"""The agent-proxy admin command: tokens, credentials, the audit log, manifests."""
 
 import argparse
 import os
@@ -8,14 +8,19 @@ from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 
+import docker
+import docker.errors
+
 from agent_proxy.audit import tail
 from agent_proxy.auth import TokenStore
 from agent_proxy.config import ConfigError, load_config, parse_duration
 from agent_proxy.credentials import CredentialStore
 from agent_proxy.errors import ProxyError
+from agent_proxy.plugins import ManifestError, check_image
 
 STATE_DIR_VARIABLE = "AGENT_PROXY_STATE_DIR"
 CONFIG_VARIABLE = "AGENT_PROXY_CONFIG"
+DOCKER_HOST_VARIABLE = "DOCKER_HOST"
 _COUNT_PATTERN = r"[1-9][0-9]*"
 
 
@@ -25,6 +30,10 @@ class SettingError(ProxyError):
 
 class UnknownScopeError(ProxyError):
     """A token was asked for a scope the config does not define."""
+
+
+class DockerUnreachableError(ProxyError):
+    """The Docker daemon the environment names cannot be reached."""
 
 
 def run() -> None:
@@ -41,7 +50,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         args.handler(args)
-    except ConfigError as error:
+    except (ConfigError, ManifestError) as error:
         _report_refusal(error.errors)
         return 1
     except ProxyError as error:
@@ -59,7 +68,7 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-proxy",
         description="Administer the tokens, credentials, and audit log of one"
-        " proxy instance.",
+        " proxy instance, and check plugin manifests.",
     )
     nouns = parser.add_subparsers(dest="noun", required=True)
     _add_token_commands(
@@ -69,6 +78,9 @@ def _parser() -> argparse.ArgumentParser:
         nouns.add_parser("credential", help="store, list, and remove credentials")
     )
     _add_audit_commands(nouns.add_parser("audit", help="read the audit log"))
+    _add_manifest_commands(
+        nouns.add_parser("manifest", help="check a plugin image's manifest")
+    )
     return parser
 
 
@@ -114,6 +126,15 @@ def _add_audit_commands(parser: argparse.ArgumentParser) -> None:
         help="how many lines to print (default 10)",
     )
     tail_parser.set_defaults(handler=_tail_audit)
+
+
+def _add_manifest_commands(parser: argparse.ArgumentParser) -> None:
+    verbs = parser.add_subparsers(dest="verb", required=True)
+    check = verbs.add_parser(
+        "check", help="run a local image's describe and check the manifest it prints"
+    )
+    check.add_argument("image", metavar="IMAGE")
+    check.set_defaults(handler=_check_manifest)
 
 
 def _positive_count(text: str) -> int:
@@ -179,6 +200,13 @@ def _tail_audit(args: argparse.Namespace) -> None:
         print(line)
 
 
+def _check_manifest(args: argparse.Namespace) -> None:
+    manifest = check_image(_docker_client(), args.image)
+    for warning in manifest.warnings():
+        print(f"agent-proxy: warning: {warning}", file=sys.stderr)
+    print(f"manifest ok: {args.image} declares {len(manifest.actions)} actions")
+
+
 def _state_dir() -> Path:
     value = os.environ.get(STATE_DIR_VARIABLE)
     if not value or not Path(value).is_dir():
@@ -203,6 +231,17 @@ def _token_store() -> TokenStore:
 
 def _credential_store() -> CredentialStore:
     return CredentialStore(_state_dir() / "credentials")
+
+
+def _docker_client() -> docker.DockerClient:
+    try:
+        return docker.from_env()
+    except docker.errors.DockerException as exc:
+        value = os.environ.get(DOCKER_HOST_VARIABLE)
+        raise DockerUnreachableError(
+            f"{DOCKER_HOST_VARIABLE} must name a reachable Docker daemon,"
+            f" got {value!r}: {exc}"
+        ) from exc
 
 
 def _row(*fields: str) -> str:
