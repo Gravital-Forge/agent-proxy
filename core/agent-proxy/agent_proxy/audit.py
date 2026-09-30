@@ -23,7 +23,7 @@ _SCAN_CHUNK = 4096
 
 
 class AuditError(ProxyError):
-    """The audit log could not record a line."""
+    """The audit log could not be prepared or could not record a line."""
 
 
 @dataclass(frozen=True)
