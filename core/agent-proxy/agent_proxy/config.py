@@ -52,7 +52,8 @@ def parse_duration(text: str) -> timedelta:
         raise DurationError(f"duration must match {DURATION_PATTERN!r}, got {text!r}")
     try:
         return int(text[:-1]) * _DURATION_UNITS[text[-1]]
-    except OverflowError as exc:
+    # int() raises ValueError past the interpreter's digit limit for str conversion.
+    except (OverflowError, ValueError) as exc:
         raise DurationError(f"duration must fit in a timedelta, got {text!r}") from exc
 
 

@@ -30,12 +30,13 @@ def test_parse_duration_refuses_a_malformed_duration(text: str) -> None:
     assert repr(text) in str(excinfo.value)
 
 
-def test_parse_duration_refuses_a_duration_too_large_for_timedelta() -> None:
-    """A count that overflows timedelta is refused, not leaked as OverflowError."""
+@pytest.mark.parametrize("text", ["1000000000d", "1" * 5000 + "s"])
+def test_parse_duration_refuses_a_count_too_large(text: str) -> None:
+    """A count past timedelta's range or int's digit limit is a DurationError."""
     with pytest.raises(DurationError) as excinfo:
-        parse_duration("1000000000d")
+        parse_duration(text)
 
-    assert "'1000000000d'" in str(excinfo.value)
+    assert repr(text) in str(excinfo.value)
 
 
 def test_duration_error_is_a_proxy_error_and_a_value_error() -> None:
