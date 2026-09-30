@@ -112,6 +112,8 @@ decisions each entry builds on.
    resolves, because the runner bind-mounts a file credential from the store and each egress proxy's
    config directory from under the state directory. The runbook says `agent_tree` names its resolved
    path, because the runner refuses a root or overflow directory under a symbolic link.
+   `docs/architecture.md` describes `serve` as the instance image's process under its own heading,
+   apart from "The admin command", whose verbs the admin runs through `docker exec`.
 
    **Done when** `shellcheck` passes both scripts; the instance image builds; started on the agent's
    own daemon with the sample config and that daemon's socket, the instance serves an MCP client
