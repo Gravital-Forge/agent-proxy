@@ -87,8 +87,7 @@ A script action runs an executable in the image. It states these members, and do
 - `output_schema` is a JSON Schema whose `type` is `"object"`, and it passes the draft 2020-12
   meta-schema check.
 
-`docs/design.md` gives how a script receives its input and returns its output under "Plugins and
-actions".
+"How an action runs" gives how a script receives its input and returns its output.
 
 ## How argv is formed
 
@@ -118,11 +117,11 @@ replaces the image's entrypoint and command:
 The root filesystem is read-only. Write scratch files under `/tmp`, a small tmpfs.
 
 A script succeeds when it exits 0 and prints on stdout one JSON object that its `output_schema`
-validates. That stdout keeps the rules the manifest keeps: UTF-8, no key repeated in one object, and
-every number finite. The call then returns that object. Otherwise the script has failed, and the
-call returns what a command action returns: the exit code, stdout, and stderr. A stdout over the
-output cap goes to an overflow file, so a script whose output passes the cap fails. `docs/design.md`
-gives the cap and the result forms under "Results".
+validates. That stdout must decode as the manifest must, by the rules under "The manifest". The call
+then returns that object. Otherwise the script has failed, and the call returns what a command
+action returns: the exit code, stdout, and stderr. A stdout over the output cap goes to an overflow
+file, so a script whose output passes the cap fails. `docs/design.md` gives the cap and the result
+forms under "Results".
 
 ## Checking a manifest
 

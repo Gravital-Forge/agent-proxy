@@ -241,7 +241,8 @@ another; within the package, the stores import only `config.py` and `errors.py`.
 
 ## Where state lives
 
-Environment variables place everything the admin command reads and writes.
+Environment variables place everything the admin command reads and writes. The config file places
+the one directory outside the state directory that the cage runner writes.
 
 `AGENT_PROXY_STATE_DIR` names the state directory. The directory must already exist, and the command
 does not change its mode. The command keeps its state beneath it:
@@ -260,14 +261,13 @@ the file comes from under "Config".
 An unset `AGENT_PROXY_STATE_DIR` or `AGENT_PROXY_CONFIG`, or a state directory that does not exist,
 is a refusal that names the variable.
 
-The cage runner reaches into the credential store's directory, and into one place outside the state
-directory. It bind-mounts each credential that a grant gives as a file, read-only, from its file in
-the credential store. It writes each overflow file under the config's `overflow_dir`, in the agent's
-tree, and the sweep removes old entries there. The runner creates neither directory.
-
 `manifest check` reaches the Docker daemon through `DOCKER_HOST`, which the Docker SDK reads from
 the environment. With `DOCKER_HOST` unset, the SDK uses its default socket. A daemon it cannot reach
 is a refusal that names `DOCKER_HOST` and its value, or says that it is unset.
+
+The cage runner mounts credential files from the credential store's directory, as `runner.py` gives
+above. It writes each overflow file under the config's `overflow_dir`, in the agent's tree, and the
+sweep removes old entries there. The runner creates neither directory.
 
 ## The admin command
 
