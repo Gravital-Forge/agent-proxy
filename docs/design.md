@@ -286,9 +286,12 @@ agent-proxy/
     └── github/
 ```
 
-The core is Python on uv and FastMCP, reusing git-sidecar's auth, transport, and test patterns.
-Plugins may be written in any language. CI builds each plugin image and runs `manifest check` on it.
-Publishing images to a registry is deployment, and out of scope.
+The core is Python on uv and FastMCP, reusing git-sidecar's auth, transport, and test patterns. One
+part of the core is Go: the in-cage root verifier, built with `CGO_ENABLED=0` into a static
+executable, so it runs in any image with no libc or runtime in the cage. The Go toolchain is a build
+dependency for that verifier alone. Plugins may be written in any language. CI builds each plugin
+image and runs `manifest check` on it. Publishing images to a registry is deployment, and out of
+scope.
 
 ## Verification
 
