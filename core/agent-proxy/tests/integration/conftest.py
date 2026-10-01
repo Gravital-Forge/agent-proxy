@@ -34,6 +34,8 @@ INSTANCE_CONTEXT = Path(__file__).parents[2]
 INSTANCE_DOCKERFILE = Path(__file__).parents[3] / "docker" / "Dockerfile"
 INSTANCE_BUILD_TAG = "apx-instance-build:it"
 INSTANCE_IMAGE_TAG = "apx-instance:it"
+LABELLED_INSTANCE_DIR = Path(__file__).parent.parent / "instance-image"
+LABELLED_INSTANCE_IMAGE_TAG = "apx-instance-labelled:it"
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
@@ -193,6 +195,27 @@ def instance_image(docker_client: DockerClient) -> Iterator[str]:
             docker_client.images.remove(image.id, force=True)
     finally:
         docker_client.images.remove(build_stage.id, force=True)
+
+
+@pytest.fixture(scope="session")
+def labelled_instance_image(
+    docker_client: DockerClient, instance_image: str, verifier_image: str
+) -> Iterator[str]:
+    """The tag of the instance image whose processes label what they create."""
+    # The instance's cages run the verifier image by its tag, so the fixture
+    # holds that image for as long as this one.
+    image, _ = docker_client.images.build(
+        path=str(LABELLED_INSTANCE_DIR),
+        tag=LABELLED_INSTANCE_IMAGE_TAG,
+        buildargs={"INSTANCE_IMAGE": instance_image},
+        labels=TEST_LABELS,
+        rm=True,
+        forcerm=True,
+    )
+    try:
+        yield LABELLED_INSTANCE_IMAGE_TAG
+    finally:
+        docker_client.images.remove(image.id, force=True)
 
 
 @pytest.fixture(scope="session")
