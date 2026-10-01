@@ -59,10 +59,9 @@ The refusal text of `push` and `checkout` uses git-sidecar's wording.
 
 ### Output past the cap
 
-The core caps each stream at 256 KiB, as `docs/design.md` gives under "Results". A script's JSON
-line over the cap fails the script. The call then returns the command result, with the overflow
-pointer and size in place of stdout. The overflow file holds the script's JSON line. A large `diff`
-is the usual case.
+A large `diff` is the usual call whose output passes the core's cap. `docs/writing-a-plugin.md`
+gives what happens to a script whose output passes the cap, and `docs/design.md` gives the cap and
+the result forms under "Results".
 
 ### `stash`
 
@@ -173,4 +172,4 @@ poe test-integration
 
 `poe test` runs the unit tests and needs only the host's git. `poe test-integration` runs on the
 Docker daemon that `DOCKER_HOST` names. `.dev/verification.md` gives which bar runs each check, and
-how the integration tests clean up after themselves.
+what the integration tests must leave behind.
