@@ -22,6 +22,7 @@ agent-proxy = { path = "../../core/agent-proxy", editable = true }
 
 [tool.ruff]
 line-length = 88
+extend-include = ["scripts/entry"]
 
 [tool.ruff.lint]
 select = [

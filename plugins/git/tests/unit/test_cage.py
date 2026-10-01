@@ -104,6 +104,14 @@ def test_roots_from_env_refuses_text_that_is_not_json() -> None:
     assert str(refused.value) == "AGENT_PROXY_ROOTS must be JSON, got 'not json'"
 
 
+def test_roots_from_env_refuses_json_nested_past_the_recursion_limit() -> None:
+    """Text nested too deep to decode is refused as text that is not JSON."""
+    with pytest.raises(cage.RefusalError) as refused:
+        cage.roots_from_env({"AGENT_PROXY_ROOTS": "[" * 100_000})
+
+    assert str(refused.value).startswith("AGENT_PROXY_ROOTS must be JSON, got '[[[")
+
+
 @pytest.mark.parametrize(
     "value", ['{"root": "/a"}', '"/a"', "[1]", '["a"]', '["/a", null]', '[""]']
 )
