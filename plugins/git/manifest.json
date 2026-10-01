@@ -389,6 +389,208 @@
         {"name": "repo", "as": "flag", "flag": "--repo"}
       ],
       "passthrough_args": false
+    },
+    "add": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"},
+          "files": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1, "pattern": "^(?!([\\s\\S]*/)?\\.\\.(/|$))"}
+          }
+        },
+        "required": ["repo", "files"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "executable": "/plugin/bin/add",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
+    "rm": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"},
+          "files": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1, "pattern": "^(?!([\\s\\S]*/)?\\.\\.(/|$))"}
+          }
+        },
+        "required": ["repo", "files"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "executable": "/plugin/bin/rm",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
+    "restore": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"},
+          "files": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1, "pattern": "^(?!([\\s\\S]*/)?\\.\\.(/|$))"}
+          },
+          "staged": {"type": "boolean"}
+        },
+        "required": ["repo", "files"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "executable": "/plugin/bin/restore",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
+    "commit": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"},
+          "message": {"type": "string", "minLength": 1}
+        },
+        "required": ["repo", "message"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "executable": "/plugin/bin/commit",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
+    "diff": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"},
+          "staged": {"type": "boolean"},
+          "ref": {"type": "string", "minLength": 1, "pattern": "^[^-]"},
+          "files": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1, "pattern": "^(?!([\\s\\S]*/)?\\.\\.(/|$))"}
+          }
+        },
+        "required": ["repo"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "executable": "/plugin/bin/diff",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
+    "lfs_track": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"},
+          "patterns": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1, "pattern": "^(?!([\\s\\S]*/)?\\.\\.(/|$))"}
+          }
+        },
+        "required": ["repo", "patterns"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "executable": "/plugin/bin/lfs_track",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
+    "lfs_untrack": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"},
+          "patterns": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1, "pattern": "^(?!([\\s\\S]*/)?\\.\\.(/|$))"}
+          }
+        },
+        "required": ["repo", "patterns"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "executable": "/plugin/bin/lfs_untrack",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
     }
   }
 }

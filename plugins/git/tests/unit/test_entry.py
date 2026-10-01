@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import subprocess
@@ -35,13 +36,14 @@ def git_cage(tmp_path: Path) -> Path:
 
 
 def _run(
-    link: Path, environment: Mapping[str, str], *args: str
+    link: Path, environment: Mapping[str, str], *args: str, stdin: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Run link with this interpreter, the host's git config left out."""
     return subprocess.run(  # noqa: S603 - fixed arguments the test chooses
         [sys.executable, str(link), *args],
         capture_output=True,
         check=False,
+        input=stdin,
         text=True,
         env={**os.environ, **ISOLATED_GIT, **environment},
     )
@@ -147,3 +149,45 @@ def test_main_refuses_a_name_with_no_action(
 
     assert exit_code == 2
     assert capsys.readouterr().err == "git plugin refused: no action is named 'push'\n"
+
+
+def test_a_script_link_prints_its_result_as_compact_json(
+    tmp_path: Path, repo: Path
+) -> None:
+    """A link named for a script action prints one JSON line and exits 0.
+
+    The repository has no identity, so commit is refused, and the refusal is
+    the printed result.
+    """
+    link = tmp_path / "bin" / "commit"
+    link.parent.mkdir()
+    link.symlink_to(ENTRY)
+    stdin = json.dumps({"repo": str(repo), "message": "m"})
+
+    completed = _run(link, _roots(repo.parent), stdin=stdin)
+
+    assert (completed.returncode, completed.stdout) == (
+        0,
+        '{"exit_code":2,"stdout":"","stderr":'
+        '"git plugin refused: git config user.name is not set\\n"}\n',
+    )
+
+
+def test_main_sends_a_script_name_to_its_action(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], repo: Path
+) -> None:
+    """The main function reads the input on stdin and prints the action's result."""
+    for name, value in ISOLATED_GIT.items():
+        monkeypatch.setenv(name, value)
+    monkeypatch.setenv("AGENT_PROXY_ROOTS", json.dumps([str(repo.parent)]))
+    payload = json.dumps({"repo": str(repo)}).encode()
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(payload)))
+
+    exit_code = entry.main(["/plugin/bin/diff"])
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "exit_code": 0,
+        "stdout": "",
+        "stderr": "",
+    }

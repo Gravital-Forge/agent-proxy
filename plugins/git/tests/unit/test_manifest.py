@@ -98,6 +98,66 @@ CHANGE_LIMITS: dict[str, tuple[tuple[EnvMount, ...], timedelta]] = {
     "lfs_fetch": ((GH_TOKEN,), timedelta(minutes=10)),
     "lfs_pull": ((GH_TOKEN,), timedelta(minutes=10)),
 }
+SCRIPT_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "exit_code": {"type": "integer"},
+        "stdout": {"type": "string"},
+        "stderr": {"type": "string"},
+    },
+    "required": ["exit_code", "stdout", "stderr"],
+    "additionalProperties": False,
+}
+PATH_LIST_PROPERTY = {
+    "type": "array",
+    "minItems": 1,
+    "items": {
+        "type": "string",
+        "minLength": 1,
+        "pattern": r"^(?!([\s\S]*/)?\.\.(/|$))",
+    },
+}
+STAGED_PROPERTY = {"type": "boolean"}
+# Each script action's input properties, and the properties it requires.
+SCRIPT_ACTIONS: dict[str, tuple[dict[str, dict[str, object]], set[str]]] = {
+    "add": (
+        {"repo": REPO_PROPERTY, "files": PATH_LIST_PROPERTY},
+        {"repo", "files"},
+    ),
+    "rm": (
+        {"repo": REPO_PROPERTY, "files": PATH_LIST_PROPERTY},
+        {"repo", "files"},
+    ),
+    "restore": (
+        {
+            "repo": REPO_PROPERTY,
+            "files": PATH_LIST_PROPERTY,
+            "staged": STAGED_PROPERTY,
+        },
+        {"repo", "files"},
+    ),
+    "commit": (
+        {"repo": REPO_PROPERTY, "message": {"type": "string", "minLength": 1}},
+        {"repo", "message"},
+    ),
+    "diff": (
+        {
+            "repo": REPO_PROPERTY,
+            "staged": STAGED_PROPERTY,
+            "ref": {"type": "string", "minLength": 1, "pattern": "^[^-]"},
+            "files": PATH_LIST_PROPERTY,
+        },
+        {"repo"},
+    ),
+    "lfs_track": (
+        {"repo": REPO_PROPERTY, "patterns": PATH_LIST_PROPERTY},
+        {"repo", "patterns"},
+    ),
+    "lfs_untrack": (
+        {"repo": REPO_PROPERTY, "patterns": PATH_LIST_PROPERTY},
+        {"repo", "patterns"},
+    ),
+}
 
 
 @pytest.fixture(scope="module")
@@ -364,3 +424,69 @@ def test_worktree_add_places_the_path_then_the_branch_flag(
         "-b",
         "task/wt",
     )
+
+
+@pytest.mark.parametrize("name", sorted(SCRIPT_ACTIONS))
+def test_script_action_runs_its_executable(manifest: Manifest, name: str) -> None:
+    """Each script action runs /plugin/bin/<name> for a minute, with no credential."""
+    action = manifest.actions[name]
+
+    assert isinstance(action, ScriptAction)
+    assert (
+        action.executable,
+        action.credentials,
+        action.timeout,
+        action.output_schema,
+    ) == (f"/plugin/bin/{name}", (), MINUTE, SCRIPT_OUTPUT_SCHEMA)
+
+
+@pytest.mark.parametrize("name", sorted(SCRIPT_ACTIONS))
+def test_script_action_states_its_input(manifest: Manifest, name: str) -> None:
+    """Each script action states its properties and requires its own."""
+    properties, required = SCRIPT_ACTIONS[name]
+    action = manifest.actions[name]
+
+    assert (_properties(action), _required(action)) == (properties, required)
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("add", {"files": []}),
+        ("add", {"files": [""]}),
+        ("add", {"files": ["../x"]}),
+        ("rm", {"files": ["a/../b"]}),
+        ("restore", {"files": ["a/.."]}),
+        ("restore", {"files": ["a.txt"], "staged": "yes"}),
+        ("diff", {"files": ["x\n/../y"]}),
+        ("diff", {"ref": "--output=/tmp/x"}),
+        ("lfs_track", {"patterns": [".."]}),
+        ("lfs_untrack", {"patterns": []}),
+        ("commit", {}),
+        ("commit", {"message": ""}),
+        ("commit", {"message": "m", "amend": True}),
+    ],
+)
+def test_script_action_refuses_an_input_outside_its_schema(
+    manifest: Manifest, name: str, arguments: dict[str, object]
+) -> None:
+    """An empty list, a '..' segment, an option as ref, or a stray member is refused."""
+    with pytest.raises(InputError):
+        validate_input(manifest.actions[name], {"repo": "/repo", **arguments})
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("add", {"files": ["a..b", "-v.txt", "dir/a.txt"]}),
+        ("diff", {}),
+        ("diff", {"staged": True, "ref": "HEAD~1", "files": ["a.txt"]}),
+        ("lfs_track", {"patterns": ["*.bin"]}),
+        ("commit", {"message": "m"}),
+    ],
+)
+def test_script_action_accepts_an_input_inside_its_schema(
+    manifest: Manifest, name: str, arguments: dict[str, object]
+) -> None:
+    """Names with two dots inside a segment, and every optional member, pass."""
+    validate_input(manifest.actions[name], {"repo": "/repo", **arguments})
