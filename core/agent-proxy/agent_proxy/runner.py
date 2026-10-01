@@ -366,8 +366,9 @@ class CageRunner:
 
         Every refusal of the call ID, input, roots, or credentials comes before
         the call takes a slot. The slot is held until the cage is removed. Each
-        root's directory is held open from its check until the cage is removed,
-        or until the call is refused; the cage's verifier refuses a root mount
+        root's directory is held open from its check until the run ends,
+        whether it returns or raises; a cage, if there is one, is removed
+        before the directories close. The cage's verifier refuses a root mount
         that is not the directory held, after the slot is taken.
 
         Raises:

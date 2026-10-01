@@ -243,9 +243,10 @@ and returns an `Outcome`. It refuses a bad call before it takes a slot under the
    in the path. The daemon follows a link in a bind source. A component that is a symbolic link, is
    not a directory, or does not exist raises `RootError`. For each root, `hold_roots` returns a
    `RootIdentity`: the path, and the device and inode of the directory it opened. It holds each
-   directory's descriptor open until the cage is removed, or until the call is refused. A released
-   inode can be reused, so a root deleted and recreated in the meantime could match the recorded
-   pair; a held descriptor keeps its inode from any other directory.
+   directory's descriptor open until the run ends, whether it returns or raises. A cage, if there is
+   one, is removed before the descriptors close. A released inode can be reused, so a root deleted
+   and recreated in the meantime could match the recorded pair; a held descriptor keeps its inode
+   from any other directory.
 5. `cage_environment` reads each credential the grant gives as an environment variable.
    `cage_mounts` binds each root at its own path with the grant's mode, then binds each credential
    the grant gives as a file, read-only, from its file in the credential store. A credential that is
@@ -392,7 +393,7 @@ within the package, the stores import only `config.py` and `errors.py`.
 ## The root verifier
 
 The verifier closes the race between the runner's check of a root and the daemon's mount of it. The
-daemon resolves a bind source when it creates the cage, after the check and after the wait for a
+daemon resolves a bind source when it starts the cage, after the check and after the wait for a
 slot. In that time the agent can swap a root, or a directory above it, for a symbolic link, or
 delete the root and create a new directory at its path. The verifier runs in the cage after the
 daemon has fixed the cage's mounts, so it checks what the action will see.
@@ -400,9 +401,11 @@ daemon has fixed the cage's mounts, so it checks what the action will see.
 The verifier is the Go program in `core/verifier/main.go`. Its argv is
 `verify <nonce> [<root-path> <st_dev> <st_ino>]... -- <action argv...>`. It stats each root path,
 following links as the daemon does when it places a mount, and compares the device and inode with
-the pair the runner recorded. When every pair matches, it looks up the first item of the action's
-argv on `PATH` and replaces itself with the action through `execve`, with the environment unchanged.
-Otherwise it writes one line to stderr and exits 125, the value of `VERIFIER_REFUSED_EXIT`:
+the pair the runner recorded. When every pair matches, it finds the action's executable from the
+first item of the action's argv. It looks up a bare name on `PATH`, and uses a name that holds a
+slash as given. It then replaces itself with the action through `execve`, with the environment
+unchanged. Otherwise it writes one line to stderr and exits 125, the value of
+`VERIFIER_REFUSED_EXIT`:
 
 - `<nonce> root <reason>` when the argv is malformed, or a root's stat fails or gives another pair.
   A reason about a root names its path, and the reason for a mismatch gives both pairs.
