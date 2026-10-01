@@ -68,13 +68,21 @@ def split_repo(args: Sequence[str]) -> tuple[str, list[str]]:
 
 
 def git_argv(repo: str, roots: Sequence[str], args: Sequence[str]) -> list[str]:
-    """Return git's argv: the repo, two safe.directory values per root, helper, args."""
+    """Return git's argv: the repo, two safe.directory values per root, helper, args.
+
+    A root's trailing slashes are dropped, so /x/ trusts /x and /x/*; the root
+    / stays /.
+    """
     trusted = [
         item
-        for root in roots
+        for root in map(_without_trailing_slashes, roots)
         for item in ("-c", f"safe.directory={root}", "-c", f"safe.directory={root}/*")
     ]
     return ["git", "-C", repo, *trusted, *CREDENTIAL_HELPER, *args]
+
+
+def _without_trailing_slashes(root: str) -> str:
+    return root.rstrip("/") or "/"
 
 
 def wrapper(argv: Sequence[str], environ: Mapping[str, str]) -> int:

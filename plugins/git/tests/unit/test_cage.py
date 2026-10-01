@@ -40,6 +40,31 @@ def test_git_argv_with_no_roots_trusts_no_directory() -> None:
     assert argv == ["git", "-C", "/repo", *HELPER, "status"]
 
 
+@pytest.mark.parametrize("root", ["/work/", "/work//"])
+def test_git_argv_drops_a_roots_trailing_slashes(root: str) -> None:
+    """A root given as /work/ trusts /work and /work/*, never /work//*."""
+    argv = cage.git_argv("/work/repo", [root], ["status"])
+
+    assert argv == [
+        "git",
+        "-C",
+        "/work/repo",
+        "-c",
+        "safe.directory=/work",
+        "-c",
+        "safe.directory=/work/*",
+        *HELPER,
+        "status",
+    ]
+
+
+def test_git_argv_keeps_the_filesystem_root_as_a_slash() -> None:
+    """The root / keeps its one slash, so its own value never goes empty."""
+    argv = cage.git_argv("/repo", ["/"], ["status"])
+
+    assert argv[3:7] == ["-c", "safe.directory=/", "-c", "safe.directory=//*"]
+
+
 def test_split_repo_takes_out_the_flag_and_its_value() -> None:
     """split_repo returns the repo, and the other items in their order."""
     repo, args = cage.split_repo(
