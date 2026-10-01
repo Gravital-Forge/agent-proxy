@@ -433,6 +433,13 @@ The git plugin is the uv package in `plugins/git/`, placed as `docs/design.md` s
 plugin under `plugins/` and runs `agent-proxy manifest check` on it. `plugins/git/README.md` gives
 everything about the plugin itself: its actions, its rules, its layout, and its tests.
 
+## The github plugin
+
+The github plugin is the uv package in `plugins/github/`, placed as `docs/design.md` sets out under
+"Repository layout". The `manifest-check` job in `.github/workflows/ci.yml` checks its image as it
+checks the git plugin's. `plugins/github/README.md` gives everything about the plugin itself: its
+actions, its egress, its layout, and its tests.
+
 ## Where state lives
 
 Environment variables place everything the admin command reads and writes. The config file places

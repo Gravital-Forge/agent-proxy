@@ -169,4 +169,5 @@ script action whose executable the image also holds. `COPY` keeps each file's mo
 must already be executable in the build context.
 
 `plugins/git/` is a full plugin: a uv package with its own tests, whose actions run git in the cage.
-Its `README.md` gives what it offers and how it is built.
+Its `README.md` gives what it offers and how it is built. `plugins/github/` is a second full plugin,
+whose actions run gh in a cage with no roots, and its `README.md` gives what it offers.
