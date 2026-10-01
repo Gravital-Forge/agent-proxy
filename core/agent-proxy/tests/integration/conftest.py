@@ -9,6 +9,7 @@ import docker.errors
 import pytest
 from docker import DockerClient
 from docker.models.containers import Container
+from docker.models.images import Image
 
 from agent_proxy import egress, plugins, runner
 
@@ -30,6 +31,16 @@ PROBE_IMAGE_TAG = "apx-egress-probe:it"
 VERIFIER_DIR = Path(__file__).parents[3] / "verifier"
 VERIFIER_BUILD_TAG = "apx-verifier-build:it"
 VERIFIER_IMAGE_TAG = "apx-verifier:it"
+INSTANCE_CONTEXT = Path(__file__).parents[2]
+INSTANCE_DOCKERFILE = Path(__file__).parents[3] / "docker" / "Dockerfile"
+INSTANCE_BUILD_TAG = "apx-instance-build:it"
+INSTANCE_IMAGE_TAG = "apx-instance:it"
+LABELLED_INSTANCE_DIR = Path(__file__).parent.parent / "instance-image"
+LABELLED_INSTANCE_IMAGE_TAG = "apx-instance-labelled:it"
+PLUGINS_DIR = Path(__file__).parents[4] / "plugins"
+GIT_PLUGIN_NAME = "apx-git-plugin"
+GITHUB_PLUGIN_BUILD_TAG = "apx-instance-github-plugin:it"
+GITHUB_STUB_NAME = "apx-github-stub"
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
@@ -163,6 +174,56 @@ def verifier_image(docker_client: DockerClient) -> Iterator[str]:
 
 
 @pytest.fixture(scope="session")
+def instance_image(docker_client: DockerClient) -> Iterator[str]:
+    """The tag of the instance image, built from core/docker/Dockerfile."""
+    build_stage, _ = docker_client.images.build(
+        path=str(INSTANCE_CONTEXT),
+        dockerfile=str(INSTANCE_DOCKERFILE),
+        target="build",
+        tag=INSTANCE_BUILD_TAG,
+        labels=TEST_LABELS,
+        rm=True,
+        forcerm=True,
+    )
+    try:
+        image, _ = docker_client.images.build(
+            path=str(INSTANCE_CONTEXT),
+            dockerfile=str(INSTANCE_DOCKERFILE),
+            tag=INSTANCE_IMAGE_TAG,
+            labels=TEST_LABELS,
+            rm=True,
+            forcerm=True,
+        )
+        try:
+            yield INSTANCE_IMAGE_TAG
+        finally:
+            docker_client.images.remove(image.id, force=True)
+    finally:
+        docker_client.images.remove(build_stage.id, force=True)
+
+
+@pytest.fixture(scope="session")
+def labelled_instance_image(
+    docker_client: DockerClient, instance_image: str, verifier_image: str
+) -> Iterator[str]:
+    """The tag of the instance image whose processes label what they create."""
+    # The instance's cages run the verifier image by its tag, so the fixture
+    # holds that image for as long as this one.
+    image, _ = docker_client.images.build(
+        path=str(LABELLED_INSTANCE_DIR),
+        tag=LABELLED_INSTANCE_IMAGE_TAG,
+        buildargs={"INSTANCE_IMAGE": instance_image},
+        labels=TEST_LABELS,
+        rm=True,
+        forcerm=True,
+    )
+    try:
+        yield LABELLED_INSTANCE_IMAGE_TAG
+    finally:
+        docker_client.images.remove(image.id, force=True)
+
+
+@pytest.fixture(scope="session")
 def cage_network(docker_client: DockerClient) -> Iterator[str]:
     """The name of the internal network every cage in these tests joins."""
     network = docker_client.networks.create(
@@ -186,17 +247,7 @@ def pinned_plugin(docker_client: DockerClient, registry: str) -> Iterator[str]:
         forcerm=True,
     )
     try:
-        _push(docker_client, repository)
-        image.reload()
-        repo_digests = image.attrs["RepoDigests"]
-        reference = next(
-            (digest for digest in repo_digests if digest.startswith(f"{repository}@")),
-            None,
-        )
-        if reference is None:
-            pytest.fail(
-                f"RepoDigests holds no digest for {repository!r}, got {repo_digests!r}"
-            )
+        reference = _pinned_reference(docker_client, image, repository)
         for tag in image.tags:
             docker_client.images.remove(tag)
         with pytest.raises(docker.errors.ImageNotFound):
@@ -206,6 +257,67 @@ def pinned_plugin(docker_client: DockerClient, registry: str) -> Iterator[str]:
         # The image is already gone when the test failed before it pulled.
         with contextlib.suppress(docker.errors.ImageNotFound):
             docker_client.images.remove(image.id, force=True)
+
+
+@pytest.fixture(scope="session")
+def git_plugin(docker_client: DockerClient, registry: str) -> Iterator[str]:
+    """The pinned reference of the git plugin, built from plugins/git and pushed."""
+    repository = f"{registry}/{GIT_PLUGIN_NAME}"
+    image, _ = docker_client.images.build(
+        path=str(PLUGINS_DIR / "git"),
+        tag=f"{repository}:{PLUGIN_TAG}",
+        labels=TEST_LABELS,
+        rm=True,
+        forcerm=True,
+    )
+    try:
+        yield _pinned_reference(docker_client, image, repository)
+    finally:
+        docker_client.images.remove(image.id, force=True)
+
+
+@pytest.fixture(scope="session")
+def github_stub_plugin(docker_client: DockerClient, registry: str) -> Iterator[str]:
+    """The pinned reference of the github plugin with the stub gh, pushed."""
+    plugin, _ = docker_client.images.build(
+        path=str(PLUGINS_DIR / "github"),
+        tag=GITHUB_PLUGIN_BUILD_TAG,
+        labels=TEST_LABELS,
+        rm=True,
+        forcerm=True,
+    )
+    try:
+        repository = f"{registry}/{GITHUB_STUB_NAME}"
+        stub, _ = docker_client.images.build(
+            path=str(PLUGINS_DIR / "github" / "tests" / "stub"),
+            tag=f"{repository}:{PLUGIN_TAG}",
+            buildargs={"PLUGIN_IMAGE": GITHUB_PLUGIN_BUILD_TAG},
+            labels=TEST_LABELS,
+            rm=True,
+            forcerm=True,
+        )
+        try:
+            yield _pinned_reference(docker_client, stub, repository)
+        finally:
+            docker_client.images.remove(stub.id, force=True)
+    finally:
+        docker_client.images.remove(plugin.id, force=True)
+
+
+def _pinned_reference(client: DockerClient, image: Image, repository: str) -> str:
+    """Push image to repository and return its repository@digest reference."""
+    _push(client, repository)
+    image.reload()
+    repo_digests = image.attrs["RepoDigests"]
+    reference = next(
+        (digest for digest in repo_digests if digest.startswith(f"{repository}@")),
+        None,
+    )
+    if reference is None:
+        pytest.fail(
+            f"RepoDigests holds no digest for {repository!r}, got {repo_digests!r}"
+        )
+    return reference
 
 
 def _push(client: DockerClient, repository: str) -> None:

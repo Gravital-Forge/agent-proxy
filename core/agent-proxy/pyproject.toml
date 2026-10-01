@@ -82,6 +82,7 @@ type = "uv"
 sequence = [
     { cmd = "ruff check ." },
     { cmd = "ruff format --check ." },
+    { cmd = "shellcheck ../docker/start-instance.sh ../docker/provision-instance.sh ../docker/teardown-instance.sh" },
 ]
 
 [tool.poe.tasks.test]

@@ -57,6 +57,15 @@
       "timeout": "10s",
       "executable": "/plugin/fail",
       "output_schema": {"type": "object"}
+    },
+    "read_credential": {
+      "kind": "command",
+      "input_schema": {"type": "object", "additionalProperties": false},
+      "credentials": [{"file": "/run/credentials/probe"}],
+      "timeout": "10s",
+      "argv": ["cat", "/run/credentials/probe"],
+      "parameters": [],
+      "passthrough_args": false
     }
   }
 }
