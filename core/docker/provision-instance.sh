@@ -111,14 +111,16 @@ build_images() {
 }
 
 install_config() {
+    local created_dir=""
     if [[ ! -d "$config_dir" ]]; then
         install -d -o root -g root -m 0755 "$config_dir"
+        created_dir="created $config_dir, "
     fi
     if cmp -s "$config_file" "$config_dir/config.yaml"; then
         echo "$config_dir/config.yaml is already up to date"
     else
         install -o root -g root -m 0644 "$config_file" "$config_dir/config.yaml"
-        echo "installed $config_file as $config_dir/config.yaml"
+        echo "${created_dir}installed $config_file as $config_dir/config.yaml"
     fi
 }
 
@@ -132,8 +134,8 @@ read_config_paths() {
     if [[ "$configured_tree" != "$agent_tree" ]]; then
         fail "the config's agent_tree is '$configured_tree', but the agent's tree is '$agent_tree'"
     fi
-    if [[ "$overflow_dir" != "$agent_tree"/?* || "$overflow_dir/" == */../* ]]; then
-        fail "the config's overflow_dir must lie inside '$agent_tree' with no '..' segment, got '$overflow_dir'"
+    if [[ "$overflow_dir" != "$agent_tree"/?* || "$(realpath -m -- "$overflow_dir")" != "$overflow_dir" ]]; then
+        fail "the config's overflow_dir must lie inside '$agent_tree' and equal its realpath, got '$overflow_dir'"
     fi
     echo "read the config: agent_tree $configured_tree, overflow_dir $overflow_dir"
 }

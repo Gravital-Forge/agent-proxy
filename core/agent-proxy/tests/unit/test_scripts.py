@@ -1,4 +1,4 @@
-"""The provisioning and teardown scripts refuse a short command line and a non-root user."""
+"""Both instance scripts refuse a short command line and a non-root user."""
 
 import os
 import subprocess

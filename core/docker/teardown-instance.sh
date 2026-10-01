@@ -48,8 +48,8 @@ read_overflow_dir() {
     overflow_dir="$(service_docker run --rm --network none --read-only --cap-drop ALL --user 0:0 \
         --mount "type=bind,source=$config_dir,target=/etc/agent-proxy,readonly" \
         --entrypoint python agent-proxy:1 -c "$read_overflow_program")"
-    if [[ "$overflow_dir" != "$agent_tree"/?* || "$overflow_dir/" == */../* ]]; then
-        fail "the config's overflow_dir must lie inside '$agent_tree' with no '..' segment, got '$overflow_dir'"
+    if [[ "$overflow_dir" != "$agent_tree"/?* || "$(realpath -m -- "$overflow_dir")" != "$overflow_dir" ]]; then
+        fail "the config's overflow_dir must lie inside '$agent_tree' and equal its realpath, got '$overflow_dir'"
     fi
     echo "read overflow_dir $overflow_dir from $config_dir/config.yaml"
 }
