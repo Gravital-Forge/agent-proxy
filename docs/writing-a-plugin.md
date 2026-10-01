@@ -118,6 +118,12 @@ replaces the image's entrypoint and command:
 - A script action's entrypoint is its `executable`, with no arguments. The script reads its input on
   stdin as one compact UTF-8 JSON object, then end of file.
 
+The proxy's root verifier runs first in every cage, and then replaces itself with that entrypoint.
+So the action still runs as PID 1, with its argv, stdin, and environment unchanged. A bare
+executable name is found on the image's `PATH`. The proxy owns `/.agent-proxy` in the cage, so an
+image must not rely on that path. `docs/architecture.md` gives the verifier under "The root
+verifier".
+
 The root filesystem is read-only. Write scratch files under `/tmp`, a small tmpfs.
 
 A script succeeds when it exits 0 and prints on stdout one JSON object that its `output_schema`

@@ -19,9 +19,11 @@ The core is the uv package in `core/agent-proxy/`, placed as `docs/design.md` se
   the plugin by digest. For the cage tests, it also builds the test plugin locally under its own
   tag, and creates an internal network that each of their cages joins. For the egress tests, it
   builds the probe image from `core/agent-proxy/tests/egress-probe/`, the pinned Alpine base with
-  curl added, and every egress test cage runs that image. `test_transport.py` there starts an
-  `Instance` from `mcp.py`, serves its app on a loopback port, and drives the MCP surface over HTTP
-  with a FastMCP client.
+  curl added, and every egress test cage runs that image. It builds the verifier image from
+  `core/verifier/`, and points the runner's `VERIFIER_IMAGE` at it for every test.
+  `test_verifier.py` there runs the verifier as the entrypoint of a hardened cage, outside the
+  runner. `test_transport.py` there starts an `Instance` from `mcp.py`, serves its app on a loopback
+  port, and drives the MCP surface over HTTP with a FastMCP client.
 - `core/agent-proxy/tests/test-plugin/` holds the source of the test plugin image. The test plugin
   holds an action for each thing the tests reach, and its `manifest.json` declares them.
 
@@ -236,31 +238,49 @@ and returns an `Outcome`. It refuses a bad call before it takes a slot under the
 3. For a command action, `form_argv` forms argv as `docs/writing-a-plugin.md` gives under "How argv
    is formed", and raises `InputError` for a value that begins with `-`. For a script action, the
    entrypoint is the executable, and `script_stdin` gives the arguments as compact UTF-8 JSON.
-4. `check_roots` raises `RootError` for a root that has a symbolic link at any component of its
-   path, because the daemon follows a link in a bind source.
+4. `hold_roots` opens each root's directory one component at a time from `/`, with `O_DIRECTORY` at
+   every step and `O_NOFOLLOW` on each component after `/`, so it follows no symbolic link anywhere
+   in the path. The daemon follows a link in a bind source. A component that is a symbolic link, is
+   not a directory, or does not exist raises `RootError`. For each root, `hold_roots` returns a
+   `RootIdentity`: the path, and the device and inode of the directory it opened. It holds each
+   directory's descriptor open until the cage is removed, or until the call is refused. A released
+   inode can be reused, so a root deleted and recreated in the meantime could match the recorded
+   pair; a held descriptor keeps its inode from any other directory.
 5. `cage_environment` reads each credential the grant gives as an environment variable.
    `cage_mounts` binds each root at its own path with the grant's mode, then binds each credential
    the grant gives as a file, read-only, from its file in the credential store. A credential that is
    not stored, or an environment value that is not UTF-8 or holds a NUL, raises `CredentialError`.
+   `_create` adds one more mount to these: the verifier image, read-only, at `VERIFIER_MOUNT`.
 
 The run then waits for a slot, creates the cage, starts it, and removes it by force whatever
-happens. The slot stays taken until the cage is removed. The cage's entrypoint is the argv or the
-executable, which also clears the image's command. The cage runs as `CONTAINER_USER`, with a
-read-only root filesystem, every capability dropped, `no-new-privileges`, a tmpfs at `TMPFS_PATH`
-with `TMPFS_OPTIONS`, `CONTAINER_LABELS`, and the `LOG_DRIVER` log driver. The runner applies the
-call's `CageNetwork` as given: the cage joins its network, and gets its environment beside the
-grant's credentials. A script's input goes to the cage's stdin, then end of file. A script that
-stops reading its input is not a failure in itself.
+happens. The slot stays taken until the cage is removed. The cage's entrypoint is the verifier's
+argv wrapped around the action's: `VERIFIER_PATH`, a nonce that is new for each call, each root's
+path, device, and inode as decimal text, `--`, then the argv or the executable. The entrypoint also
+clears the image's command. "The root verifier" below gives what the verifier checks. The cage runs
+as `CONTAINER_USER`, with a read-only root filesystem, every capability dropped,
+`no-new-privileges`, a tmpfs at `TMPFS_PATH` with `TMPFS_OPTIONS`, `CONTAINER_LABELS`, and the
+`LOG_DRIVER` log driver. The runner applies the call's `CageNetwork` as given: the cage joins its
+network, and gets its environment beside the grant's credentials. A script's input goes to the
+cage's stdin, then end of file. A script that stops reading its input is not a failure in itself.
 
 The timeout is the grant's, or else the action's. It runs from the start, and covers the input and
-the wait for the exit. After the exit, the run reads stdout and stderr from the cage's log through
-`capture_stream`, and forms the result in `results.py`. The `Outcome` holds the result, the exit
-code, the duration in milliseconds, the size of each stream, and whether a stream overflowed.
+the wait for the exit. After the exit, an exit code of `VERIFIER_REFUSED_EXIT` sends the run to the
+cage's stderr first. `_first_stderr_line` reads stderr up to its first newline, at most
+`_VERIFIER_LINE_BYTES` of it. A line that begins with the call's nonce and `root` is the verifier's
+refusal of a root, and raises `RootError`. A line that begins with the nonce and `exec` raises
+`CageStartError`. Any other line leaves the exit code to the action. An action can exit with that
+code itself, but it never sees the nonce, so it cannot forge a refusal. A root refused in the cage
+is refused after the call takes its slot, unlike the refusals listed above. Otherwise the run reads
+stdout and stderr from the cage's log through `capture_stream`, and forms the result in
+`results.py`. The `Outcome` holds the result, the exit code, the duration in milliseconds, the size
+of each stream, and whether a stream overflowed.
 
 Every refusal and failure that `runner.py` raises itself is a `RunnerError`. A create, an attach of
-stdin, or a start that fails raises `CageStartError`. A cage past its timeout raises
-`CageTimeoutError`. Any other failure after the start, a failed removal included, raises
-`CageFailedError`. An `OverflowWriteError` passes through unchanged.
+stdin, or a start that fails raises `CageStartError`. The verifier's `exec` refusal comes after the
+start, and still raises `CageStartError`, as any action that cannot start does. The verifier's
+`root` refusal raises `RootError`. A cage past its timeout raises `CageTimeoutError`. Any other
+failure after the start, a failed removal included, raises `CageFailedError`. An
+`OverflowWriteError` passes through unchanged.
 
 `CageLimiter` counts the running cages of an instance, and every call shares one. `slot` waits with
 no bound until fewer cages run than the limit it is given. Each call brings its own limit, so calls
@@ -368,6 +388,34 @@ names to `load_config`. It opens the Docker client for `manifest check` and `ser
 `request_reload` for `reload`. For `serve --host HOST --port PORT`, it starts an `Instance` from
 `mcp.py`, which opens the stores, and serves its app on that address. No store imports another;
 within the package, the stores import only `config.py` and `errors.py`.
+
+## The root verifier
+
+The verifier closes the race between the runner's check of a root and the daemon's mount of it. The
+daemon resolves a bind source when it creates the cage, after the check and after the wait for a
+slot. In that time the agent can swap a root, or a directory above it, for a symbolic link, or
+delete the root and create a new directory at its path. The verifier runs in the cage after the
+daemon has fixed the cage's mounts, so it checks what the action will see.
+
+The verifier is the Go program in `core/verifier/main.go`. Its argv is
+`verify <nonce> [<root-path> <st_dev> <st_ino>]... -- <action argv...>`. It stats each root path,
+following links as the daemon does when it places a mount, and compares the device and inode with
+the pair the runner recorded. When every pair matches, it looks up the first item of the action's
+argv on `PATH` and replaces itself with the action through `execve`, with the environment unchanged.
+Otherwise it writes one line to stderr and exits 125, the value of `VERIFIER_REFUSED_EXIT`:
+
+- `<nonce> root <reason>` when the argv is malformed, or a root's stat fails or gives another pair.
+  A reason about a root names its path, and the reason for a mismatch gives both pairs.
+- `<nonce> exec <reason>` when the lookup or the exec fails.
+
+`runner.py` above gives how the runner reads each line.
+
+`core/verifier/Dockerfile` builds the verifier with `CGO_ENABLED=0` on a Go image pinned by digest.
+Its build stage runs `gofmt`, `go vet`, and the tests in `core/verifier/main_test.go`, so a failing
+check fails the build. The final stage is `FROM scratch` and holds the one file `/verify`. The image
+must be on the instance's daemon under the reference `VERIFIER_IMAGE` before the first call, because
+an image mount never pulls; a missing image fails the create with `CageStartError`. The cage sees
+that one file, read-only, at `VERIFIER_PATH`.
 
 ## Where state lives
 
