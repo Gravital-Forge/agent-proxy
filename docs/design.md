@@ -120,7 +120,7 @@ scopes:
   dev-agent:
     grants:
       git.status:
-        roots: [{path: /home/agent-01/Projects, mode: rw}]
+        roots: [{path: /home/agent-01/Projects/example-repo, mode: rw}]
         domains: []
         credentials: {}
       github.pr_create:
