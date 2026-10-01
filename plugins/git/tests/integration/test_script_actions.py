@@ -2,19 +2,11 @@ import os
 from pathlib import Path
 
 import pytest
-from agent_proxy.runner import InputError, Outcome
-from harness import OtherUidRepo, RunAction, host_git
+from agent_proxy.runner import InputError
+from harness import OtherUidRepo, RunAction, host_git, stdout_of
 
 LFS_POINTER_HEADER = "version https://git-lfs.github.com/spec/v1"
 NOTHING_STAGED = "git plugin refused: nothing staged; stage changes with git add\n"
-
-
-def _stdout(outcome: Outcome) -> str:
-    """Return the stdout of a script whose git exited 0; fail the test otherwise."""
-    assert outcome.content["exit_code"] == 0, outcome.content
-    stdout = outcome.content["stdout"]
-    assert isinstance(stdout, str)
-    return stdout
 
 
 def test_add_then_commit_makes_a_commit_that_log_shows(
@@ -25,9 +17,9 @@ def test_add_then_commit_makes_a_commit_that_log_shows(
     roots = [host_repo.parent]
     (host_repo / "b.txt").write_text("new\n")
 
-    _stdout(run_action("add", {"repo": repo, "files": ["b.txt"]}, roots))
-    _stdout(run_action("commit", {"repo": repo, "message": "add b"}, roots))
-    log = _stdout(
+    stdout_of(run_action("add", {"repo": repo, "files": ["b.txt"]}, roots))
+    stdout_of(run_action("commit", {"repo": repo, "message": "add b"}, roots))
+    log = stdout_of(
         run_action("log", {"repo": repo, "max_count": 1, "oneline": True}, roots)
     )
 
@@ -42,8 +34,8 @@ def test_add_then_commit_on_a_repository_another_uid_owns(
     roots = [other_uid_repo.root]
     (other_uid_repo.repo / "b.txt").write_text("new\n")
 
-    _stdout(run_action("add", {"repo": repo, "files": ["b.txt"]}, roots))
-    _stdout(run_action("commit", {"repo": repo, "message": "add b"}, roots))
+    stdout_of(run_action("add", {"repo": repo, "files": ["b.txt"]}, roots))
+    stdout_of(run_action("commit", {"repo": repo, "message": "add b"}, roots))
 
 
 def test_rm_removes_a_tracked_file_from_the_index(
@@ -52,7 +44,7 @@ def test_rm_removes_a_tracked_file_from_the_index(
     """The rm action of a.txt leaves the index with no file."""
     arguments = {"repo": str(host_repo), "files": ["a.txt"]}
 
-    _stdout(run_action("rm", arguments, [host_repo.parent]))
+    stdout_of(run_action("rm", arguments, [host_repo.parent]))
 
     assert host_git(host_repo, "ls-files") == ""
 
@@ -65,7 +57,7 @@ def test_restore_with_staged_unstages_a_staged_change(
     host_git(host_repo, "add", "a.txt")
     arguments = {"repo": str(host_repo), "files": ["a.txt"], "staged": True}
 
-    _stdout(run_action("restore", arguments, [host_repo.parent]))
+    stdout_of(run_action("restore", arguments, [host_repo.parent]))
 
     assert host_git(host_repo, "diff", "--cached", "--name-only") == ""
     assert (host_repo / "a.txt").read_text() == "three\n"
@@ -77,7 +69,7 @@ def test_diff_shows_a_working_tree_change(
     """The diff action shows the edit the working tree holds."""
     (host_repo / "a.txt").write_text("three\n")
 
-    diff = _stdout(run_action("diff", {"repo": str(host_repo)}, [host_repo.parent]))
+    diff = stdout_of(run_action("diff", {"repo": str(host_repo)}, [host_repo.parent]))
 
     assert "-two\n+three\n" in diff
 
@@ -91,7 +83,7 @@ def test_diff_with_staged_shows_a_staged_change(
     (host_repo / "a.txt").write_text("four\n")
     arguments = {"repo": str(host_repo), "staged": True}
 
-    diff = _stdout(run_action("diff", arguments, [host_repo.parent]))
+    diff = stdout_of(run_action("diff", arguments, [host_repo.parent]))
 
     assert "-two\n+three\n" in diff
     assert "+four" not in diff
@@ -116,12 +108,12 @@ def test_lfs_track_add_and_commit_store_a_pointer(
     roots = [host_repo.parent]
     (host_repo / "big.bin").write_bytes(os.urandom(2048))
 
-    _stdout(run_action("lfs_track", {"repo": repo, "patterns": ["*.bin"]}, roots))
+    stdout_of(run_action("lfs_track", {"repo": repo, "patterns": ["*.bin"]}, roots))
     files = [".gitattributes", "big.bin"]
-    _stdout(run_action("add", {"repo": repo, "files": files}, roots))
-    _stdout(run_action("commit", {"repo": repo, "message": "big"}, roots))
-    shown = _stdout(run_action("show", {"repo": repo, "ref": "HEAD:big.bin"}, roots))
-    listed = _stdout(run_action("lfs_ls_files", {"repo": repo}, roots))
+    stdout_of(run_action("add", {"repo": repo, "files": files}, roots))
+    stdout_of(run_action("commit", {"repo": repo, "message": "big"}, roots))
+    shown = stdout_of(run_action("show", {"repo": repo, "ref": "HEAD:big.bin"}, roots))
+    listed = stdout_of(run_action("lfs_ls_files", {"repo": repo}, roots))
 
     assert shown.startswith(LFS_POINTER_HEADER)
     assert "big.bin" in listed
@@ -134,8 +126,8 @@ def test_lfs_untrack_removes_the_pattern_from_gitattributes(
     arguments = {"repo": str(host_repo), "patterns": ["*.bin"]}
     roots = [host_repo.parent]
 
-    _stdout(run_action("lfs_track", arguments, roots))
-    _stdout(run_action("lfs_untrack", arguments, roots))
+    stdout_of(run_action("lfs_track", arguments, roots))
+    stdout_of(run_action("lfs_untrack", arguments, roots))
 
     assert "*.bin" not in (host_repo / ".gitattributes").read_text()
 

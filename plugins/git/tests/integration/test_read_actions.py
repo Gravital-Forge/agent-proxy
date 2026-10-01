@@ -1,29 +1,27 @@
 from pathlib import Path
 
-from agent_proxy.runner import Outcome
-from harness import FIXTURE_EMAIL, FIXTURE_NAME, OtherUidRepo, RunAction, host_git
-
-
-def _stdout(outcome: Outcome) -> str:
-    """Return the stdout of an action that exited 0; fail the test otherwise."""
-    assert outcome.content["exit_code"] == 0, outcome.content
-    stdout = outcome.content["stdout"]
-    assert isinstance(stdout, str)
-    return stdout
+from harness import (
+    FIXTURE_EMAIL,
+    FIXTURE_NAME,
+    OtherUidRepo,
+    RunAction,
+    host_git,
+    stdout_of,
+)
 
 
 def test_status_reports_the_branch(run_action: RunAction, host_repo: Path) -> None:
     """The status action runs git status on the repository."""
     outcome = run_action("status", {"repo": str(host_repo)}, [host_repo.parent])
 
-    assert "On branch main" in _stdout(outcome)
+    assert "On branch main" in stdout_of(outcome)
 
 
 def test_log_prints_the_history(run_action: RunAction, host_repo: Path) -> None:
     """The log action with no parameter prints both commits."""
     outcome = run_action("log", {"repo": str(host_repo)}, [host_repo.parent])
 
-    stdout = _stdout(outcome)
+    stdout = stdout_of(outcome)
     assert "    second\n" in stdout
     assert "    first\n" in stdout
 
@@ -38,7 +36,7 @@ def test_log_with_max_count_one_prints_one_line(
         [host_repo.parent],
     )
 
-    lines = _stdout(outcome).splitlines()
+    lines = stdout_of(outcome).splitlines()
     assert len(lines) == 1
     assert lines[0].endswith(" second")
 
@@ -47,7 +45,7 @@ def test_show_prints_head(run_action: RunAction, host_repo: Path) -> None:
     """The show action with no ref shows HEAD, the second commit."""
     outcome = run_action("show", {"repo": str(host_repo)}, [host_repo.parent])
 
-    stdout = _stdout(outcome)
+    stdout = stdout_of(outcome)
     assert "    second\n" in stdout
     assert "+two\n" in stdout
 
@@ -58,7 +56,7 @@ def test_branch_lists_main(run_action: RunAction, host_repo: Path) -> None:
         "branch", {"repo": str(host_repo), "all": True}, [host_repo.parent]
     )
 
-    assert _stdout(outcome) == "* main\n"
+    assert stdout_of(outcome) == "* main\n"
 
 
 def test_rev_parse_prints_the_commit_hash(
@@ -69,7 +67,7 @@ def test_rev_parse_prints_the_commit_hash(
         "rev_parse", {"repo": str(host_repo), "ref": "HEAD"}, [host_repo.parent]
     )
 
-    assert _stdout(outcome) == host_git(host_repo, "rev-parse", "HEAD")
+    assert stdout_of(outcome) == host_git(host_repo, "rev-parse", "HEAD")
 
 
 def test_ls_files_lists_the_tracked_file(
@@ -78,7 +76,7 @@ def test_ls_files_lists_the_tracked_file(
     """ls_files lists the one tracked file."""
     outcome = run_action("ls_files", {"repo": str(host_repo)}, [host_repo.parent])
 
-    assert _stdout(outcome) == "a.txt\n"
+    assert stdout_of(outcome) == "a.txt\n"
 
 
 def test_stash_list_prints_a_stash(run_action: RunAction, host_repo: Path) -> None:
@@ -88,7 +86,7 @@ def test_stash_list_prints_a_stash(run_action: RunAction, host_repo: Path) -> No
 
     outcome = run_action("stash_list", {"repo": str(host_repo)}, [host_repo.parent])
 
-    assert _stdout(outcome).startswith("stash@{0}: ")
+    assert stdout_of(outcome).startswith("stash@{0}: ")
 
 
 def test_remote_names_origin(run_action: RunAction, host_repo: Path) -> None:
@@ -96,7 +94,7 @@ def test_remote_names_origin(run_action: RunAction, host_repo: Path) -> None:
     outcome = run_action("remote", {"repo": str(host_repo)}, [host_repo.parent])
 
     origin = host_repo.parent / "origin.git"
-    assert f"origin\t{origin} (fetch)\n" in _stdout(outcome)
+    assert f"origin\t{origin} (fetch)\n" in stdout_of(outcome)
 
 
 def test_blame_annotates_the_file(run_action: RunAction, host_repo: Path) -> None:
@@ -105,7 +103,7 @@ def test_blame_annotates_the_file(run_action: RunAction, host_repo: Path) -> Non
         "blame", {"repo": str(host_repo), "file": "a.txt"}, [host_repo.parent]
     )
 
-    stdout = _stdout(outcome)
+    stdout = stdout_of(outcome)
     assert FIXTURE_NAME in stdout
     assert stdout.endswith(") two\n")
 
@@ -114,7 +112,7 @@ def test_tag_lists_v1(run_action: RunAction, host_repo: Path) -> None:
     """The tag action lists the one tag."""
     outcome = run_action("tag", {"repo": str(host_repo)}, [host_repo.parent])
 
-    assert _stdout(outcome) == "v1\n"
+    assert stdout_of(outcome) == "v1\n"
 
 
 def test_config_get_prints_the_value(run_action: RunAction, host_repo: Path) -> None:
@@ -123,17 +121,17 @@ def test_config_get_prints_the_value(run_action: RunAction, host_repo: Path) -> 
         "config_get", {"repo": str(host_repo), "key": "user.email"}, [host_repo.parent]
     )
 
-    assert _stdout(outcome) == f"{FIXTURE_EMAIL}\n"
+    assert stdout_of(outcome) == f"{FIXTURE_EMAIL}\n"
 
 
 def test_lfs_ls_files_exits_zero(run_action: RunAction, host_repo: Path) -> None:
     """lfs_ls_files runs on a repository that tracks no LFS file."""
-    _stdout(run_action("lfs_ls_files", {"repo": str(host_repo)}, [host_repo.parent]))
+    stdout_of(run_action("lfs_ls_files", {"repo": str(host_repo)}, [host_repo.parent]))
 
 
 def test_lfs_status_exits_zero(run_action: RunAction, host_repo: Path) -> None:
     """lfs_status runs on a repository that tracks no LFS file."""
-    _stdout(run_action("lfs_status", {"repo": str(host_repo)}, [host_repo.parent]))
+    stdout_of(run_action("lfs_status", {"repo": str(host_repo)}, [host_repo.parent]))
 
 
 def test_status_runs_on_a_repository_another_uid_owns(
@@ -144,7 +142,7 @@ def test_status_runs_on_a_repository_another_uid_owns(
         "status", {"repo": str(other_uid_repo.repo)}, [other_uid_repo.root]
     )
 
-    assert "On branch main" in _stdout(outcome)
+    assert "On branch main" in stdout_of(outcome)
 
 
 def test_status_runs_with_the_repository_as_its_own_root(
@@ -155,7 +153,7 @@ def test_status_runs_with_the_repository_as_its_own_root(
         "status", {"repo": str(other_uid_repo.repo)}, [other_uid_repo.repo]
     )
 
-    assert "On branch main" in _stdout(outcome)
+    assert "On branch main" in stdout_of(outcome)
 
 
 def test_status_runs_on_a_linked_worktree_beneath_the_root(
@@ -166,7 +164,7 @@ def test_status_runs_on_a_linked_worktree_beneath_the_root(
         "status", {"repo": str(other_uid_repo.worktree)}, [other_uid_repo.root]
     )
 
-    assert "On branch task/wt" in _stdout(outcome)
+    assert "On branch task/wt" in stdout_of(outcome)
 
 
 def test_status_outside_every_root_fails_with_gits_error(

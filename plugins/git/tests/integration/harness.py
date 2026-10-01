@@ -64,3 +64,11 @@ def host_git(repo: Path, *args: str) -> str:
         env={**os.environ, **_ISOLATED_GIT},
     )
     return completed.stdout
+
+
+def stdout_of(outcome: Outcome) -> str:
+    """Return the stdout of an action whose exit_code is 0; fail the test otherwise."""
+    assert outcome.content["exit_code"] == 0, outcome.content
+    stdout = outcome.content["stdout"]
+    assert isinstance(stdout, str)
+    return stdout
