@@ -35,12 +35,18 @@ DOMAIN_PATTERN = (
     r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
 )
 PROXY_ENV_NAME = "HTTPS_PROXY"
+ROOTS_ENV_NAME = "AGENT_PROXY_ROOTS"
 
 _DURATION_UNITS = {
     "s": timedelta(seconds=1),
     "m": timedelta(minutes=1),
     "h": timedelta(hours=1),
     "d": timedelta(days=1),
+}
+
+_RESERVED_ENV_SETTERS = {
+    PROXY_ENV_NAME: "the egress proxy",
+    ROOTS_ENV_NAME: "the core",
 }
 
 
@@ -318,10 +324,10 @@ def _reserved_env_failures(
     where: str, credentials: Mapping[str, EnvMount | FileMount]
 ) -> Iterator[str]:
     for name, mount in credentials.items():
-        if isinstance(mount, EnvMount) and mount.env == PROXY_ENV_NAME:
+        if isinstance(mount, EnvMount) and mount.env in _RESERVED_ENV_SETTERS:
             yield (
-                f"{where}.{name}.env must not be {PROXY_ENV_NAME!r}, "
-                "which the egress proxy sets"
+                f"{where}.{name}.env must not be {mount.env!r}, "
+                f"which {_RESERVED_ENV_SETTERS[mount.env]} sets"
             )
 
 

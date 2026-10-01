@@ -281,6 +281,33 @@ def test_only_granted_credentials_reach_the_cage(cages: _Cages) -> None:
     assert cages.store.read("second") == values["second"].encode()
 
 
+def test_the_cage_reads_its_grant_s_roots_and_no_other_mount(
+    cages: _Cages, tmp_path: Path
+) -> None:
+    """The roots variable names both roots in grant order, not the credential file."""
+    second = tmp_path / "roots" / "second"
+    first = tmp_path / "roots" / "first"
+    second.mkdir(parents=True)
+    first.mkdir()
+    cages.store.set("second", b"key")
+    grant = _grant(
+        Root(path=str(second), mode="rw"),
+        Root(path=str(first), mode="ro"),
+        credentials={"second": FileMount(file=CREDENTIAL_FILE)},
+    )
+
+    outcome = cages.run(_shell('printf %s "$AGENT_PROXY_ROOTS"'), {}, grant)
+
+    assert outcome.content["stdout"] == f'["{second}","{first}"]'
+
+
+def test_a_cage_with_no_roots_reads_an_empty_roots_array(cages: _Cages) -> None:
+    """A grant with no roots gives the cage the empty array."""
+    outcome = cages.run(_shell('printf %s "$AGENT_PROXY_ROOTS"'), {}, _grant())
+
+    assert outcome.content["stdout"] == "[]"
+
+
 def test_the_cage_passes_the_hardening_probes(cages: _Cages) -> None:
     """H1 to H4 print the values spike/FINDINGS.md records as passing."""
     outcome = cages.run(_shell(HARDEN_PROBE), {}, _grant())

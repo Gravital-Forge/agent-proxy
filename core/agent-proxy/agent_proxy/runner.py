@@ -21,7 +21,7 @@ from docker import DockerClient
 from docker.models.containers import Container
 from jsonschema import Draft202012Validator
 
-from agent_proxy.config import EnvMount, FileMount, Grant, Root
+from agent_proxy.config import ROOTS_ENV_NAME, EnvMount, FileMount, Grant, Root
 from agent_proxy.credentials import CredentialStore, UnknownCredentialError
 from agent_proxy.egress import CageNetwork
 from agent_proxy.errors import ProxyError
@@ -217,6 +217,13 @@ def _open_refusal(exc: OSError) -> str:
     if exc.errno == errno.ENOENT:
         return "does not exist"
     return f"cannot be opened: {exc.strerror}"
+
+
+def roots_environment(roots: Sequence[Root]) -> dict[str, str]:
+    """Return the variable that names the grant's root paths to a cage, in order."""
+    return {
+        ROOTS_ENV_NAME: json.dumps([root.path for root in roots], separators=(",", ":"))
+    }
 
 
 def cage_environment(
@@ -486,7 +493,10 @@ def _set_up(call: CageCall, store: CredentialStore, held: ExitStack) -> _CageSet
         roots=roots,
         entrypoint=entrypoint,
         stdin=stdin,
-        environment=cage_environment(credentials, store),
+        environment={
+            **roots_environment(call.grant.roots),
+            **cage_environment(credentials, store),
+        },
         mounts=cage_mounts(call.grant.roots, credentials, store),
     )
 
