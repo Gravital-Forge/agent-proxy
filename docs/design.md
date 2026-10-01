@@ -167,9 +167,11 @@ Every action call runs in a fresh sibling container on the instance's rootless D
 inside the proxy process.
 
 - **Files:** each root in the grant is bind-mounted at its own host path with the grant's mode.
-  Same-path mounting keeps git worktrees working. Nothing else of the host is visible. Files the
-  agent owns are not owned inside the cage's user namespace, so the cage writes them through the ACL
-  but cannot change their mode or owner.
+  Same-path mounting keeps git worktrees working. Nothing else of the host is visible. The cage's
+  environment names those paths in `AGENT_PROXY_ROOTS`, a JSON array, so a plugin acts on exactly
+  its roots without inferring them; no credential may take that name. Files the agent owns are not
+  owned inside the cage's user namespace, so the cage writes them through the ACL but cannot change
+  their mode or owner.
 - **Network:** the instance runs one egress proxy per distinct domain list across its grants.
   - An egress proxy is immutable once started and is named by a hash of the sorted domain list. It
     sits on its own `--internal` Docker network under the network alias `egress`, and every egress
@@ -255,9 +257,11 @@ One instance per agent user:
 
 - The cage process is uid 0 in its user namespace, and the agent's repositories belong to a uid that
   namespace does not map, so git refuses them as dubious ownership (`S6`). The git plugin passes
-  `-c safe.directory=<root>` on the command line for each root (`S7`). The check this turns off
-  guards against configuration a repository plants; inside the cage that risk is the known gap about
-  planted code, and the cage bounds it.
+  `-c safe.directory=<root>` and `-c safe.directory=<root>/*` on the command line for each root
+  (`S7`): the first trusts a repository whose top level is the root, and the second every repository
+  beneath it, linked worktrees included. The check this turns off guards against configuration a
+  repository plants; inside the cage that risk is the known gap about planted code, and the cage
+  bounds it.
 - `gh` reads `GH_TOKEN` as it is. git does not, so the git plugin supplies `GH_TOKEN` through a
   credential helper in the form `E12` used, which clears every inherited helper before it adds its
   own:
