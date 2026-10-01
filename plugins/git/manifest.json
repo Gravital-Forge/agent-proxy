@@ -591,6 +591,56 @@
         "required": ["exit_code", "stdout", "stderr"],
         "additionalProperties": false
       }
+    },
+    "push": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"}
+        },
+        "required": ["repo"],
+        "additionalProperties": false
+      },
+      "credentials": [{"env": "GH_TOKEN"}],
+      "timeout": "11m",
+      "executable": "/plugin/bin/push",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
+    "checkout": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"},
+          "target": {"type": "string", "minLength": 1},
+          "create": {"type": "boolean"}
+        },
+        "required": ["repo", "target"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "executable": "/plugin/bin/checkout",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
     }
   }
 }

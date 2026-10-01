@@ -1,3 +1,4 @@
+import re
 from datetime import timedelta
 from pathlib import Path
 
@@ -11,8 +12,42 @@ from agent_proxy.plugins import (
     parse_manifest,
 )
 from agent_proxy.runner import InputError, form_argv, validate_input
+from git_plugin import scripts
 
 MANIFEST_PATH = Path(__file__).parents[2] / "manifest.json"
+DOCKERFILE_PATH = Path(__file__).parents[2] / "Dockerfile"
+LINKED_ACTIONS = re.compile(r"for action in ([^;]+); do")
+GIT_SIDECAR_TOOLS = {
+    "status",
+    "diff",
+    "log",
+    "show",
+    "branch",
+    "rev_parse",
+    "ls_files",
+    "stash_list",
+    "remote",
+    "blame",
+    "tag",
+    "config_get",
+    "add",
+    "rm",
+    "commit",
+    "restore",
+    "stash",
+    "fetch",
+    "pull",
+    "merge",
+    "worktree",
+    "checkout",
+    "push",
+    "lfs_track",
+    "lfs_untrack",
+    "lfs_ls_files",
+    "lfs_status",
+    "lfs_fetch",
+    "lfs_pull",
+}
 REPO = Parameter(name="repo", placement="flag", flag="--repo")
 REPO_PROPERTY = {"type": "string", "pattern": "^/"}
 REF = Parameter(name="ref", placement="positional", flag=None)
@@ -157,6 +192,19 @@ SCRIPT_ACTIONS: dict[str, tuple[dict[str, dict[str, object]], set[str]]] = {
         {"repo": REPO_PROPERTY, "patterns": PATH_LIST_PROPERTY},
         {"repo", "patterns"},
     ),
+    "push": ({"repo": REPO_PROPERTY}, {"repo"}),
+    "checkout": (
+        {
+            "repo": REPO_PROPERTY,
+            "target": {"type": "string", "minLength": 1},
+            "create": {"type": "boolean"},
+        },
+        {"repo", "target"},
+    ),
+}
+# A script action's credentials and timeout, where they are not none and a minute.
+SCRIPT_LIMITS: dict[str, tuple[tuple[EnvMount, ...], timedelta]] = {
+    "push": ((GH_TOKEN,), timedelta(minutes=11)),
 }
 
 
@@ -428,7 +476,8 @@ def test_worktree_add_places_the_path_then_the_branch_flag(
 
 @pytest.mark.parametrize("name", sorted(SCRIPT_ACTIONS))
 def test_script_action_runs_its_executable(manifest: Manifest, name: str) -> None:
-    """Each script action runs /plugin/bin/<name> for a minute, with no credential."""
+    """Each script action runs /plugin/bin/<name> with its credentials and timeout."""
+    credentials, timeout = SCRIPT_LIMITS.get(name, ((), MINUTE))
     action = manifest.actions[name]
 
     assert isinstance(action, ScriptAction)
@@ -437,7 +486,7 @@ def test_script_action_runs_its_executable(manifest: Manifest, name: str) -> Non
         action.credentials,
         action.timeout,
         action.output_schema,
-    ) == (f"/plugin/bin/{name}", (), MINUTE, SCRIPT_OUTPUT_SCHEMA)
+    ) == (f"/plugin/bin/{name}", credentials, timeout, SCRIPT_OUTPUT_SCHEMA)
 
 
 @pytest.mark.parametrize("name", sorted(SCRIPT_ACTIONS))
@@ -465,6 +514,10 @@ def test_script_action_states_its_input(manifest: Manifest, name: str) -> None:
         ("commit", {}),
         ("commit", {"message": ""}),
         ("commit", {"message": "m", "amend": True}),
+        ("push", {"force": True}),
+        ("checkout", {}),
+        ("checkout", {"target": ""}),
+        ("checkout", {"target": "task/c", "create": "yes"}),
     ],
 )
 def test_script_action_refuses_an_input_outside_its_schema(
@@ -483,6 +536,8 @@ def test_script_action_refuses_an_input_outside_its_schema(
         ("diff", {"staged": True, "ref": "HEAD~1", "files": ["a.txt"]}),
         ("lfs_track", {"patterns": ["*.bin"]}),
         ("commit", {"message": "m"}),
+        ("push", {}),
+        ("checkout", {"target": "task/c", "create": True}),
     ],
 )
 def test_script_action_accepts_an_input_inside_its_schema(
@@ -490,3 +545,24 @@ def test_script_action_accepts_an_input_inside_its_schema(
 ) -> None:
     """Names with two dots inside a segment, and every optional member, pass."""
     validate_input(manifest.actions[name], {"repo": "/repo", **arguments})
+
+
+def test_manifest_declares_one_action_per_git_sidecar_tool(manifest: Manifest) -> None:
+    """The actions are git-sidecar's 29 git tools, each without its git_ prefix."""
+    assert set(manifest.actions) == GIT_SIDECAR_TOOLS
+
+
+def test_dockerfile_links_each_script_action(manifest: Manifest) -> None:
+    """The Dockerfile's /plugin/bin links, scripts.ACTIONS, and the manifest agree."""
+    linked = LINKED_ACTIONS.search(DOCKERFILE_PATH.read_text())
+    script_actions = {
+        name
+        for name, action in manifest.actions.items()
+        if isinstance(action, ScriptAction)
+    }
+
+    assert linked is not None
+    assert (set(linked[1].split()), set(scripts.ACTIONS)) == (
+        script_actions,
+        script_actions,
+    )

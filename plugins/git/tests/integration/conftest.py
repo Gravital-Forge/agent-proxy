@@ -1,7 +1,7 @@
 import secrets
 import shlex
 import time
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from pathlib import Path
 
 import docker
@@ -252,6 +252,23 @@ def other_uid_repo(
         _run_fixture(
             docker_client, fixture_image, root, ROOT_USER, f"rm -rf {repo} {worktree}"
         )
+
+
+@pytest.fixture
+def run_as_other_uid(
+    docker_client: DockerClient, fixture_image: str, other_uid_repo: OtherUidRepo
+) -> Callable[[str], None]:
+    """A runner of a shell script as uid 1000, with other_uid_repo's root bound.
+
+    The runner raises docker's ContainerError when the script exits non-zero.
+    """
+
+    def run(script: str) -> None:
+        _run_fixture(
+            docker_client, fixture_image, other_uid_repo.root, OTHER_USER, script
+        )
+
+    return run
 
 
 def _run_fixture(

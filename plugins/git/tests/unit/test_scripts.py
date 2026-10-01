@@ -1,5 +1,7 @@
+import hashlib
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -59,6 +61,8 @@ def test_actions_holds_each_script_action() -> None:
         "diff",
         "lfs_track",
         "lfs_untrack",
+        "push",
+        "checkout",
     }
 
 
@@ -376,4 +380,242 @@ def test_run_script_refuses_without_roots(repo: Path) -> None:
         "exit_code": 2,
         "stdout": "",
         "stderr": "git plugin refused: AGENT_PROXY_ROOTS is not set\n",
+    }
+
+
+PROTECTED_MAIN = "Cannot push to protected branch: main"
+
+
+def _prefix_refusal(branch: str) -> str:
+    """Return the pattern of the refusal for a branch outside the prefix."""
+    return rf"^Branch '{branch}' does not match any allowed prefix: task/$"
+
+
+@pytest.fixture
+def origin(repo: Path) -> Path:
+    """A bare repository beside repo, which repo names as its origin."""
+    origin = repo.parent / "origin.git"
+    _git(repo.parent, "init", "-q", "--bare", "-b", "main", str(origin))
+    _git(repo, "remote", "add", "origin", str(origin))
+    return origin
+
+
+def _commit_on_branch(repo: Path, branch: str) -> str:
+    """Point branch at repo's HEAD, commit a change on it, and return its hash."""
+    _git(repo, "checkout", "-q", "-B", branch)
+    (repo / "a.txt").write_text(f"{branch}\n")
+    _git(repo, "commit", "-q", "-am", f"on {branch}")
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _commit_lfs_file(repo: Path) -> bytes:
+    """Commit big.bin through git LFS on task/l, and return its content.
+
+    LFS's pre-push hook is removed, so only the push action's own LFS push
+    can upload the object.
+    """
+    content = os.urandom(2048)
+    _git(repo, "lfs", "install", "--local")
+    _git(repo, "checkout", "-q", "-b", "task/l")
+    (repo / "big.bin").write_bytes(content)
+    _git(repo, "lfs", "track", "big.bin")
+    _git(repo, "add", ".gitattributes", "big.bin")
+    _git(repo, "commit", "-q", "-m", "big")
+    (repo / ".git" / "hooks" / "pre-push").unlink()
+    return content
+
+
+def _head(repo: Path) -> str:
+    """Return the name of repo's checked-out branch, with git's newline."""
+    return _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+
+
+def test_push_sends_a_task_branch_to_origin(
+    repo: Path, roots: list[str], origin: Path
+) -> None:
+    """The push action on task/p puts origin's task/p at the repository's commit."""
+    pushed = _commit_on_branch(repo, "task/p")
+
+    result = scripts.push({"repo": str(repo)}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert _git(origin, "rev-parse", "refs/heads/task/p") == pushed
+
+
+def test_push_sets_the_branchs_upstream(
+    repo: Path, roots: list[str], origin: Path
+) -> None:
+    """The push action tracks the pushed branch, as git push -u does."""
+    _commit_on_branch(repo, "task/p")
+
+    scripts.push({"repo": str(repo)}, roots)
+
+    assert _git(repo, "rev-parse", "--abbrev-ref", "@{upstream}") == "origin/task/p\n"
+
+
+@pytest.mark.parametrize("branch", ["main", "master"])
+def test_push_refuses_a_protected_branch(
+    repo: Path, roots: list[str], origin: Path, branch: str
+) -> None:
+    """The push action on a protected branch is refused, and origin gets no ref."""
+    _commit_on_branch(repo, branch)
+
+    with pytest.raises(
+        RefusalError, match=rf"^Cannot push to protected branch: {branch}$"
+    ):
+        scripts.push({"repo": str(repo)}, roots)
+
+    assert _git(origin, "for-each-ref") == ""
+
+
+def test_push_refuses_a_branch_without_the_prefix(
+    repo: Path, roots: list[str], origin: Path
+) -> None:
+    """The push action on feature/x is refused, and origin gets no ref."""
+    _commit_on_branch(repo, "feature/x")
+
+    with pytest.raises(RefusalError, match=_prefix_refusal("feature/x")):
+        scripts.push({"repo": str(repo)}, roots)
+
+    assert _git(origin, "for-each-ref") == ""
+
+
+def test_push_refuses_a_detached_head(
+    repo: Path, roots: list[str], origin: Path
+) -> None:
+    """A detached HEAD reads as the branch HEAD, which lacks the prefix."""
+    _commit_on_branch(repo, "task/d")
+    _git(repo, "checkout", "-q", "--detach")
+
+    with pytest.raises(RefusalError, match=_prefix_refusal("HEAD")):
+        scripts.push({"repo": str(repo)}, roots)
+
+    assert _git(origin, "for-each-ref") == ""
+
+
+def test_push_does_not_force_through_a_planted_push_refspec(
+    repo: Path, roots: list[str], origin: Path
+) -> None:
+    """A '+' refspec in remote.origin.push does not force an amended push."""
+    pushed = _commit_on_branch(repo, "task/p")
+    scripts.push({"repo": str(repo)}, roots)
+    _git(repo, "commit", "-q", "--amend", "-m", "amended")
+    _git(repo, "config", "remote.origin.push", "+refs/heads/*:refs/heads/*")
+
+    result = scripts.push({"repo": str(repo)}, roots)
+
+    assert result["exit_code"] != 0
+    assert "non-fast-forward" in result["stderr"]
+    assert _git(origin, "rev-parse", "refs/heads/task/p") == pushed
+
+
+def test_push_uploads_lfs_objects_without_the_pre_push_hook(
+    repo: Path, roots: list[str], origin: Path
+) -> None:
+    """The push action uploads the branch's LFS object to origin before the ref."""
+    content = _commit_lfs_file(repo)
+    oid = hashlib.sha256(content).hexdigest()
+
+    result = scripts.push({"repo": str(repo)}, roots)
+
+    assert result["exit_code"] == 0, result
+    stored = origin / "lfs" / "objects" / oid[:2] / oid[2:4] / oid
+    assert stored.read_bytes() == content
+
+
+def test_push_returns_a_failed_lfs_push_and_pushes_no_branch(
+    repo: Path, roots: list[str], origin: Path
+) -> None:
+    """With the local LFS object gone, the LFS push's failure is the result."""
+    _commit_lfs_file(repo)
+    shutil.rmtree(repo / ".git" / "lfs" / "objects")
+    # git-lfs rebuilds a missing object from a working-tree file that matches it.
+    (repo / "big.bin").unlink()
+
+    result = scripts.push({"repo": str(repo)}, roots)
+
+    assert result["exit_code"] != 0
+    assert "(missing) big.bin" in result["stdout"]
+    assert _git(origin, "for-each-ref") == ""
+
+
+def test_push_in_a_missing_directory_returns_gits_error(
+    tmp_path: Path, roots: list[str]
+) -> None:
+    """When git cannot read HEAD, its own error is the result."""
+    missing = tmp_path / "root" / "missing"
+
+    result = scripts.push({"repo": str(missing)}, roots)
+
+    assert result["exit_code"] == 128
+    assert result["stderr"].startswith("fatal: ")
+
+
+def test_checkout_switches_to_a_protected_branch(repo: Path, roots: list[str]) -> None:
+    """Checking out main from a task branch leaves the repository on main."""
+    _git(repo, "checkout", "-q", "-b", "task/x")
+
+    result = scripts.checkout({"repo": str(repo), "target": "main"}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert _head(repo) == "main\n"
+
+
+def test_checkout_switches_to_a_task_branch(repo: Path, roots: list[str]) -> None:
+    """Checking out an existing task/x leaves the repository on it."""
+    _git(repo, "branch", "task/x")
+
+    result = scripts.checkout({"repo": str(repo), "target": "task/x"}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert _head(repo) == "task/x\n"
+
+
+def test_checkout_with_create_makes_a_task_branch(repo: Path, roots: list[str]) -> None:
+    """The checkout action with create makes task/c at HEAD and switches to it."""
+    arguments = {"repo": str(repo), "target": "task/c", "create": True}
+
+    result = scripts.checkout(arguments, roots)
+
+    assert result["exit_code"] == 0, result
+    assert _head(repo) == "task/c\n"
+
+
+@pytest.mark.parametrize("create", [False, True])
+def test_checkout_refuses_a_target_without_the_prefix(
+    repo: Path, roots: list[str], create: bool
+) -> None:
+    """Checking out feature/x is refused, with or without create."""
+    _git(repo, "branch", "feature/x")
+    arguments = {"repo": str(repo), "target": "feature/x", "create": create}
+
+    with pytest.raises(RefusalError, match=_prefix_refusal("feature/x")):
+        scripts.checkout(arguments, roots)
+
+    assert _head(repo) == "main\n"
+
+
+def test_checkout_of_a_missing_branch_returns_gits_error(
+    repo: Path, roots: list[str]
+) -> None:
+    """Checking out a task branch that does not exist returns git's failure."""
+    result = scripts.checkout({"repo": str(repo), "target": "task/none"}, roots)
+
+    assert result["exit_code"] == 1
+    assert "task/none" in result["stderr"]
+
+
+def test_run_script_returns_a_push_refusal_as_its_result(
+    repo: Path, roots: list[str]
+) -> None:
+    """A push on main comes back as exit code 2 and the rule's reason."""
+    stdin = json.dumps({"repo": str(repo)}).encode()
+    environ = {"AGENT_PROXY_ROOTS": json.dumps(roots)}
+
+    result = scripts.run_script("push", stdin, environ)
+
+    assert result == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": f"git plugin refused: {PROTECTED_MAIN}\n",
     }

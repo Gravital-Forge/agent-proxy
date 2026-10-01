@@ -6,7 +6,7 @@ import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from typing import NotRequired, TypedDict
 
-from git_plugin import cage
+from git_plugin import cage, rules
 
 CONFIG_UNSET_EXIT = 1
 DIFF_CHANGED_EXIT = 1
@@ -44,6 +44,16 @@ class CommitInput(TypedDict):
 class PatternsInput(TypedDict):
     repo: str
     patterns: list[str]
+
+
+class RepoInput(TypedDict):
+    repo: str
+
+
+class CheckoutInput(TypedDict):
+    repo: str
+    target: str
+    create: NotRequired[bool]
 
 
 class _GitFailedError(Exception):
@@ -177,6 +187,68 @@ def _require_staged(repo: str, roots: Sequence[str]) -> None:
         raise _GitFailedError(result)
 
 
+def push(arguments: RepoInput, roots: Sequence[str]) -> ScriptResult:
+    """Push the current branch to the same name on origin, its LFS objects first.
+
+    The refspec names both sides and carries no '+', so no push refspec or
+    mirror setting in the repository's config can force the update. A git
+    failure before the ref push is returned as the result.
+
+    Raises:
+        RefusalError: the current branch is protected or lacks the prefix, or
+            HEAD is detached.
+    """
+    repo = arguments["repo"]
+    try:
+        branch = _current_branch(repo, roots)
+        rules.check_push_branch(branch)
+        _push_lfs_objects(repo, roots, branch)
+    except _GitFailedError as failure:
+        return failure.result
+    ref = f"refs/heads/{branch}"
+    return run_git(repo, roots, ["push", "-u", "origin", f"{ref}:{ref}"])
+
+
+def _current_branch(repo: str, roots: Sequence[str]) -> str:
+    """Return the name of repo's checked-out branch, or HEAD when it is detached.
+
+    Raises:
+        _GitFailedError: git could not read HEAD.
+    """
+    result = run_git(repo, roots, ["rev-parse", "--abbrev-ref", "HEAD"])
+    if result["exit_code"] != 0:
+        raise _GitFailedError(result)
+    return result["stdout"].strip()
+
+
+def _push_lfs_objects(repo: str, roots: Sequence[str], branch: str) -> None:
+    """Upload branch's LFS objects to origin when repo tracks any LFS file.
+
+    A failed ls-files counts as no LFS file, as git-sidecar has it.
+
+    Raises:
+        _GitFailedError: the LFS push failed.
+    """
+    files = run_git(repo, roots, ["lfs", "ls-files", "--name-only"])
+    if files["exit_code"] != 0 or not files["stdout"].strip():
+        return
+    result = run_git(repo, roots, ["lfs", "push", "origin", branch])
+    if result["exit_code"] != 0:
+        raise _GitFailedError(result)
+
+
+def checkout(arguments: CheckoutInput, roots: Sequence[str]) -> ScriptResult:
+    """Switch to target, or with create, make the branch target and switch to it.
+
+    Raises:
+        RefusalError: target is not protected and lacks the prefix.
+    """
+    target = arguments["target"]
+    rules.check_checkout_target(target)
+    create = ["-b"] if arguments.get("create") else []
+    return run_git(arguments["repo"], roots, ["checkout", *create, target])
+
+
 # Each takes its own input type, which the core validated against the action's
 # input_schema before the cage started.
 ACTIONS: Mapping[str, Callable[..., ScriptResult]] = {
@@ -187,6 +259,8 @@ ACTIONS: Mapping[str, Callable[..., ScriptResult]] = {
     "diff": diff,
     "lfs_track": lfs_track,
     "lfs_untrack": lfs_untrack,
+    "push": push,
+    "checkout": checkout,
 }
 
 
