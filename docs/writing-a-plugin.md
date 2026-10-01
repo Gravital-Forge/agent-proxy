@@ -124,7 +124,12 @@ executable name is found on the image's `PATH`. The proxy owns `/.agent-proxy` i
 image must not rely on that path. `docs/architecture.md` gives the verifier under "The root
 verifier".
 
-The root filesystem is read-only. Write scratch files under `/tmp`, a small tmpfs.
+Inside the cage:
+
+- The root filesystem is read-only. Write scratch files under `/tmp`, a small tmpfs.
+- The environment holds `AGENT_PROXY_ROOTS`: the grant's root paths, in grant order, as a compact
+  JSON array of strings, `[]` for a grant with no roots. A credential cannot take that environment
+  name. The config refuses a grant that gives one.
 
 A script succeeds when it exits 0 and prints on stdout one JSON object that its `output_schema`
 validates. That stdout must decode as the manifest must, by the rules under "The manifest". The call
@@ -162,3 +167,6 @@ into the image, and a `describe` script onto the `PATH` that prints it. The mani
 action kinds. Among its actions are a command action with a flag and a positional parameter, and a
 script action whose executable the image also holds. `COPY` keeps each file's mode, so an executable
 must already be executable in the build context.
+
+`plugins/git/` is a full plugin: a uv package with its own tests, whose actions run git in the cage.
+Its `README.md` gives what it offers and how it is built.

@@ -9,6 +9,7 @@ from agent_proxy.config import (
     DOMAIN_PATTERN,
     GRANT_KEY_PATTERN,
     PROXY_ENV_NAME,
+    ROOTS_ENV_NAME,
     ConfigError,
     EnvMount,
     FileMount,
@@ -89,6 +90,11 @@ def test_domain_pattern_admits_only_literal_host_names() -> None:
 def test_proxy_env_name_is_the_egress_proxy_s_variable() -> None:
     """The variable a cage reaches its egress proxy through is HTTPS_PROXY."""
     assert PROXY_ENV_NAME == "HTTPS_PROXY"
+
+
+def test_roots_env_name_is_the_cage_s_roots_variable() -> None:
+    """The variable a cage reads its grant's root paths from is AGENT_PROXY_ROOTS."""
+    assert ROOTS_ENV_NAME == "AGENT_PROXY_ROOTS"
 
 
 def test_load_config_returns_the_validated_config(tmp_path: Path) -> None:
@@ -312,6 +318,12 @@ REFUSALS = [
         _with_grant(credentials={"gh-token": {"env": "HTTPS_PROXY"}}),
         "git.clone.credentials.gh-token.env must not be 'HTTPS_PROXY'",
         id="credential-env-https-proxy",
+    ),
+    pytest.param(
+        _with_grant(credentials={"gh-token": {"env": "AGENT_PROXY_ROOTS"}}),
+        "git.clone.credentials.gh-token.env must not be 'AGENT_PROXY_ROOTS', "
+        "which the core sets",
+        id="credential-env-agent-proxy-roots",
     ),
     pytest.param(_with_grant(timeout="0s"), "'0s'", id="timeout-0s"),
     pytest.param(

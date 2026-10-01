@@ -1,0 +1,82 @@
+[project]
+name = "agent-proxy-git-plugin"
+version = "0.0.1"
+description = "The agent-proxy plugin that runs git and git LFS in a cage"
+authors = [{name = "Matt Krainski", email = "matt@gravitalforge.com"}]
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "agent-proxy",
+    "coverage>=7.16.2,<8.0.0",
+    "pytest>=9.1.1,<10.0.0",
+    "ruff>=0.16.9,<0.17.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+agent-proxy = { path = "../../core/agent-proxy", editable = true }
+
+[tool.ruff]
+line-length = 88
+extend-include = ["scripts/entry"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "B",    # flake8-bugbear
+    "A",    # flake8-builtins
+    "C4",   # flake8-comprehensions
+    "D",    # pydocstyle (flake8-docstrings)
+    "ERA",  # eradicate
+    "S",    # flake8-bandit
+    "PGH003",  # blanket `# type: ignore` without a code
+    "PGH004",  # blanket `# noqa` without a code
+    "RUF100",  # unused or stale suppression
+    "TID251",  # banned API; see flake8-tidy-imports.banned-api below
+    "BLE001",  # blind `except Exception`
+    "UP",      # pyupgrade: legacy typing constructs
+    "PTH",     # flake8-use-pathlib
+    "ANN401",  # bare `Any`; the ANN family as a whole is not selected
+]
+ignore = ["D104", "D100", "D101", "D106"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S105", "S106"]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"__future__.annotations" = { msg = "PEP 563 stringization is deprecated; PEP 649 handles forward references natively." }
+
+[tool.ruff.lint.flake8-builtins]
+builtins-ignorelist = ["id"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.pytest.ini_options]
+pythonpath = ["scripts"]
+
+[tool.poe.executor]
+type = "uv"
+
+[tool.poe.tasks.lint]
+sequence = [
+    { cmd = "ruff check ." },
+    { cmd = "ruff format --check ." },
+]
+
+[tool.poe.tasks.test]
+sequence = [
+    { cmd = "coverage run --source=scripts/git_plugin -m pytest --showlocals tests/unit" },
+    { cmd = "coverage report" },
+]
+
+[tool.poe.tasks.test-integration]
+cmd = "pytest --showlocals tests/integration"

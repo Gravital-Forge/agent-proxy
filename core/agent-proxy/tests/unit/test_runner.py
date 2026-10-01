@@ -685,7 +685,7 @@ def test_run_creates_a_hardened_command_cage_whose_verifier_runs_its_argv(
             ),
             _verifier_mount(),
         ],
-        environment={"API_TOKEN": "s3cret"},
+        environment={"API_TOKEN": "s3cret", "AGENT_PROXY_ROOTS": f'["{work}"]'},
         network=NETWORK.name,
         labels={},
         log_config=docker.types.LogConfig(type=LOG_DRIVER, config={}),
@@ -710,7 +710,7 @@ def test_run_creates_a_script_cage_that_takes_its_input_on_stdin(
         security_opt=["no-new-privileges"],
         tmpfs={TMPFS_PATH: TMPFS_OPTIONS},
         mounts=[_verifier_mount()],
-        environment={},
+        environment={"AGENT_PROXY_ROOTS": "[]"},
         network=NETWORK.name,
         labels={},
         log_config=docker.types.LogConfig(type=LOG_DRIVER, config={}),
@@ -739,7 +739,41 @@ def test_run_gives_the_cage_its_network_s_environment_beside_its_credentials(
     assert kwargs["environment"] == {
         "HTTPS_PROXY": "http://egress:1080",
         "API_TOKEN": "s3cret",
+        "AGENT_PROXY_ROOTS": "[]",
     }
+
+
+def test_run_gives_the_cage_its_roots_in_grant_order(
+    tmp_path: Path, store: CredentialStore
+) -> None:
+    """The roots variable is the compact JSON array of the root paths as granted."""
+    zeta = tmp_path / "zeta"
+    alpha = tmp_path / "alpha"
+    zeta.mkdir()
+    alpha.mkdir()
+    grant = Grant(
+        roots=[Root(path=str(zeta), mode="rw"), Root(path=str(alpha), mode="ro")],
+        domains=[],
+        credentials={},
+    )
+    client = _client()
+
+    _run(client, store, _cage_call(_echo(), {"text": "hi"}, grant=grant))
+
+    kwargs = client.containers.create.call_args.kwargs
+    assert kwargs["environment"] == {"AGENT_PROXY_ROOTS": f'["{zeta}","{alpha}"]'}
+
+
+def test_run_gives_a_cage_with_no_roots_an_empty_roots_array(
+    store: CredentialStore,
+) -> None:
+    """A grant with no roots still sets the roots variable, to an empty array."""
+    client = _client()
+
+    _run(client, store, _cage_call(_echo(), {"text": "hi"}))
+
+    kwargs = client.containers.create.call_args.kwargs
+    assert kwargs["environment"] == {"AGENT_PROXY_ROOTS": "[]"}
 
 
 def test_run_starts_waits_reads_both_streams_then_removes_a_command_cage(
