@@ -23,8 +23,8 @@ The core is the uv package in `core/agent-proxy/`, placed as `docs/design.md` se
   `core/verifier/`, and points the runner's `VERIFIER_IMAGE` at it for every test.
   `test_verifier.py` there runs the verifier as the entrypoint of a hardened cage, outside the
   runner. `test_transport.py` there starts an `Instance` from `mcp.py`, serves its app on a loopback
-  port, and drives the MCP surface over HTTP with a FastMCP client. For the instance tests, it
-  builds the instance image from `core/docker/Dockerfile`, and its test variant from
+  port, and drives the MCP surface over HTTP with a FastMCP client. For the instance tests,
+  `conftest.py` builds the instance image from `core/docker/Dockerfile`, and its test variant from
   `core/agent-proxy/tests/instance-image/`, whose `.pth` startup hook sets the test label and points
   `runner.VERIFIER_IMAGE` at the verifier image the tests build. It also pushes the git plugin, and
   the github plugin with its stub gh, to the registry. `instance_harness.py` there holds the helpers
@@ -523,7 +523,7 @@ each of their steps.
 
 The `agent-proxy` command is `agent_proxy.cli:run`. The admin runs its verbs through `docker exec`
 into the instance container. Its `serve` verb is the instance image's process, which "The instance"
-above describes. Each other verb takes a noun:
+above describes. Each other verb but `reload` takes a noun:
 
 - `token mint --name NAME --scope SCOPE [--expires DURATION]` loads the config, refuses a scope the
   config does not define, and prints the new token. A token minted without `--expires` never

@@ -17,6 +17,10 @@ as_service_user() {
     systemd-run "--machine=$service_user@.host" --user --wait --pipe --quiet "$@"
 }
 
+as_agent() {
+    (cd / && runuser -u "$agent" -- "$@")
+}
+
 service_docker() {
     DOCKER_HOST="$docker_host" docker "$@"
 }
@@ -72,9 +76,10 @@ remove_overflow_dir() {
         echo "skipped removing the overflow directory: no overflow_dir was read"
     elif [[ ! -e "$overflow_dir" && ! -L "$overflow_dir" ]]; then
         echo "overflow directory $overflow_dir is already gone"
+    elif as_agent rm -rf -- "$overflow_dir"; then
+        echo "removed overflow directory $overflow_dir as $agent"
     else
-        rm -rf -- "$overflow_dir"
-        echo "removed overflow directory $overflow_dir"
+        echo "warning: $agent could not remove all of overflow directory $overflow_dir; remove what is left by hand" >&2
     fi
 }
 

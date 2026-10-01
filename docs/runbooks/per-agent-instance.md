@@ -54,12 +54,15 @@ Every run installs `<config-file>` over the installed config, so once "The first
 full config in place, run the script with the full config. A step that fails stops the script; after
 the fix, run the script again from the top. To debug a step, run its commands by hand.
 
-Two phrases below stand for the way the script reaches the service user:
+Three phrases below stand for the way the script reaches the service user and the agent:
 
 - "As the service user" means through
   `systemd-run --machine=agentproxy-agent-01@.host --user --wait --pipe --quiet <command>`.
 - "On the service user's daemon" means through
   `DOCKER_HOST=unix:///run/user/<uid>/docker.sock docker <arguments>`.
+- "As the agent" means through `runuser -u agent-01 -- <command>`, run from `/`. The agent can swap
+  any path inside the tree for a symbolic link, so a step that creates or grants in the tree as root
+  could reach a file outside it. Such steps run as the agent instead.
 
 1. `check_arguments` checks that the agent exists, that the service user's name is at most 32
    characters, that the port is an integer from 1 to 65535, that the config file is a readable
@@ -95,18 +98,26 @@ Two phrases below stand for the way the script reaches the service user:
    the tree, or when `overflow_dir` is not inside the tree or is reached through a symbolic link.
 9. `create_state_dir` creates the instance's state directory with
    `install -d -o agentproxy-agent-01 -g agentproxy-agent-01 -m 0700 <service home>/state`.
-10. `create_overflow_dir` creates the overflow directory with
-    `install -d -o agent-01 -g <agent group> -m 2770 <overflow_dir>`. It stops when that path is a
-    symbolic link.
+10. `create_overflow_dir` creates the overflow directory, as the agent, with
+    `install -d -m 2770 <overflow_dir>`, so the agent and its group own it. It stops when that path
+    is a symbolic link.
 11. `apply_tree_permissions` gives the tree the group, setgid, and ACL entries that `docs/design.md`
-    sets under "Deployment and isolation":
+    sets under "Deployment and isolation". It runs each command as the agent, so it changes only the
+    entries the agent owns:
 
     ```sh
-    find <tree> ! -group <agent group> -exec chgrp -h <agent group> {} +
-    find <tree> -type d ! -perm -2000 -exec chmod g+s {} +
-    setfacl -R -P -m u:agentproxy-agent-01:rwX,d:u:agentproxy-agent-01:rwx,d:u:agent-01:rwx <tree>
+    find <tree> <closed> -o -user agent-01 ! -group <agent group> -exec chgrp -h <agent group> {} +
+    find <tree> <closed> -o -type d -user agent-01 ! -perm -2000 -exec chmod g+s {} +
+    find <tree> <closed> -o -type d -user agent-01 -exec setfacl -P -m u:agentproxy-agent-01:rwX,d:u:agentproxy-agent-01:rwx,d:u:agent-01:rwx {} +
+    find <tree> <closed> -o ! -type d ! -type l -user agent-01 -exec setfacl -P -m u:agentproxy-agent-01:rwX {} +
     ```
 
+    Here `<closed>` is `-type d \( ! -readable -o ! -executable \) -prune`, so the walk does not
+    enter a directory the agent cannot open. The step skips each entry the agent does not own, and
+    each directory it cannot open with all that lies below it. Its line gives the number of entries
+    it skipped, and counts a directory it cannot open as one. An entry the service user makes
+    already has the group, setgid, and default ACL entries from the setgid directory it is made in.
+    Fix any other skipped entry by hand, as its owner.
 12. `grant_home_traverse` gives the service user traverse on the agent's home with
     `setfacl -m u:agentproxy-agent-01:x <home>`. After it, `ls -l` shows the home as `drwx--x---+`,
     because the group bits show the ACL mask. The home's group still has no access:
@@ -173,8 +184,9 @@ work, so teardown also cleans up after a provisioning that stopped part way.
    `setfacl -R -P -x u:agentproxy-agent-01 <tree>` and
    `setfacl -R -P -x d:u:agentproxy-agent-01 <tree>`, and from the home with
    `setfacl -x u:agentproxy-agent-01 <home>`.
-4. `remove_overflow_dir` removes the overflow directory that step 2 read, with
-   `rm -rf -- <overflow_dir>`.
+4. `remove_overflow_dir` removes the overflow directory that step 2 read, as the agent, with
+   `rm -rf -- <overflow_dir>`. When the agent cannot remove all of it, the step warns, and teardown
+   goes on; remove what is left by hand.
 5. `remove_rootless_daemon` uninstalls the rootless daemon, as the service user, with
    `/usr/bin/dockerd-rootless-setuptool.sh uninstall`. It then removes the daemon's data, the
    instance container and its images included, as the service user, with
@@ -250,6 +262,7 @@ says why they run here and never in the project. Every `docker` command below ru
    The check passes when the result's `exit_code` is 0.
 7. **A run's log with a real credential.** With a real `github-token` stored, give a
    `github.run_view` grant that names `api.github.com` and the storage host GitHub redirects the log
-   fetch to; `plugins/github/README.md` names the hosts under "Egress". Through the agent's MCP
+   fetch to; `plugins/github/README.md` gives `api.github.com` and one example storage host under
+   "Egress", and says a grant must name each storage host one by one. Through the agent's MCP
    client, call `github_run_view` with `log_failed` on a failed run. The check passes when the
    result holds the run's log.

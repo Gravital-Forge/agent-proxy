@@ -18,6 +18,10 @@ as_service_user() {
     systemd-run "--machine=$service_user@.host" --user --wait --pipe --quiet "$@"
 }
 
+as_agent() {
+    (cd / && runuser -u "$agent" -- "$@")
+}
+
 service_docker() {
     DOCKER_HOST="$docker_host" docker "$@"
 }
@@ -156,16 +160,24 @@ create_overflow_dir() {
     if [[ -d "$overflow_dir" ]]; then
         echo "overflow directory $overflow_dir already exists"
     else
-        install -d -o "$agent" -g "$agent_group" -m 2770 "$overflow_dir"
-        echo "created overflow directory $overflow_dir"
+        as_agent install -d -m 2770 "$overflow_dir"
+        echo "created overflow directory $overflow_dir as $agent"
     fi
 }
 
 apply_tree_permissions() {
-    find "$agent_tree" ! -group "$agent_group" -exec chgrp -h "$agent_group" {} +
-    find "$agent_tree" -type d ! -perm -2000 -exec chmod g+s {} +
-    setfacl -R -P -m "u:$service_user:rwX,d:u:$service_user:rwx,d:u:$agent:rwx" "$agent_tree"
-    echo "applied group $agent_group, setgid, and the ACLs of $service_user on $agent_tree"
+    local closed=(-type d \( ! -readable -o ! -executable \) -prune)
+    local skipped
+    as_agent find "$agent_tree" "${closed[@]}" -o -user "$agent" ! -group "$agent_group" \
+        -exec chgrp -h "$agent_group" {} +
+    as_agent find "$agent_tree" "${closed[@]}" -o -type d -user "$agent" ! -perm -2000 \
+        -exec chmod g+s {} +
+    as_agent find "$agent_tree" "${closed[@]}" -o -type d -user "$agent" \
+        -exec setfacl -P -m "u:$service_user:rwX,d:u:$service_user:rwx,d:u:$agent:rwx" {} +
+    as_agent find "$agent_tree" "${closed[@]}" -o ! -type d ! -type l -user "$agent" \
+        -exec setfacl -P -m "u:$service_user:rwX" {} +
+    skipped="$(as_agent find "$agent_tree" "${closed[@]}" -printf x -o ! -user "$agent" -printf x | wc -c)"
+    echo "applied group $agent_group, setgid, and the ACLs of $service_user as $agent on $agent_tree; skipped $skipped entries $agent does not own or cannot open"
 }
 
 grant_home_traverse() {
