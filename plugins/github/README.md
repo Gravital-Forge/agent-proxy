@@ -123,15 +123,15 @@ needs git.
 ## Egress
 
 Each gh command that these actions run calls GitHub's API at `api.github.com`. The grant below names
-that host and `github.com`. The cage reaches the web only through its egress proxy, which refuses a
-host the grant does not name.
+that host alone, because no action calls `github.com`. The cage reaches the web only through its
+egress proxy, which refuses a host the grant does not name.
 
 A run's log needs one more host. gh asks `api.github.com` for it at
 `repos/<repo>/actions/runs/<id>/logs`, and GitHub answers with a redirect to a storage host it
-picks, such as `productionresultssa<N>.blob.core.windows.net`. A grant with only the two GitHub
-hosts refuses that host. Under such a grant, `run_view` with `log_failed` fails, and `pr_checks`
-gets no log for a failed run. The core's domain pattern takes no wildcard. For logs to work, a grant
-names each storage host, one by one.
+picks, such as `productionresultssa<N>.blob.core.windows.net`. A grant that names only
+`api.github.com` refuses that host. Under such a grant, `run_view` with `log_failed` fails, and
+`pr_checks` gets no log for a failed run. The core's domain pattern takes no wildcard. For logs to
+work, a grant names each storage host, one by one.
 
 ## A grant
 
@@ -144,11 +144,11 @@ scopes:
     grants:
       github.pr_create:
         roots: []
-        domains: [api.github.com, github.com]
+        domains: [api.github.com]
         credentials: {github-token: {env: GH_TOKEN}}
       github.pr_checks:
         roots: []
-        domains: [api.github.com, github.com]
+        domains: [api.github.com]
         credentials: {github-token: {env: GH_TOKEN}}
 ```
 
