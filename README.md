@@ -9,6 +9,9 @@ credential.
 
 - `docs/design.md` is the design: the operator's closed decisions and the reasons behind them.
 - `docs/architecture.md` describes what is built, and cites the code by path.
+- `docs/runbooks/per-agent-instance.md` tells an admin how to provision, start, and tear down one
+  agent's instance, and how to run the deployment acceptance checks.
+- `examples/instance.yaml` is a sample instance config.
 - `docs/writing-a-plugin.md` tells a plugin author what the image holds, and how to write and check
   its manifest.
 - `plugins/git/README.md` describes the git plugin, which runs git and git LFS in a cage.

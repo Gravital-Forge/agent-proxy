@@ -23,7 +23,15 @@ The core is the uv package in `core/agent-proxy/`, placed as `docs/design.md` se
   `core/verifier/`, and points the runner's `VERIFIER_IMAGE` at it for every test.
   `test_verifier.py` there runs the verifier as the entrypoint of a hardened cage, outside the
   runner. `test_transport.py` there starts an `Instance` from `mcp.py`, serves its app on a loopback
-  port, and drives the MCP surface over HTTP with a FastMCP client.
+  port, and drives the MCP surface over HTTP with a FastMCP client. For the instance tests, it
+  builds the instance image from `core/docker/Dockerfile`, and its test variant from
+  `core/agent-proxy/tests/instance-image/`, whose `.pth` startup hook sets the test label and points
+  `runner.VERIFIER_IMAGE` at the verifier image the tests build. It also pushes the git plugin, and
+  the github plugin with its stub gh, to the registry. `instance_harness.py` there holds the helpers
+  the instance tests share: running the start script, waiting for the MCP surface, `docker exec`,
+  and cleanup. `test_instance_image.py` checks the image and the run line that the start script
+  gives it. `test_instance_serves.py` starts an instance on the agent's own daemon and drives it
+  through MCP and `docker exec`.
 - `core/agent-proxy/tests/test-plugin/` holds the source of the test plugin image. The test plugin
   holds an action for each thing the tests reach, and its `manifest.json` declares them.
 
@@ -383,10 +391,6 @@ its error propagates. The calls of one instance share one `CageLimiter`. `Instan
 that `build_app` returns. `Instance.close` closes the control socket, stops the sweeper, and closes
 the audit writer. The egress proxies stay, and the next `LiveConfig.start` keeps or prunes them.
 
-`serve` in `cli.py` runs the app under uvicorn through `_Server`. `_Server` routes SIGINT and
-SIGTERM to uvicorn's shutdown on the main thread, restores the previous handlers when the server
-stops, and re-raises neither signal.
-
 ### `cli.py`
 
 This module is the admin command, and it is the one module that reads the environment. Outside
@@ -478,9 +482,48 @@ it with mode `0o600`. The daemon bind-mounts that directory into the proxy by it
 must name the same directory for the daemon as for the instance. `prune` removes a directory with
 its proxy.
 
+## The instance
+
+The instance image is built by `core/docker/Dockerfile` from `core/agent-proxy/`. Its build stage
+installs the package with uv from the lockfile, and its final stage holds only the environment that
+stage made. The image's process is `agent-proxy serve` on container port 8000, on all interfaces.
+The image sets `DOCKER_HOST` to the socket path the run line mounts, and `AGENT_PROXY_CONFIG` to
+`/etc/agent-proxy/config.yaml`.
+
+`serve --host HOST --port PORT` starts an `Instance` from `mcp.py` and serves its MCP surface at
+`/mcp` on that address until SIGINT or SIGTERM, then closes the instance and exits 0. `PORT` is an
+integer from 1 to 65535. `serve` runs the app under uvicorn through `_Server`. `_Server` routes
+SIGINT and SIGTERM to uvicorn's shutdown on the main thread, restores the previous handlers when the
+server stops, and re-raises neither signal.
+
+`core/docker/start-instance.sh` holds the run line. It takes the image, the container name, the host
+port, the config directory, the state directory, and the agent tree, and passes any further
+arguments to `docker run`. The line gives the container:
+
+- the user 0, which the rootless daemon maps to the user that runs it;
+- the hardening: every capability dropped, `no-new-privileges`, a read-only root filesystem with a
+  tmpfs at `/tmp`, and the restart policy `unless-stopped`;
+- container port 8000, published on `127.0.0.1` at the host port;
+- the daemon's socket, from `DOCKER_HOST`, at `/var/run/docker.sock`;
+- the config directory, read-only, at `/etc/agent-proxy`;
+- the state directory and the agent tree, each at its own host path, with `AGENT_PROXY_STATE_DIR`
+  naming the state directory.
+
+The state directory and the agent tree keep their host paths because the daemon resolves every bind
+source the instance names on the host: each egress config directory under the state directory, and
+each root and credential file a cage mounts. The script refuses a state directory or an agent tree
+that is not an absolute path equal to its realpath. When a container of that name exists, the script
+starts it as it was created, or leaves it running.
+
+`core/docker/provision-instance.sh` sets up everything the instance needs on the host and starts it,
+and `core/docker/teardown-instance.sh` removes it. `docs/runbooks/per-agent-instance.md` explains
+each of their steps.
+
 ## The admin command
 
-The `agent-proxy` command is `agent_proxy.cli:run`. It takes a noun and a verb:
+The `agent-proxy` command is `agent_proxy.cli:run`. The admin runs its verbs through `docker exec`
+into the instance container. Its `serve` verb is the instance image's process, which "The instance"
+above describes. Each other verb takes a noun:
 
 - `token mint --name NAME --scope SCOPE [--expires DURATION]` loads the config, refuses a scope the
   config does not define, and prints the new token. A token minted without `--expires` never
@@ -498,9 +541,6 @@ The `agent-proxy` command is `agent_proxy.cli:run`. It takes a noun and a verb:
 - `reload` connects to `control.sock` beneath the state directory and asks the server there to
   reload its config. It prints `reloaded` when the new config is in force. When the server refuses,
   the command prints each error it sent as a refusal.
-- `serve --host HOST --port PORT` starts the instance and serves its MCP surface at `/mcp` on that
-  address until SIGINT or SIGTERM, then closes the instance and exits 0. `PORT` is an integer from 1
-  to 65535.
 
 A listing prints a header row, then one tab-separated row per entry, with `-` for a time that is not
 set.
