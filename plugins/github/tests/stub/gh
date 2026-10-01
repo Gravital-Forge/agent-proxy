@@ -1,0 +1,45 @@
+#!/usr/bin/env python3
+"""A stand-in for gh that logs its argv and answers from a table of canned results."""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+CHECKS_7 = (
+    "build\tfail\t1m\thttps://github.com/o/n/actions/runs/101/job/1\t\n"
+    "lint\tpass\t10s\thttps://github.com/o/n/actions/runs/102/job/2\t\n"
+    "test\tfail\t2m\thttps://github.com/o/n/actions/runs/101/job/3\t\n"
+)
+ANSWERS: dict[tuple[str, ...], tuple[int, str, str]] = {
+    ("pr", "checks", "7", "--repo", "o/n"): (1, CHECKS_7, ""),
+    ("run", "view", "101", "--log-failed", "--repo", "o/n"): (0, "log of 101\n", ""),
+    ("pr", "checks", "8", "--repo", "o/n"): (1, "", "no checks reported\n"),
+    ("api", "repos/o/n/pulls/5/comments"): (0, '[{"id":1}]', ""),
+    ("api", "repos/o/n/pulls/5/reviews"): (0, '[{"id":2}]', ""),
+    ("api", "repos/o/n/issues/5/comments"): (0, '[{"id":3}]', ""),
+    ("api", "repos/o/n/pulls/6/comments"): (0, "[]", ""),
+    ("api", "repos/o/n/pulls/6/reviews"): (1, "", "HTTP 404: Not Found\n"),
+    ("api", "repos/o/n/pulls/9/comments"): (0, "not json\n", ""),
+}
+
+
+def main(argv: list[str]) -> int:
+    """Log argv, write its canned answer or an echo of it, and return the exit code."""
+    log = os.environ.get("GH_STUB_LOG")
+    if log is not None:
+        with Path(log).open("a") as stream:
+            stream.write(json.dumps(argv, separators=(",", ":")) + "\n")
+    answer = ANSWERS.get(tuple(argv))
+    if answer is None:
+        echo = {"argv": argv, "gh_token": os.environ.get("GH_TOKEN")}
+        print(json.dumps(echo, separators=(",", ":")))
+        return 0
+    exit_code, stdout, stderr = answer
+    sys.stdout.write(stdout)
+    sys.stderr.write(stderr)
+    return exit_code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

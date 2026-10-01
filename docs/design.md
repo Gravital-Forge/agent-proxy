@@ -158,8 +158,7 @@ scopes:
   roots does not exist inside the container, and the tool fails with its own error.
 - A plugin's source is a uv package under `plugins/`, so one CI job covers it. The executables in
   its image may be written in any language.
-- The image-based plugin form is provisional: it is reviewed once the git and github plugins are
-  built.
+- The image-based plugin form is settled: the git and github plugins are built on it.
 
 ## The cage
 

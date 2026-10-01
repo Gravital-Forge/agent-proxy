@@ -1,0 +1,3 @@
+ARG PLUGIN_IMAGE
+FROM ${PLUGIN_IMAGE}
+COPY gh /usr/local/bin/gh
