@@ -6,13 +6,15 @@ git-sidecar offers. `docs/writing-a-plugin.md` gives the plugin model this follo
 ## The actions
 
 Each action is named as its git-sidecar tool, without the `gh_` prefix: `gh_pr_create` becomes
-`pr_create`, and `gh_run_view` becomes `run_view`. A config that pins the plugin as `gh` therefore
-serves the MCP tool names that git-sidecar serves. `manifest.json` declares every action, its input
+`pr_create`, and `gh_run_view` becomes `run_view`. The name a config pins the image as sets the MCP
+tool names, which `docs/design.md` gives as `<plugin>_<action>`. A config that pins the image as
+`github`, as "A grant" does, serves `github_pr_create` and the rest. A config that pins it as `gh`
+instead serves the names that git-sidecar serves. `manifest.json` declares every action, its input
 schema, its credentials, and its timeout.
 
 An action is a command action when its gh argv is a fixed prefix plus typed parameters, as for
-`pr_list`, `run_view`, and `run_list`. The other seven are script actions, because each does more
-than that:
+`pr_list`, `run_view`, and `run_list`. The others are script actions, because each does more than
+that:
 
 - It runs more than one gh command, as `pr_fetch` and `pr_checks` do.
 - It applies a default that a command action cannot state, as `pr_view` does with its field list.
@@ -170,7 +172,7 @@ scopes:
   real cage through the core's `CageRunner`. `test_actions.py` runs every action in an image that
   puts the stub gh ahead of the real one, built from `tests/stub/Dockerfile`. `test_pinned_gh.py`
   runs the image's own gh against a fake `api.github.com`, built from `tests/fake-api/`, on an
-  internal network. It checks two claims this plugin rests on. `pr_create` with `head` and no
+  internal network. It checks the claims this plugin rests on. `pr_create` with `head` and no
   checkout gets past the steps that need the current branch and git, and fails at the fake's answer
   to its next request. `run_view` with `log_failed` writes its log cache under the image's
   `XDG_CACHE_HOME` while the root filesystem is read-only.

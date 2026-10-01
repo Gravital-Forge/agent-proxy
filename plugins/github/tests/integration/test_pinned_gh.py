@@ -9,13 +9,13 @@ FAILED_STEP_LOG = (
 )
 
 
-def test_pr_create_with_a_head_and_no_checkout_fails_at_the_network(
+def test_pr_create_with_a_head_and_no_checkout_gets_past_the_branch_and_git_steps(
     run_action: RunAction,
     plugin_image: str,
     fake_api_network: str,
     fake_api_ca: Path,
 ) -> None:
-    """The pinned gh's pr create with --head and no checkout fails reaching GitHub.
+    """The pinned gh's pr create with --head and no checkout needs no branch or git.
 
     The fake answers gh's first request, the repository query, so gh passes
     the steps that need the current branch and git, then fails at its next
