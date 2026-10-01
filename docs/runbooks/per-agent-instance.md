@@ -48,9 +48,11 @@ sudo core/docker/provision-instance.sh agent-01 <port> <config-file>
 `<port>` is the loopback port the instance serves on, and `<config-file>` is the config to install.
 Read "The first start" below before you choose the config.
 
-The script runs the steps below in order, and prints one line per step. Each step leaves its object
-alone when it is already in place, so a second run changes nothing. A step that fails stops the
-script; after the fix, run the script again from the top. To debug a step, run its commands by hand.
+The script runs the steps below in order, and reports each step as it runs it. Each step leaves its
+object alone when it is already in place, so a second run with the same config changes nothing.
+Every run installs `<config-file>` over the installed config, so once "The first start" has put the
+full config in place, run the script with the full config. A step that fails stops the script; after
+the fix, run the script again from the top. To debug a step, run its commands by hand.
 
 Two phrases below stand for the way the script reaches the service user:
 
@@ -59,8 +61,9 @@ Two phrases below stand for the way the script reaches the service user:
 - "On the service user's daemon" means through
   `DOCKER_HOST=unix:///run/user/<uid>/docker.sock docker <arguments>`.
 
-1. `check_arguments` checks that the agent exists, that the port is an integer from 1 to 65535, and
-   that the config file is a readable regular file. It reads the agent's home, the tree as
+1. `check_arguments` checks that the agent exists, that the service user's name is at most 32
+   characters, that the port is an integer from 1 to 65535, that the config file is a readable
+   regular file, and that `<home>/Projects` is a directory. It reads the agent's home, the tree as
    `realpath -- <home>/Projects`, and the agent's group as `id -gn agent-01`.
 2. `create_service_user` creates the service user with
    `useradd --create-home --shell /usr/sbin/nologin agentproxy-agent-01`. The service user then
@@ -140,8 +143,8 @@ config with every grant that names a credential removed. Then:
    install -o root -g root -m 0644 <full-config> /etc/agent-proxy/agent-01/config.yaml
    ```
 
-3. Put the full config in force with `docker exec agent-proxy agent-proxy reload`. It prints
-   `reloaded`, or one line per error and keeps the config in force.
+3. Put the full config in force with `docker exec agent-proxy agent-proxy reload`. If it refuses, it
+   prints each error, and the running config stays.
 4. Mint a token for the agent with
    `docker exec agent-proxy agent-proxy token mint --name <name> --scope <scope>`. The token prints
    once; give it to the agent's MCP client.
@@ -186,6 +189,8 @@ Teardown leaves these in place:
 
 - the agent's own default ACL entry on the tree, `default:user:agent-01:rwx`;
 - the tree's group and setgid;
+- the files cages created in the tree, whose owner stays the removed service user's uid;
+- the overflow directory, when step 2 skipped its read;
 - `/etc/agent-proxy` itself;
 - any line for the service user in `/etc/subuid` or `/etc/subgid`. The script warns about each one;
   remove it when no user needs that range.
@@ -205,13 +210,14 @@ says why they run here and never in the project. Every `docker` command below ru
    stat -c '%i %Y' /etc/agent-proxy/agent-01/config.yaml > config.before
    ```
 
-   Run the provisioning script again with the same arguments, capture the same four records into
-   `.after` files, and `diff` each pair. The check passes when every `diff` prints nothing.
-2. **A cage writes the tree.** Through the agent's MCP client, call `git_add` on a repository below
-   the tree; the call writes the repository's `.git/index` anew. Then run
-   `stat -c '%U %G %a' <repo>/.git/index` and `getfacl -p <repo>/.git/index`. The check passes when
-   the owner is `agentproxy-agent-01`, the group is the agent's group, and `getfacl` gives
-   `agent-01` read and write after the mask.
+   Run the provisioning script again with the same arguments and the config installed now, capture
+   the same four records into `.after` files, and `diff` each pair. The check passes when every
+   `diff` prints nothing.
+2. **A cage writes the tree.** As the agent, create a new file in a repository below the tree.
+   Through the agent's MCP client, call `git_add` with that file; the call writes the repository's
+   `.git/index` anew. Then run `stat -c '%U %G %a' <repo>/.git/index` and
+   `getfacl -p <repo>/.git/index`. The check passes when the owner is `agentproxy-agent-01`, the
+   group is the agent's group, and `getfacl` gives `agent-01` read and write after the mask.
 3. **A second agent cannot read created files.** Take a second agent user, `<second agent>` below,
    and the file from check 2.
    1. `sudo -u <second agent> cat <repo>/.git/index` fails with permission denied.

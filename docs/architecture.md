@@ -492,9 +492,9 @@ The image sets `DOCKER_HOST` to the socket path the run line mounts, and `AGENT_
 
 `serve --host HOST --port PORT` starts an `Instance` from `mcp.py` and serves its MCP surface at
 `/mcp` on that address until SIGINT or SIGTERM, then closes the instance and exits 0. `PORT` is an
-integer from 1 to 65535. `serve` runs the app under uvicorn through `_Server`. `_Server` routes
-SIGINT and SIGTERM to uvicorn's shutdown on the main thread, restores the previous handlers when the
-server stops, and re-raises neither signal.
+integer from 1 to 65535. `serve` in `cli.py` runs the app under uvicorn through `_Server` from
+`mcp.py`. `_Server` routes SIGINT and SIGTERM to uvicorn's shutdown on the main thread, restores the
+previous handlers when the server stops, and re-raises neither signal.
 
 `core/docker/start-instance.sh` holds the run line. It takes the image, the container name, the host
 port, the config directory, the state directory, and the agent tree, and passes any further
