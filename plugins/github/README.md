@@ -172,7 +172,8 @@ scopes:
   runs the image's own gh against a fake `api.github.com`, built from `tests/fake-api/`, on an
   internal network. It checks two claims this plugin rests on. `pr_create` with `head` and no
   checkout gets past the steps that need the current branch and git, and fails at the fake's answer
-  to its next request. `run_view` with `log_failed` writes its log cache on the read-only root.
+  to its next request. `run_view` with `log_failed` writes its log cache under the image's
+  `XDG_CACHE_HOME` while the root filesystem is read-only.
 
 ## Build and test
 
