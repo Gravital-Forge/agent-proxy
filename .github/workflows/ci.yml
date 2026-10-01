@@ -19,6 +19,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       packages: ${{ steps.list.outputs.packages }}
+      plugins: ${{ steps.list.outputs.plugins }}
     steps:
       - uses: actions/checkout@v7
       - id: list
@@ -29,6 +30,17 @@ jobs:
             for p in core/*/pyproject.toml plugins/*/pyproject.toml; do
               if [ -e "$p" ]; then
                 echo -n "$sep\"$(dirname "$p")\""
+                sep=','
+              fi
+            done
+            echo ']'
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo -n 'plugins=['
+            sep=''
+            for d in plugins/*/Dockerfile; do
+              if [ -e "$d" ]; then
+                echo -n "$sep\"$(dirname "$d")\""
                 sep=','
               fi
             done
@@ -63,3 +75,21 @@ jobs:
       - name: Test
         working-directory: ${{ matrix.package }}
         run: poe test
+  manifest-check:
+    needs: discover
+    if: needs.discover.outputs.plugins != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: ${{ fromJSON(needs.discover.outputs.plugins) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          python-version: "3.12"
+      - name: Build the plugin image
+        run: docker build -t apx-plugin:ci ${{ matrix.plugin }}
+      - name: Check the manifest
+        working-directory: core/agent-proxy
+        run: uv run agent-proxy manifest check apx-plugin:ci

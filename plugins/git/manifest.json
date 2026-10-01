@@ -1,0 +1,254 @@
+{
+  "actions": {
+    "status": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"}
+        },
+        "required": ["repo"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "argv": ["git-cage", "status"],
+      "parameters": [
+        {"name": "repo", "as": "flag", "flag": "--repo"}
+      ],
+      "passthrough_args": false
+    },
+    "log": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"},
+          "max_count": {"type": "integer", "minimum": 1},
+          "oneline": {"type": "boolean"},
+          "ref": {"type": "string", "minLength": 1}
+        },
+        "required": ["repo"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "argv": ["git-cage", "log", "--max-count=20"],
+      "parameters": [
+        {"name": "repo", "as": "flag", "flag": "--repo"},
+        {"name": "max_count", "as": "flag", "flag": "--max-count"},
+        {"name": "oneline", "as": "flag", "flag": "--oneline"},
+        {"name": "ref", "as": "positional"}
+      ],
+      "passthrough_args": false
+    },
+    "show": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"},
+          "ref": {"type": "string", "minLength": 1}
+        },
+        "required": ["repo"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "argv": ["git-cage", "show"],
+      "parameters": [
+        {"name": "repo", "as": "flag", "flag": "--repo"},
+        {"name": "ref", "as": "positional"}
+      ],
+      "passthrough_args": false
+    },
+    "branch": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"},
+          "all": {"type": "boolean"}
+        },
+        "required": ["repo"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "argv": ["git-cage", "branch"],
+      "parameters": [
+        {"name": "repo", "as": "flag", "flag": "--repo"},
+        {"name": "all", "as": "flag", "flag": "--all"}
+      ],
+      "passthrough_args": false
+    },
+    "rev_parse": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"},
+          "ref": {"type": "string", "minLength": 1}
+        },
+        "required": ["repo", "ref"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "argv": ["git-cage", "rev-parse"],
+      "parameters": [
+        {"name": "repo", "as": "flag", "flag": "--repo"},
+        {"name": "ref", "as": "positional"}
+      ],
+      "passthrough_args": false
+    },
+    "ls_files": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"}
+        },
+        "required": ["repo"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "argv": ["git-cage", "ls-files"],
+      "parameters": [
+        {"name": "repo", "as": "flag", "flag": "--repo"}
+      ],
+      "passthrough_args": false
+    },
+    "stash_list": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"}
+        },
+        "required": ["repo"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "argv": ["git-cage", "stash", "list"],
+      "parameters": [
+        {"name": "repo", "as": "flag", "flag": "--repo"}
+      ],
+      "passthrough_args": false
+    },
+    "remote": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"}
+        },
+        "required": ["repo"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "argv": ["git-cage", "remote", "-v"],
+      "parameters": [
+        {"name": "repo", "as": "flag", "flag": "--repo"}
+      ],
+      "passthrough_args": false
+    },
+    "blame": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"},
+          "file": {"type": "string", "minLength": 1, "pattern": "^(?!([\\s\\S]*/)?\\.\\.(/|$))"}
+        },
+        "required": ["repo", "file"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "argv": ["git-cage", "blame", "--"],
+      "parameters": [
+        {"name": "repo", "as": "flag", "flag": "--repo"},
+        {"name": "file", "as": "positional"}
+      ],
+      "passthrough_args": false
+    },
+    "tag": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"}
+        },
+        "required": ["repo"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "argv": ["git-cage", "tag"],
+      "parameters": [
+        {"name": "repo", "as": "flag", "flag": "--repo"}
+      ],
+      "passthrough_args": false
+    },
+    "config_get": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"},
+          "key": {"type": "string", "minLength": 1}
+        },
+        "required": ["repo", "key"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "argv": ["git-cage", "config", "--get"],
+      "parameters": [
+        {"name": "repo", "as": "flag", "flag": "--repo"},
+        {"name": "key", "as": "positional"}
+      ],
+      "passthrough_args": false
+    },
+    "lfs_ls_files": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"}
+        },
+        "required": ["repo"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "argv": ["git-cage", "lfs", "ls-files"],
+      "parameters": [
+        {"name": "repo", "as": "flag", "flag": "--repo"}
+      ],
+      "passthrough_args": false
+    },
+    "lfs_status": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^/"}
+        },
+        "required": ["repo"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "60s",
+      "argv": ["git-cage", "lfs", "status"],
+      "parameters": [
+        {"name": "repo", "as": "flag", "flag": "--repo"}
+      ],
+      "passthrough_args": false
+    }
+  }
+}

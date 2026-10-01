@@ -1,0 +1,56 @@
+"""What the git plugin's integration tests share with their fixtures."""
+
+import os
+import subprocess
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Protocol
+
+from agent_proxy.config import EnvMount, FileMount
+from agent_proxy.runner import Outcome
+
+FIXTURE_NAME = "Fixture"
+FIXTURE_EMAIL = "fixture@example.invalid"
+_ISOLATED_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
+type GrantedCredentials = Mapping[str, tuple[EnvMount | FileMount, bytes]]
+
+
+class RunAction(Protocol):
+    def __call__(
+        self,
+        name: str,
+        arguments: Mapping[str, object],
+        roots: Sequence[Path],
+        credentials: GrantedCredentials | None = None,
+    ) -> Outcome:
+        """Run the named action in a cage whose grant gives each root read-write."""
+
+
+@dataclass(frozen=True)
+class OtherUidRepo:
+    """A repository uid 1000 owns, its linked worktree, and the root above both."""
+
+    root: Path
+    repo: Path
+    worktree: Path
+
+
+def host_git(repo: Path, *args: str) -> str:
+    """Run the host's git in repo and return its stdout.
+
+    The host's global and system config are left out, so no host setting
+    reaches a fixture.
+
+    Raises:
+        subprocess.CalledProcessError: git exits non-zero.
+    """
+    completed = subprocess.run(  # noqa: S603 - fixed arguments the tests choose
+        ["git", "-C", str(repo), *args],  # noqa: S607 - the host's git, on PATH
+        capture_output=True,
+        check=True,
+        text=True,
+        env={**os.environ, **_ISOLATED_GIT},
+    )
+    return completed.stdout
