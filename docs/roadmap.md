@@ -117,7 +117,9 @@ decisions each entry builds on.
    builds `core/verifier/` into `agent-proxy-verifier:1` on the instance's daemon before the
    instance starts, because an image mount never pulls, and the runbook says so.
    `docs/architecture.md` describes `serve` as the instance image's process under its own heading,
-   apart from "The admin command", whose verbs the admin runs through `docker exec`.
+   apart from "The admin command", whose verbs the admin runs through `docker exec`. Every github
+   grant the item writes, in the sample config and in `plugins/github/README.md`'s "A grant", names
+   `api.github.com` alone, because no github action calls `github.com`.
 
    **Done when** `shellcheck` passes both scripts; the instance image builds; started on the agent's
    own daemon with the sample config and that daemon's socket, the instance serves an MCP client

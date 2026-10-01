@@ -287,7 +287,7 @@ agent-proxy/
 │   └── verifier/         # the in-cage root verifier: Go source, its tests, and the Dockerfile that builds it
 └── plugins/
     ├── git/              # Dockerfile, describe and the manifest it prints, scripts/, tests/, README.md
-    └── github/
+    └── github/           # Dockerfile, describe, manifest.json, scripts/, tests/ with a stub gh and a fake API, README.md
 ```
 
 The core is Python on uv and FastMCP, reusing git-sidecar's auth, transport, and test patterns. One
@@ -328,6 +328,8 @@ are the design's, and `docs/runbooks/per-agent-instance.md` carries them as step
   measured there.
 - `E12` passes with a real credential: git over HTTPS, through the credential helper, reaches a
   private repository.
+- With a real credential, the github plugin's `run_view` with `log_failed` returns a failed run's
+  log under a grant that names the storage host GitHub redirects the fetch to.
 
 The `S` checks need no counterpart on the agent's daemon: in a deployment, cages never run there.
 
@@ -354,6 +356,9 @@ The `S` checks need no counterpart on the agent's daemon: in a deployment, cages
   file) is read-only to the other side; the ACL cannot widen it.
 - Every call pays a cage start: a median of about half a second on the agent's daemon (`C2`), and
   the in-cage root verifier adds about a tenth of a second more.
+- A run's log is out of reach under a grant that names only GitHub's hosts. GitHub redirects a log
+  fetch to a storage host it picks, and a domain takes no wildcard, so a grant that wants logs names
+  each storage host. `plugins/github/README.md` gives the detail.
 
 ## Decision directives
 
