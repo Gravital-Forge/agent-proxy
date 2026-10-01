@@ -25,6 +25,9 @@ from agent_proxy.runner import (
     LOG_DRIVER,
     TMPFS_OPTIONS,
     TMPFS_PATH,
+    VERIFIER_MOUNT,
+    VERIFIER_PATH,
+    VERIFIER_REFUSED_EXIT,
     CageCall,
     CageFailedError,
     CageLimiter,
@@ -504,13 +507,16 @@ def test_cage_mounts_refuses_an_unknown_file_credential(
 
 
 def test_the_cage_constants_are_the_spec_s() -> None:
-    """No product labels, a 64 MiB /tmp, container root, and the json-file log."""
+    """No product labels, a 64 MiB /tmp, root, json-file logs, and the verifier."""
     assert isinstance(CONTAINER_LABELS, types.MappingProxyType)
     assert dict(CONTAINER_LABELS) == {}
     assert TMPFS_PATH == "/tmp"  # noqa: S108 - the path is inside the cage
     assert TMPFS_OPTIONS == "rw,size=64m"
     assert CONTAINER_USER == "0:0"
     assert LOG_DRIVER == "json-file"
+    assert VERIFIER_MOUNT == "/.agent-proxy"
+    assert VERIFIER_PATH == "/.agent-proxy/verify"
+    assert VERIFIER_REFUSED_EXIT == 125
 
 
 def test_run_creates_a_hardened_command_cage_with_its_argv_as_entrypoint(

@@ -27,6 +27,9 @@ RUNNER_IMAGE_TAG = f"{PLUGIN_NAME}:runner"
 RUNNER_IMAGE_LABELS = TEST_LABELS | {"agent-proxy.test.fixture": "runner"}
 PROBE_DIR = Path(__file__).parent.parent / "egress-probe"
 PROBE_IMAGE_TAG = "apx-egress-probe:it"
+VERIFIER_DIR = Path(__file__).parents[3] / "verifier"
+VERIFIER_BUILD_TAG = "apx-verifier-build:it"
+VERIFIER_IMAGE_TAG = "apx-verifier:it"
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
@@ -126,6 +129,36 @@ def probe_image(docker_client: DockerClient) -> Iterator[str]:
         yield PROBE_IMAGE_TAG
     finally:
         docker_client.images.remove(image.id, force=True)
+
+
+@pytest.fixture(scope="session")
+def verifier_image(docker_client: DockerClient) -> Iterator[str]:
+    """The tag of the verifier image, built from core/verifier/."""
+    # The classic builder leaves the build stage's images untagged and
+    # unlabelled; building that stage under its own tag lets teardown remove
+    # them with it.
+    build_stage, _ = docker_client.images.build(
+        path=str(VERIFIER_DIR),
+        target="build",
+        tag=VERIFIER_BUILD_TAG,
+        labels=TEST_LABELS,
+        rm=True,
+        forcerm=True,
+    )
+    try:
+        image, _ = docker_client.images.build(
+            path=str(VERIFIER_DIR),
+            tag=VERIFIER_IMAGE_TAG,
+            labels=TEST_LABELS,
+            rm=True,
+            forcerm=True,
+        )
+        try:
+            yield VERIFIER_IMAGE_TAG
+        finally:
+            docker_client.images.remove(image.id, force=True)
+    finally:
+        docker_client.images.remove(build_stage.id, force=True)
 
 
 @pytest.fixture(scope="session")

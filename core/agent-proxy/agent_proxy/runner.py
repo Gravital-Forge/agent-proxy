@@ -42,6 +42,9 @@ TMPFS_PATH = "/tmp"  # noqa: S108 - the path is inside the cage, on its own tmpf
 TMPFS_OPTIONS = "rw,size=64m"
 CONTAINER_USER = "0:0"
 LOG_DRIVER = "json-file"
+VERIFIER_MOUNT = "/.agent-proxy"
+VERIFIER_PATH = f"{VERIFIER_MOUNT}/verify"
+VERIFIER_REFUSED_EXIT = 125
 _STDIN_ATTACH_PARAMS: Mapping[str, int] = types.MappingProxyType(
     {"stdin": 1, "stream": 1}
 )
