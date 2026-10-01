@@ -1,0 +1,251 @@
+{
+  "actions": {
+    "pr_create": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*$"},
+          "base": {"type": "string", "minLength": 1},
+          "head": {"type": "string", "minLength": 1},
+          "title": {"type": "string", "minLength": 1},
+          "body": {"type": "string"}
+        },
+        "required": ["repo", "base", "head", "title", "body"],
+        "additionalProperties": false
+      },
+      "credentials": [{"env": "GH_TOKEN"}],
+      "timeout": "60s",
+      "executable": "/plugin/bin/pr_create",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
+    "pr_edit": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*$"},
+          "pr_number": {"type": "integer", "minimum": 1},
+          "title": {"type": "string"},
+          "body": {"type": "string"},
+          "base": {"type": "string"}
+        },
+        "required": ["repo", "pr_number"],
+        "anyOf": [{"required": ["title"]}, {"required": ["body"]}, {"required": ["base"]}],
+        "additionalProperties": false
+      },
+      "credentials": [{"env": "GH_TOKEN"}],
+      "timeout": "60s",
+      "executable": "/plugin/bin/pr_edit",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
+    "pr_view": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*$"},
+          "pr": {"type": "string", "pattern": "^[^-]"},
+          "fields": {"type": "string"}
+        },
+        "required": ["repo", "pr"],
+        "additionalProperties": false
+      },
+      "credentials": [{"env": "GH_TOKEN"}],
+      "timeout": "60s",
+      "executable": "/plugin/bin/pr_view",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
+    "pr_list": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*$"},
+          "head": {"type": "string", "minLength": 1}
+        },
+        "required": ["repo"],
+        "additionalProperties": false
+      },
+      "credentials": [{"env": "GH_TOKEN"}],
+      "timeout": "60s",
+      "argv": ["gh", "pr", "list", "--json", "number,title,url,headRefName,state"],
+      "parameters": [
+        {"name": "repo", "as": "flag", "flag": "--repo"},
+        {"name": "head", "as": "flag", "flag": "--head"}
+      ],
+      "passthrough_args": false
+    },
+    "pr_fetch": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*$"},
+          "pr_number": {"type": "integer", "minimum": 1}
+        },
+        "required": ["repo", "pr_number"],
+        "additionalProperties": false
+      },
+      "credentials": [{"env": "GH_TOKEN"}],
+      "timeout": "3m",
+      "executable": "/plugin/bin/pr_fetch",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
+    "pr_reply": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*$"},
+          "pr_number": {"type": "integer", "minimum": 1},
+          "body": {"type": "string"},
+          "comment_id": {"type": "integer", "minimum": 1}
+        },
+        "required": ["repo", "pr_number", "body"],
+        "additionalProperties": false
+      },
+      "credentials": [{"env": "GH_TOKEN"}],
+      "timeout": "60s",
+      "executable": "/plugin/bin/pr_reply",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
+    "pr_checks": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*$"},
+          "pr_number": {"type": "integer", "minimum": 1}
+        },
+        "required": ["repo", "pr_number"],
+        "additionalProperties": false
+      },
+      "credentials": [{"env": "GH_TOKEN"}],
+      "timeout": "5m",
+      "executable": "/plugin/bin/pr_checks",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
+    "pr_close": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*$"},
+          "pr_number": {"type": "integer", "minimum": 1},
+          "comment": {"type": "string"},
+          "delete_branch": {"type": "boolean"}
+        },
+        "required": ["repo", "pr_number"],
+        "additionalProperties": false
+      },
+      "credentials": [{"env": "GH_TOKEN"}],
+      "timeout": "60s",
+      "executable": "/plugin/bin/pr_close",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
+    "run_view": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*$"},
+          "run_id": {"type": "integer", "minimum": 1},
+          "log_failed": {"type": "boolean"}
+        },
+        "required": ["repo", "run_id"],
+        "additionalProperties": false
+      },
+      "credentials": [{"env": "GH_TOKEN"}],
+      "timeout": "60s",
+      "argv": ["gh", "run", "view"],
+      "parameters": [
+        {"name": "run_id", "as": "positional"},
+        {"name": "repo", "as": "flag", "flag": "--repo"},
+        {"name": "log_failed", "as": "flag", "flag": "--log-failed"}
+      ],
+      "passthrough_args": false
+    },
+    "run_list": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*$"}
+        },
+        "required": ["repo"],
+        "additionalProperties": false
+      },
+      "credentials": [{"env": "GH_TOKEN"}],
+      "timeout": "60s",
+      "argv": ["gh", "run", "list"],
+      "parameters": [
+        {"name": "repo", "as": "flag", "flag": "--repo"}
+      ],
+      "passthrough_args": false
+    }
+  }
+}
