@@ -39,8 +39,9 @@ script action prints the same three members, and its `output_schema` states them
 whenever it runs to its end, and git's exit code goes in `exit_code`.
 
 When a git step inside a script fails for a reason other than the outcome that step checks, the
-script returns that step's git result. For example, `push` returns git's own result when `repo` is
-not a repository.
+script stops and returns that step's git result. For example, `push` returns git's own result when
+`repo` is not a repository. One step is the exception: `push` reads a failed `git lfs ls-files` as
+no LFS file, as git-sidecar does, and goes on.
 
 ### Refusals
 
@@ -66,7 +67,7 @@ is the usual case.
 ### `stash`
 
 `stash` passes `message` and `index` to git whatever its `action` is. git refuses a combination it
-does not take, such as a `message` with `pop`. git-sidecar ignored such a member instead.
+does not take, such as a `message` with `pop`. git-sidecar ignores such a member instead.
 
 ## In the cage
 
@@ -84,9 +85,9 @@ Every git run passes the credential helper that `docs/design.md` gives under "Th
 constraints". It clears every inherited helper, then answers with `x-access-token` and the value of
 `GH_TOKEN`.
 
-The actions that reach a remote declare `{"env": "GH_TOKEN"}` in `manifest.json`: `fetch`, `pull`,
-`push`, `lfs_fetch`, and `lfs_pull`. The core does not compare a grant's credentials with that
-declaration. Give each grant of these actions a credential as `GH_TOKEN`.
+Each action that reaches a remote declares `{"env": "GH_TOKEN"}` in its `credentials` in
+`manifest.json`. The core does not compare a grant's credentials with that declaration. Give each
+grant of such an action a credential as `GH_TOKEN`.
 
 ### Branch rules
 
@@ -132,12 +133,16 @@ scopes:
         credentials: {github-token: {env: GH_TOKEN}}
 ```
 
+A grant's `domains` name each host its remote reaches. For a repository that tracks LFS files, they
+also name each host the LFS server sends objects to, which can differ from the remote's host.
+
 ## Layout
 
 - `scripts/git_plugin/` is the module. `cage.py` holds the wrapper and `git_argv`, `scripts.py`
   holds the script actions, and `rules.py` holds the branch rules.
-- `scripts/entry` is the image's one executable. `entry.py` acts by the name the executable runs
-  under: `git-cage` runs the wrapper, and the name of a script action runs that action.
+- `scripts/entry` is the one executable every action runs. `entry.py` acts by the name the
+  executable runs under: `git-cage` runs the wrapper, and the name of a script action runs that
+  action.
 - `Dockerfile` builds the image on the Alpine base the core's test plugin pins, with git, git LFS,
   and Python 3 from apk. It links `git-cage` on the `PATH`, and each script action's `executable`
   under `/plugin/bin/`, to `/plugin/entry`.
