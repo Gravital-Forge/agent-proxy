@@ -41,9 +41,10 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _label_containers(monkeypatch: pytest.MonkeyPatch) -> None:
+def _label_containers(monkeypatch: pytest.MonkeyPatch, verifier_image: str) -> None:
     monkeypatch.setattr(plugins, "CONTAINER_LABELS", TEST_LABELS)
     monkeypatch.setattr(runner, "CONTAINER_LABELS", TEST_LABELS)
+    monkeypatch.setattr(runner, "VERIFIER_IMAGE", verifier_image)
     monkeypatch.setattr(egress, "LABELS", TEST_LABELS)
 
 

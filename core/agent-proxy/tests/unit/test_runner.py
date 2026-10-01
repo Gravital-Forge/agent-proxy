@@ -3,6 +3,7 @@ import socket
 import threading
 import types
 from collections.abc import Callable, Iterator, Mapping
+from contextlib import ExitStack
 from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
@@ -13,6 +14,7 @@ import docker.types
 import pytest
 import requests
 
+from agent_proxy import runner
 from agent_proxy.config import EnvMount, FileMount, Grant, Root
 from agent_proxy.credentials import CredentialStore
 from agent_proxy.egress import CageNetwork
@@ -25,6 +27,7 @@ from agent_proxy.runner import (
     LOG_DRIVER,
     TMPFS_OPTIONS,
     TMPFS_PATH,
+    VERIFIER_IMAGE,
     VERIFIER_MOUNT,
     VERIFIER_PATH,
     VERIFIER_REFUSED_EXIT,
@@ -38,11 +41,12 @@ from agent_proxy.runner import (
     InputError,
     Outcome,
     RootError,
+    RootIdentity,
     RunnerError,
     cage_environment,
     cage_mounts,
-    check_roots,
     form_argv,
+    hold_roots,
     script_stdin,
     validate_input,
 )
@@ -123,11 +127,19 @@ def store(tmp_path: Path) -> CredentialStore:
     return CredentialStore(tmp_path / "credentials")
 
 
+@pytest.fixture
+def nonce(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Pin the nonce every call makes, and return it."""
+    monkeypatch.setattr(runner.secrets, "token_hex", lambda _nbytes: NONCE)
+    return NONCE
+
+
 CALL_ID = "0123456789abcdef0123456789abcdef"
 IMAGE = "registry.test/plugin@sha256:" + "0" * 64
 NETWORK = CageNetwork(name="apx-cage-net", environment={})
 PROXY_VARIABLE = {"HTTPS_PROXY": "http://egress:1080"}
 _GRANT = Grant(roots=[], domains=[], credentials={})
+NONCE = "feedface" * 4
 
 
 def _client(*, out: bytes = b"", err: bytes = b"", status: int = 0) -> MagicMock:
@@ -150,6 +162,26 @@ def _container(client: MagicMock) -> MagicMock:
 def _stdin(client: MagicMock) -> MagicMock:
     """Return the raw socket the runner writes a script's input to."""
     return _container(client).attach_socket.return_value._sock
+
+
+def _verifier_mount() -> dict[str, object]:
+    return {
+        "Type": "image",
+        "Source": VERIFIER_IMAGE,
+        "Target": VERIFIER_MOUNT,
+        "ReadOnly": True,
+    }
+
+
+def _root_arguments(path: Path) -> list[str]:
+    """Return the verifier's path, device, and inode arguments for a root."""
+    status = path.stat()
+    return [str(path), str(status.st_dev), str(status.st_ino)]
+
+
+def _open_descriptors() -> int:
+    """Return how many descriptors this process holds open."""
+    return len(list(Path("/proc/self/fd").iterdir()))
 
 
 def _cage_call(
@@ -195,6 +227,14 @@ def _symlinked_root_grant(tmp_path: Path) -> Grant:
     (tmp_path / "link").symlink_to(tmp_path / "real")
     return Grant(
         roots=[Root(path=str(tmp_path / "link"), mode="rw")],
+        domains=[],
+        credentials={},
+    )
+
+
+def _missing_root_grant(tmp_path: Path) -> Grant:
+    return Grant(
+        roots=[Root(path=str(tmp_path / "absent"), mode="rw")],
         domains=[],
         credentials={},
     )
@@ -348,49 +388,126 @@ def test_script_stdin_accepts_a_mapping_that_is_not_a_dict() -> None:
     assert script_stdin(types.MappingProxyType({"n": 1})) == b'{"n":1}'
 
 
-def test_check_roots_accepts_real_directories(tmp_path: Path) -> None:
-    """A root with no symbolic link in its path passes."""
-    (tmp_path / "work").mkdir()
-
-    check_roots([Root(path=str(tmp_path / "work"), mode="rw")])
+def _missing(tmp_path: Path) -> Path:
+    return tmp_path / "absent" / "work"
 
 
-def test_check_roots_leaves_a_missing_path_to_docker(tmp_path: Path) -> None:
-    """A root whose path does not exist passes; Docker refuses its bind."""
-    check_roots([Root(path=str(tmp_path / "absent" / "work"), mode="ro")])
+def _file(tmp_path: Path) -> Path:
+    (tmp_path / "work").write_text("")
+    return tmp_path / "work"
 
 
-def test_check_roots_refuses_a_root_below_a_symlinked_directory(
-    tmp_path: Path,
-) -> None:
-    """A root beneath a symbolic link refuses, naming the root."""
-    (tmp_path / "real" / "work").mkdir(parents=True)
-    (tmp_path / "link").symlink_to(tmp_path / "real")
-    root_path = str(tmp_path / "link" / "work")
-
-    with pytest.raises(RootError, match=re.escape(repr(root_path))):
-        check_roots([Root(path=root_path, mode="ro")])
-
-
-def test_check_roots_refuses_a_root_that_is_a_dangling_symlink(
-    tmp_path: Path,
-) -> None:
-    """A root that is itself a link to a missing path refuses."""
-    (tmp_path / "link").symlink_to(tmp_path / "absent")
-
-    with pytest.raises(RootError):
-        check_roots([Root(path=str(tmp_path / "link"), mode="rw")])
-
-
-def test_check_roots_refuses_a_later_symlinked_root(tmp_path: Path) -> None:
-    """Every root is checked, not only the first."""
+def _link_as_root(tmp_path: Path) -> Path:
     (tmp_path / "real").mkdir()
-    (tmp_path / "link").symlink_to(tmp_path / "real")
-    link = str(tmp_path / "link")
-    roots = [Root(path=str(tmp_path / "real"), mode="ro"), Root(path=link, mode="rw")]
+    (tmp_path / "work").symlink_to(tmp_path / "real")
+    return tmp_path / "work"
 
-    with pytest.raises(RootError, match=re.escape(repr(link))):
-        check_roots(roots)
+
+def _link_at_parent(tmp_path: Path) -> Path:
+    (tmp_path / "real" / "work").mkdir(parents=True)
+    (tmp_path / "parent").symlink_to(tmp_path / "real")
+    return tmp_path / "parent" / "work"
+
+
+def _dangling_link(tmp_path: Path) -> Path:
+    (tmp_path / "work").symlink_to(tmp_path / "absent")
+    return tmp_path / "work"
+
+
+def test_hold_roots_returns_each_root_s_device_and_inode_in_order(
+    tmp_path: Path,
+) -> None:
+    """Each root's identity is its path and its os.stat pair, in grant order."""
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    roots = [Root(path=str(first), mode="ro"), Root(path=str(second), mode="rw")]
+
+    with ExitStack() as held:
+        identities = hold_roots(roots, held)
+
+    assert identities == [
+        RootIdentity(str(first), first.stat().st_dev, first.stat().st_ino),
+        RootIdentity(str(second), second.stat().st_dev, second.stat().st_ino),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("make_root", "component", "reason"),
+    [
+        (_missing, "absent", "does not exist"),
+        (_file, "work", "is a symbolic link or not a directory"),
+        (_link_as_root, "work", "is a symbolic link or not a directory"),
+        (_link_at_parent, "parent", "is a symbolic link or not a directory"),
+        (_dangling_link, "work", "is a symbolic link or not a directory"),
+    ],
+    ids=["missing", "file", "link-as-root", "link-at-parent", "dangling-link"],
+)
+def test_hold_roots_refuses_a_root_that_is_not_a_chain_of_directories(
+    tmp_path: Path,
+    make_root: Callable[[Path], Path],
+    component: str,
+    reason: str,
+) -> None:
+    """The refusal names the root, the component, and what is wrong with it."""
+    root_path = str(make_root(tmp_path))
+
+    with pytest.raises(RootError) as excinfo, ExitStack() as held:
+        hold_roots([Root(path=root_path, mode="rw")], held)
+
+    assert repr(root_path) in str(excinfo.value)
+    assert f"component {component!r} {reason}" in str(excinfo.value)
+
+
+def test_hold_roots_refuses_another_open_failure_with_the_os_s_reason(
+    tmp_path: Path,
+) -> None:
+    """A component the OS will not open for another reason gives its strerror."""
+    root_path = str(tmp_path / ("x" * 256))
+
+    with pytest.raises(RootError) as excinfo, ExitStack() as held:
+        hold_roots([Root(path=root_path, mode="rw")], held)
+
+    assert repr(root_path) in str(excinfo.value)
+    assert "cannot be opened: File name too long" in str(excinfo.value)
+
+
+def test_hold_roots_holds_one_descriptor_per_root_until_the_stack_closes(
+    tmp_path: Path,
+) -> None:
+    """Inside the stack each root holds one descriptor; after it, none is left."""
+    (tmp_path / "deep" / "first").mkdir(parents=True)
+    (tmp_path / "deep" / "second").mkdir()
+    roots = [
+        Root(path=str(tmp_path / "deep" / "first"), mode="ro"),
+        Root(path=str(tmp_path / "deep" / "second"), mode="rw"),
+    ]
+    before = _open_descriptors()
+
+    with ExitStack() as held:
+        hold_roots(roots, held)
+        inside = _open_descriptors()
+
+    assert inside == before + 2
+    assert _open_descriptors() == before
+
+
+def test_hold_roots_closes_every_descriptor_when_a_later_root_is_refused(
+    tmp_path: Path,
+) -> None:
+    """A refused later root leaves no descriptor open once the stack closes."""
+    (tmp_path / "work").mkdir()
+    roots = [
+        Root(path=str(tmp_path / "work"), mode="rw"),
+        Root(path=str(tmp_path / "absent"), mode="rw"),
+    ]
+    before = _open_descriptors()
+
+    with pytest.raises(RootError), ExitStack() as held:
+        hold_roots(roots, held)
+
+    assert _open_descriptors() == before
 
 
 def test_cage_environment_maps_each_env_credential_to_its_value(
@@ -514,15 +631,16 @@ def test_the_cage_constants_are_the_spec_s() -> None:
     assert TMPFS_OPTIONS == "rw,size=64m"
     assert CONTAINER_USER == "0:0"
     assert LOG_DRIVER == "json-file"
+    assert VERIFIER_IMAGE == "agent-proxy-verifier:1"
     assert VERIFIER_MOUNT == "/.agent-proxy"
     assert VERIFIER_PATH == "/.agent-proxy/verify"
     assert VERIFIER_REFUSED_EXIT == 125
 
 
-def test_run_creates_a_hardened_command_cage_with_its_argv_as_entrypoint(
-    tmp_path: Path, store: CredentialStore
+def test_run_creates_a_hardened_command_cage_whose_verifier_runs_its_argv(
+    tmp_path: Path, store: CredentialStore, nonce: str
 ) -> None:
-    """The argv is the whole entrypoint; roots, credentials, and network are set."""
+    """The verifier checks the root, then runs the argv; its image mounts last."""
     store.set("api-token", b"s3cret")
     store.set("deploy-key", b"key")
     work = tmp_path / "work"
@@ -541,7 +659,14 @@ def test_run_creates_a_hardened_command_cage_with_its_argv_as_entrypoint(
 
     client.containers.create.assert_called_once_with(
         IMAGE,
-        entrypoint=["echo", "hi"],
+        entrypoint=[
+            VERIFIER_PATH,
+            nonce,
+            *_root_arguments(work),
+            "--",
+            "echo",
+            "hi",
+        ],
         stdin_open=False,
         user=CONTAINER_USER,
         read_only=True,
@@ -558,6 +683,7 @@ def test_run_creates_a_hardened_command_cage_with_its_argv_as_entrypoint(
                 type="bind",
                 read_only=True,
             ),
+            _verifier_mount(),
         ],
         environment={"API_TOKEN": "s3cret"},
         network=NETWORK.name,
@@ -567,23 +693,23 @@ def test_run_creates_a_hardened_command_cage_with_its_argv_as_entrypoint(
 
 
 def test_run_creates_a_script_cage_that_takes_its_input_on_stdin(
-    store: CredentialStore,
+    store: CredentialStore, nonce: str
 ) -> None:
-    """A script's executable is the whole entrypoint, and stdin is open."""
+    """The verifier runs the script's executable, and stdin is open."""
     client = _client(out=b"{}")
 
     _run(client, store, _cage_call(_SCRIPT, {"path": "/work"}))
 
     client.containers.create.assert_called_once_with(
         IMAGE,
-        entrypoint=["/plugin/run"],
+        entrypoint=[VERIFIER_PATH, nonce, "--", "/plugin/run"],
         stdin_open=True,
         user=CONTAINER_USER,
         read_only=True,
         cap_drop=["ALL"],
         security_opt=["no-new-privileges"],
         tmpfs={TMPFS_PATH: TMPFS_OPTIONS},
-        mounts=[],
+        mounts=[_verifier_mount()],
         environment={},
         network=NETWORK.name,
         labels={},
@@ -880,7 +1006,7 @@ def test_run_fails_the_cage_on_another_error_of_the_stdin_socket(
 def test_run_refuses_a_cage_it_cannot_create_naming_the_image(
     store: CredentialStore, error: Exception
 ) -> None:
-    """A create failure raises CageStartError with the image and Docker's message."""
+    """A create failure raises CageStartError naming both images and Docker's error."""
     client = _client()
     client.containers.create.side_effect = error
 
@@ -888,6 +1014,7 @@ def test_run_refuses_a_cage_it_cannot_create_naming_the_image(
         _run(client, store, _cage_call(_echo(), {"text": "hi"}))
 
     assert str(error) in str(excinfo.value)
+    assert repr(VERIFIER_IMAGE) in str(excinfo.value)
     _container(client).remove.assert_not_called()
 
 
@@ -949,6 +1076,180 @@ def test_run_fails_the_cage_when_it_cannot_be_removed(
         _run(client, store, _cage_call(_echo(), {"text": "hi"}))
 
 
+def test_run_gives_each_call_a_fresh_nonce_of_32_hex_digits(
+    store: CredentialStore,
+) -> None:
+    """Two calls pass the verifier different nonces, each 16 random bytes in hex."""
+    client = _client()
+
+    _run(client, store, _cage_call(_echo(), {"text": "hi"}))
+    _run(client, store, _cage_call(_echo(), {"text": "hi"}))
+
+    nonces = [
+        create.kwargs["entrypoint"][1]
+        for create in client.containers.create.call_args_list
+    ]
+    assert all(re.fullmatch("[0-9a-f]{32}", value) for value in nonces)
+    assert nonces[0] != nonces[1]
+
+
+def test_run_mounts_the_verifier_image_named_when_the_cage_is_created(
+    store: CredentialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The image mount reads VERIFIER_IMAGE at create, so a test can redirect it."""
+    monkeypatch.setattr(runner, "VERIFIER_IMAGE", "apx-verifier:it")
+    client = _client()
+
+    _run(client, store, _cage_call(_echo(), {"text": "hi"}))
+
+    mounts = client.containers.create.call_args.kwargs["mounts"]
+    assert mounts[-1]["Source"] == "apx-verifier:it"
+
+
+def test_run_holds_each_root_open_until_the_cage_is_removed(
+    tmp_path: Path, store: CredentialStore
+) -> None:
+    """The root's descriptor is open while the cage is removed and closed after."""
+    work = tmp_path / "work"
+    work.mkdir()
+    grant = Grant(roots=[Root(path=str(work), mode="rw")], domains=[], credentials={})
+    client = _client()
+    at_removal: list[int] = []
+    _container(client).remove.side_effect = lambda **_: at_removal.append(
+        _open_descriptors()
+    )
+    before = _open_descriptors()
+
+    _run(client, store, _cage_call(_echo(), {"text": "hi"}, grant=grant))
+
+    assert at_removal == [before + 1]
+    assert _open_descriptors() == before
+
+
+def test_run_closes_the_held_roots_when_a_credential_is_refused(
+    tmp_path: Path, store: CredentialStore
+) -> None:
+    """A credential refused after the roots are held leaves no descriptor open."""
+    work = tmp_path / "work"
+    work.mkdir()
+    grant = Grant(
+        roots=[Root(path=str(work), mode="rw")],
+        domains=[],
+        credentials={"api-token": EnvMount(env="API_TOKEN")},
+    )
+    before = _open_descriptors()
+
+    with pytest.raises(CredentialError):
+        _run(_client(), store, _cage_call(_echo(), {"text": "hi"}, grant=grant))
+
+    assert _open_descriptors() == before
+
+
+def test_run_refuses_a_root_the_verifier_found_swapped(
+    store: CredentialStore, nonce: str
+) -> None:
+    """A root line under the call's nonce raises RootError with the reason."""
+    err = f'{nonce} root "/work": is 1:2, want 3:4\nlater\n'.encode()
+    client = _client(err=err, status=VERIFIER_REFUSED_EXIT)
+
+    with pytest.raises(
+        RootError, match="not the directory the runner checked"
+    ) as excinfo:
+        _run(client, store, _cage_call(_echo(), {"text": "hi"}))
+
+    assert str(excinfo.value).endswith('"/work": is 1:2, want 3:4')
+    _container(client).remove.assert_called_once_with(force=True)
+
+
+def test_run_refuses_an_action_the_verifier_could_not_start(
+    store: CredentialStore, nonce: str
+) -> None:
+    """An exec line under the call's nonce raises CageStartError naming the image."""
+    err = f"{nonce} exec no-such-program: not found\n".encode()
+    client = _client(err=err, status=VERIFIER_REFUSED_EXIT)
+
+    with pytest.raises(CageStartError, match=re.escape(repr(IMAGE))) as excinfo:
+        _run(client, store, _cage_call(_echo(), {"text": "hi"}))
+
+    assert str(excinfo.value).endswith("no-such-program: not found")
+    _container(client).remove.assert_called_once_with(force=True)
+
+
+@pytest.mark.parametrize(
+    "err",
+    [f"{'0' * 32} root forged\n".encode(), b""],
+    ids=["another-nonce", "no-line"],
+)
+def test_run_returns_an_exit_of_125_without_the_call_s_line_as_the_result(
+    store: CredentialStore, nonce: str, err: bytes
+) -> None:
+    """Exit 125 with no verifier line under the call's nonce is the action's own."""
+    client = _client(err=err, status=VERIFIER_REFUSED_EXIT)
+
+    outcome = _run(client, store, _cage_call(_echo(), {"text": "hi"}))
+
+    assert outcome.exit_code == VERIFIER_REFUSED_EXIT
+    assert outcome.content == {
+        "exit_code": VERIFIER_REFUSED_EXIT,
+        "stdout": "",
+        "stderr": err.decode(),
+    }
+    _container(client).remove.assert_called_once_with(force=True)
+
+
+def test_run_reads_the_verifier_line_across_chunks_to_its_newline(
+    store: CredentialStore, nonce: str
+) -> None:
+    """A line that arrives in pieces is joined, and it ends at the first newline."""
+    client = _client(status=VERIFIER_REFUSED_EXIT)
+    pieces = [nonce.encode(), b" root split", b" reason\nlater\n"]
+    _container(client).logs.side_effect = lambda **_: iter(pieces)
+
+    with pytest.raises(RootError) as excinfo:
+        _run(client, store, _cage_call(_echo(), {"text": "hi"}))
+
+    assert str(excinfo.value).endswith(": split reason")
+
+
+def test_run_reads_at_most_4096_bytes_of_the_verifier_line(
+    store: CredentialStore, nonce: str
+) -> None:
+    """The line is cut at 4096 bytes, and no chunk past them is read."""
+    head = f"{nonce} root ".encode()
+    pieces = [head + b"x" * (4096 - len(head)), b"z\n"]
+    read: list[bytes] = []
+
+    def logs(**_: object) -> Iterator[bytes]:
+        for piece in pieces:
+            read.append(piece)
+            yield piece
+
+    client = _client(status=VERIFIER_REFUSED_EXIT)
+    _container(client).logs.side_effect = logs
+
+    with pytest.raises(RootError) as excinfo:
+        _run(client, store, _cage_call(_echo(), {"text": "hi"}))
+
+    assert read == pieces[:1]
+    assert str(excinfo.value).endswith("x" * (4096 - len(head)))
+
+
+def test_run_fails_the_cage_when_the_verifier_line_cannot_be_read(
+    store: CredentialStore,
+) -> None:
+    """A logs failure while reading a 125's stderr raises CageFailedError."""
+    client = _client(status=VERIFIER_REFUSED_EXIT)
+    _container(client).logs.side_effect = docker.errors.APIError("logs failed")
+
+    with pytest.raises(CageFailedError, match="logs failed"):
+        _run(client, store, _cage_call(_echo(), {"text": "hi"}))
+
+    _container(client).logs.assert_called_once_with(
+        stdout=False, stderr=True, stream=True
+    )
+    _container(client).remove.assert_called_once_with(force=True)
+
+
 @pytest.mark.parametrize(
     "call_id",
     ["", CALL_ID.upper(), CALL_ID[:-1], CALL_ID + "0", CALL_ID + "\n"],
@@ -976,10 +1277,18 @@ def test_run_refuses_a_malformed_call_id_before_any_slot_or_cage(
         ({"text": 5}, lambda _: _GRANT, InputError),
         ({"text": "-n"}, lambda _: _GRANT, InputError),
         ({"text": "hi"}, _symlinked_root_grant, RootError),
+        ({"text": "hi"}, _missing_root_grant, RootError),
         ({"text": "hi"}, _unknown_env_credential_grant, CredentialError),
         ({"text": "hi"}, _unknown_file_credential_grant, CredentialError),
     ],
-    ids=["schema", "dash", "symlinked-root", "env-credential", "file-credential"],
+    ids=[
+        "schema",
+        "dash",
+        "symlinked-root",
+        "missing-root",
+        "env-credential",
+        "file-credential",
+    ],
 )
 def test_run_refuses_before_it_takes_a_slot_or_creates_a_cage(
     tmp_path: Path,
