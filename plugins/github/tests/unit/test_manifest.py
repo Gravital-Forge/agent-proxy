@@ -296,19 +296,17 @@ def test_command_action_forms_its_argv(
 
 
 @pytest.mark.parametrize("repo", ["o", "-o/n", "o/n/x", "o/..", "o/."])
-def test_every_action_refuses_a_repo_that_is_not_owner_and_name(
+def test_repo_pattern_refuses_a_value_that_is_not_owner_and_name(
     manifest: Manifest, repo: str
 ) -> None:
-    """A repo with no name, a leading dash, a third part, or a dots-only name fails."""
+    """The repo pattern every action shares refuses a malformed owner/name."""
     with pytest.raises(InputError):
         validate_input(manifest.actions["run_list"], {"repo": repo})
 
 
 @pytest.mark.parametrize("repo", ["o/n", "my-org/my.repo_1"])
-def test_every_action_accepts_an_owner_and_name_repo(
-    manifest: Manifest, repo: str
-) -> None:
-    """An owner and a name with dashes, dots, and underscores pass."""
+def test_repo_pattern_accepts_an_owner_and_name(manifest: Manifest, repo: str) -> None:
+    """The repo pattern every action shares accepts dashes, dots, and underscores."""
     validate_input(manifest.actions["run_list"], {"repo": repo})
 
 
