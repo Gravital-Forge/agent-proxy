@@ -30,6 +30,10 @@ PROBE_IMAGE_TAG = "apx-egress-probe:it"
 VERIFIER_DIR = Path(__file__).parents[3] / "verifier"
 VERIFIER_BUILD_TAG = "apx-verifier-build:it"
 VERIFIER_IMAGE_TAG = "apx-verifier:it"
+INSTANCE_CONTEXT = Path(__file__).parents[2]
+INSTANCE_DOCKERFILE = Path(__file__).parents[3] / "docker" / "Dockerfile"
+INSTANCE_BUILD_TAG = "apx-instance-build:it"
+INSTANCE_IMAGE_TAG = "apx-instance:it"
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
@@ -156,6 +160,35 @@ def verifier_image(docker_client: DockerClient) -> Iterator[str]:
         )
         try:
             yield VERIFIER_IMAGE_TAG
+        finally:
+            docker_client.images.remove(image.id, force=True)
+    finally:
+        docker_client.images.remove(build_stage.id, force=True)
+
+
+@pytest.fixture(scope="session")
+def instance_image(docker_client: DockerClient) -> Iterator[str]:
+    """The tag of the instance image, built from core/docker/Dockerfile."""
+    build_stage, _ = docker_client.images.build(
+        path=str(INSTANCE_CONTEXT),
+        dockerfile=str(INSTANCE_DOCKERFILE),
+        target="build",
+        tag=INSTANCE_BUILD_TAG,
+        labels=TEST_LABELS,
+        rm=True,
+        forcerm=True,
+    )
+    try:
+        image, _ = docker_client.images.build(
+            path=str(INSTANCE_CONTEXT),
+            dockerfile=str(INSTANCE_DOCKERFILE),
+            tag=INSTANCE_IMAGE_TAG,
+            labels=TEST_LABELS,
+            rm=True,
+            forcerm=True,
+        )
+        try:
+            yield INSTANCE_IMAGE_TAG
         finally:
             docker_client.images.remove(image.id, force=True)
     finally:
