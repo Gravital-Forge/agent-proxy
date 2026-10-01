@@ -280,7 +280,8 @@ agent-proxy/
 │   ├── agent-proxy/      # the core uv package (Python, FastMCP, Docker SDK)
 │   │   ├── agent_proxy/  # cli, config, auth, credentials, plugins, reload, mcp, runner, egress, results, audit, errors, schemas
 │   │   └── tests/        # unit/, integration/
-│   └── docker/           # the proxy's Dockerfile and provisioning; the iron-proxy pin is in egress
+│   ├── docker/           # the proxy's Dockerfile and provisioning; the iron-proxy pin is in egress
+│   └── verifier/         # the in-cage root verifier: Go source, its tests, and the Dockerfile that builds it
 └── plugins/
     ├── git/              # Dockerfile, describe and the manifest it prints, scripts/, tests/, README.md
     └── github/

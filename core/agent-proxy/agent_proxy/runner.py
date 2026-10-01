@@ -1,16 +1,19 @@
 """The cage runner: one action call in one short-lived, hardened container."""
 
+import errno
 import json
+import os
 import re
+import secrets
 import socket
 import threading
 import time
 import types
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import timedelta
-from pathlib import Path
+from pathlib import PurePosixPath
 from typing import cast
 
 import docker.types
@@ -42,6 +45,13 @@ TMPFS_PATH = "/tmp"  # noqa: S108 - the path is inside the cage, on its own tmpf
 TMPFS_OPTIONS = "rw,size=64m"
 CONTAINER_USER = "0:0"
 LOG_DRIVER = "json-file"
+VERIFIER_IMAGE = "agent-proxy-verifier:1"
+VERIFIER_MOUNT = "/.agent-proxy"
+VERIFIER_PATH = f"{VERIFIER_MOUNT}/verify"
+VERIFIER_REFUSED_EXIT = 125
+_VERIFIER_LINE_BYTES = 4096
+_NONCE_BYTES = 16
+_DIRECTORY_FLAGS = os.O_PATH | os.O_DIRECTORY
 _STDIN_ATTACH_PARAMS: Mapping[str, int] = types.MappingProxyType(
     {"stdin": 1, "stream": 1}
 )
@@ -61,7 +71,12 @@ class InputError(RunnerError):
 
 
 class RootError(RunnerError):
-    """A granted root has a symbolic link in its path."""
+    """A granted root is refused, at the runner's check or in the cage.
+
+    The check refuses a path that holds a symbolic link, a non-directory, or a
+    missing component. The cage refuses a root mount that is not the directory
+    the check held open.
+    """
 
 
 class CredentialError(RunnerError):
@@ -138,25 +153,70 @@ def script_stdin(arguments: Mapping[str, object]) -> bytes:
     return document.encode()
 
 
-def check_roots(roots: Sequence[Root]) -> None:
-    """Refuse a root whose path holds a symbolic link at any component.
+@dataclass(frozen=True)
+class RootIdentity:
+    """A granted root's path, and the device and inode of the directory held there."""
 
-    A component that does not exist is not a link; Docker refuses the bind of
-    a missing path at create.
+    path: str
+    device: int
+    inode: int
+
+
+def hold_roots(roots: Sequence[Root], held: ExitStack) -> list[RootIdentity]:
+    """Open each root's directory without following a link, and hold it on held.
+
+    The walk opens one component at a time from '/', so no link anywhere in a
+    root's path is followed. While held is open, no other directory can take
+    a held directory's inode.
 
     Raises:
-        RootError: a component of a root's path is a symbolic link.
+        RootError: a component of a root's path is a symbolic link, is not a
+            directory, does not exist, or cannot be opened.
     """
     # The daemon follows a symlinked bind source, so a link the agent planted in
     # its own tree would mount a path outside it.
-    for root in roots:
-        path = Path(root.path)
-        for component in (*reversed(path.parents), path):
-            if component.is_symlink():
-                raise RootError(
-                    f"root {root.path!r} has a symbolic link at {str(component)!r}; "
-                    "a root's path must hold no symbolic link"
-                )
+    return [_hold_root(root, held) for root in roots]
+
+
+def _hold_root(root: Root, held: ExitStack) -> RootIdentity:
+    descriptor = _open_component(root.path, "/", _DIRECTORY_FLAGS, None)
+    for component in PurePosixPath(root.path).parts[1:]:
+        parent = descriptor
+        try:
+            descriptor = _open_component(
+                root.path, component, _DIRECTORY_FLAGS | os.O_NOFOLLOW, parent
+            )
+        finally:
+            os.close(parent)
+    held.callback(os.close, descriptor)
+    status = os.fstat(descriptor)
+    return RootIdentity(path=root.path, device=status.st_dev, inode=status.st_ino)
+
+
+def _open_component(
+    root_path: str, component: str, flags: int, dir_fd: int | None
+) -> int:
+    """Open one component of a root's path and return its descriptor.
+
+    Raises:
+        RootError: the open fails; the message names the root and the component.
+    """
+    try:
+        return os.open(component, flags, dir_fd=dir_fd)
+    except OSError as exc:
+        raise RootError(
+            f"root {root_path!r}: component {component!r} {_open_refusal(exc)}; "
+            "a root's path must be directories only, with no symbolic link"
+        ) from exc
+
+
+def _open_refusal(exc: OSError) -> str:
+    # O_NOFOLLOW with O_DIRECTORY gives ENOTDIR for a link and a file alike.
+    if exc.errno == errno.ENOTDIR:
+        return "is a symbolic link or not a directory"
+    if exc.errno == errno.ENOENT:
+        return "does not exist"
+    return f"cannot be opened: {exc.strerror}"
 
 
 def cage_environment(
@@ -305,30 +365,40 @@ class CageRunner:
         """Run call in a new cage, remove the cage, and return what it produced.
 
         Every refusal of the call ID, input, roots, or credentials comes before
-        the call takes a slot. The slot is held until the cage is removed.
+        the call takes a slot. The slot is held until the cage is removed. Each
+        root's directory is held open from its check until the run ends,
+        whether it returns or raises; a cage, if there is one, is removed
+        before the directories close. The cage's verifier refuses a root mount
+        that is not the directory held, after the slot is taken.
 
         Raises:
             InputError: the call ID or the input is refused.
-            RootError: a root's path holds a symbolic link.
+            RootError: a root's path holds a symbolic link, a non-directory, or
+                a missing component; or a root in the cage is not the directory
+                the runner checked.
             CredentialError: a granted credential is not stored or cannot be
                 placed in the cage.
-            CageStartError: the cage cannot be created, attached, or started.
+            CageStartError: the cage cannot be created, attached, or started,
+                or the verifier cannot start the action.
             CageTimeoutError: the cage runs past its timeout.
             CageFailedError: the cage fails after it starts, or cannot be removed.
             OverflowWriteError: a stream passes the cap and its overflow file
                 cannot be written.
         """
-        setup = _set_up(call, self._store)
-        with self._limiter.slot(call.max_cages):
-            container = _create(self._client, call, setup)
-            try:
-                return _run_container(container, call, setup)
-            finally:
-                _remove(container, call.action.name)
+        with ExitStack() as held:
+            setup = _set_up(call, self._store, held)
+            with self._limiter.slot(call.max_cages):
+                container = _create(self._client, call, setup)
+                try:
+                    return _run_container(container, call, setup)
+                finally:
+                    _remove(container, call.action.name)
 
 
 @dataclass(frozen=True)
 class _CageSetup:
+    nonce: str
+    roots: Sequence[RootIdentity]
     entrypoint: tuple[str, ...]
     stdin: bytes | None
     environment: Mapping[str, str]
@@ -391,12 +461,13 @@ class _StdinFeed:
             ) from exc
 
 
-def _set_up(call: CageCall, store: CredentialStore) -> _CageSetup:
-    """Check the call and return what its cage is created with.
+def _set_up(call: CageCall, store: CredentialStore, held: ExitStack) -> _CageSetup:
+    """Check the call, hold its roots on held, and return what its cage needs.
 
     Raises:
         InputError: the call ID or the input is refused.
-        RootError: a root's path holds a symbolic link.
+        RootError: a root's path holds a symbolic link, a non-directory, or a
+            missing component.
         CredentialError: a granted credential is not stored or cannot be placed.
     """
     if re.fullmatch(CALL_ID_PATTERN, call.call_id) is None:
@@ -408,9 +479,11 @@ def _set_up(call: CageCall, store: CredentialStore) -> _CageSetup:
     else:
         entrypoint = (call.action.executable,)
         stdin = script_stdin(call.arguments)
-    check_roots(call.grant.roots)
+    roots = hold_roots(call.grant.roots, held)
     credentials = call.grant.credentials
     return _CageSetup(
+        nonce=secrets.token_hex(_NONCE_BYTES),
+        roots=roots,
         entrypoint=entrypoint,
         stdin=stdin,
         environment=cage_environment(credentials, store),
@@ -419,22 +492,32 @@ def _set_up(call: CageCall, store: CredentialStore) -> _CageSetup:
 
 
 def _create(client: DockerClient, call: CageCall, setup: _CageSetup) -> Container:
-    """Create the call's cage; its entrypoint also clears the image's command.
+    """Create the call's cage behind the verifier, which also clears the command.
 
     Raises:
-        CageStartError: Docker refuses the create, an absent image included.
+        CageStartError: Docker refuses the create, an absent action or verifier
+            image included.
     """
     try:
         return client.containers.create(
             call.image,
-            entrypoint=list(setup.entrypoint),
+            entrypoint=_verified_entrypoint(setup),
             stdin_open=setup.stdin is not None,
             user=CONTAINER_USER,
             read_only=True,
             cap_drop=["ALL"],
             security_opt=["no-new-privileges"],
             tmpfs={TMPFS_PATH: TMPFS_OPTIONS},
-            mounts=list(setup.mounts),
+            mounts=[
+                *setup.mounts,
+                # docker-py's Mount refuses the image type.
+                {
+                    "Type": "image",
+                    "Source": VERIFIER_IMAGE,
+                    "Target": VERIFIER_MOUNT,
+                    "ReadOnly": True,
+                },
+            ],
             environment={**call.network.environment, **setup.environment},
             network=call.network.name,
             labels=dict(CONTAINER_LABELS),
@@ -442,8 +525,18 @@ def _create(client: DockerClient, call: CageCall, setup: _CageSetup) -> Containe
         )
     except DOCKER_FAILURES as exc:
         raise CageStartError(
-            f"image {call.image!r}: the cage could not be created: {exc}"
+            f"image {call.image!r} with verifier image {VERIFIER_IMAGE!r}: "
+            f"the cage could not be created: {exc}"
         ) from exc
+
+
+def _verified_entrypoint(setup: _CageSetup) -> list[str]:
+    root_arguments = [
+        text
+        for root in setup.roots
+        for text in (root.path, str(root.device), str(root.inode))
+    ]
+    return [VERIFIER_PATH, setup.nonce, *root_arguments, "--", *setup.entrypoint]
 
 
 def _run_container(container: Container, call: CageCall, setup: _CageSetup) -> Outcome:
@@ -453,6 +546,8 @@ def _run_container(container: Container, call: CageCall, setup: _CageSetup) -> O
             feed.send(deadline)
         exit_code = _wait(container, deadline)
         duration_ms = deadline.elapsed_ms()
+    if exit_code == VERIFIER_REFUSED_EXIT:
+        _raise_verifier_refusal(container, call, setup.nonce)
     stdout = _capture(container, call, "stdout")
     stderr = _capture(container, call, "stderr")
     return _outcome(call.action, exit_code, duration_ms, stdout, stderr)
@@ -521,6 +616,49 @@ def _wait(container: Container, deadline: _Deadline) -> int:
             f"action {deadline.action!r}: waiting for the cage failed: {exc}"
         ) from exc
     return result["StatusCode"]
+
+
+def _raise_verifier_refusal(container: Container, call: CageCall, nonce: str) -> None:
+    """Raise the refusal the verifier wrote under nonce, when stderr leads with one.
+
+    Raises:
+        RootError: a root in the cage is not the directory the runner checked.
+        CageStartError: the verifier could not start the action.
+        CageFailedError: the cage's stderr cannot be read.
+    """
+    line = _first_stderr_line(container, call.action.name)
+    root_prefix = f"{nonce} root ".encode()
+    exec_prefix = f"{nonce} exec ".encode()
+    if line.startswith(root_prefix):
+        reason = line.removeprefix(root_prefix).decode(errors="replace")
+        raise RootError(
+            f"action {call.action.name!r}: a root in the cage is not the directory "
+            f"the runner checked: {reason}"
+        )
+    if line.startswith(exec_prefix):
+        reason = line.removeprefix(exec_prefix).decode(errors="replace")
+        raise CageStartError(
+            f"image {call.image!r}: the verifier could not start the action: {reason}"
+        )
+
+
+def _first_stderr_line(container: Container, action_name: str) -> bytes:
+    """Return the cage's stderr up to its first newline, at most 4096 bytes of it.
+
+    Raises:
+        CageFailedError: the logs call fails.
+    """
+    head = b""
+    try:
+        for chunk in container.logs(stdout=False, stderr=True, stream=True):
+            head += chunk
+            if b"\n" in head or len(head) >= _VERIFIER_LINE_BYTES:
+                break
+    except DOCKER_FAILURES as exc:
+        raise CageFailedError(
+            f"action {action_name!r}: the cage's stderr could not be read: {exc}"
+        ) from exc
+    return head[:_VERIFIER_LINE_BYTES].split(b"\n", 1)[0]
 
 
 def _capture(container: Container, call: CageCall, stream: Stream) -> CapturedStream:

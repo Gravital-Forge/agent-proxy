@@ -2,6 +2,7 @@ import base64
 import json
 import secrets
 import shlex
+import shutil
 import statistics
 import time
 from collections.abc import Callable, Mapping
@@ -14,6 +15,7 @@ import pytest
 from docker import DockerClient
 from docker.models.containers import Container
 
+from agent_proxy import runner
 from agent_proxy.config import EnvMount, FileMount, Grant, Root
 from agent_proxy.credentials import CredentialStore
 from agent_proxy.egress import CageNetwork
@@ -23,9 +25,11 @@ from agent_proxy.runner import (
     CageCall,
     CageLimiter,
     CageRunner,
+    CageStartError,
     CageTimeoutError,
     InputError,
     Outcome,
+    RootError,
 )
 
 MANIFEST = parse_manifest(
@@ -133,6 +137,43 @@ def _presence(label: str, path: Path) -> str:
     return (
         f"if [ -e {shlex.quote(str(path))} ]; "
         f"then echo {label}=present; else echo {label}=absent; fi"
+    )
+
+
+def _swap_after_create(
+    monkeypatch: pytest.MonkeyPatch, swap: Callable[[], None]
+) -> None:
+    """Make each cage's create swap a root's path before the cage starts."""
+    real_create = runner._create
+
+    def create(
+        client: DockerClient, call: CageCall, setup: runner._CageSetup
+    ) -> Container:
+        container = real_create(client, call, setup)
+        swap()
+        return container
+
+    monkeypatch.setattr(runner, "_create", create)
+
+
+def _assert_refused_unread(
+    cages: _Cages, root: Path, writable: Path, secret: str
+) -> None:
+    """Assert the call is refused before the action writes or reads the secret."""
+    action = _shell(
+        f"echo ran > {shlex.quote(str(writable / 'marker'))}; "
+        f"cat {shlex.quote(str(root / 'secret'))}"
+    )
+    grant = _grant(Root(path=str(root), mode="rw"), Root(path=str(writable), mode="rw"))
+
+    with pytest.raises(RootError):
+        cages.run(action, {}, grant)
+
+    assert not (writable / "marker").exists()
+    assert not any(
+        secret.encode() in path.read_bytes()
+        for path in cages.overflow_dir.rglob("*")
+        if path.is_file()
     )
 
 
@@ -319,3 +360,90 @@ def test_cage_cost(cages: _Cages, capsys: pytest.CaptureFixture[str]) -> None:
             f"median_ms={statistics.median(samples):.1f} "
             f"p95_ms={p95:.1f} max_ms={max(samples):.1f}"
         )
+
+
+def test_a_root_swapped_for_a_link_after_the_check_is_refused_in_the_cage(
+    cages: _Cages, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root renamed aside for a link outside fails the cage's identity check."""
+    secret = secrets.token_hex(16)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret").write_text(secret)
+    root = tmp_path / "roots" / "R"
+    writable = tmp_path / "roots" / "W"
+    root.mkdir(parents=True)
+    writable.mkdir()
+
+    def swap() -> None:
+        root.rename(tmp_path / "roots" / "R-aside")
+        root.symlink_to(outside)
+
+    _swap_after_create(monkeypatch, swap)
+
+    _assert_refused_unread(cages, root, writable, secret)
+
+
+def test_a_parent_swapped_for_a_link_after_the_check_is_refused_in_the_cage(
+    cages: _Cages, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root's parent renamed aside for a link outside fails the identity check."""
+    secret = secrets.token_hex(16)
+    outside = tmp_path / "outside"
+    (outside / "R").mkdir(parents=True)
+    (outside / "R" / "secret").write_text(secret)
+    parent = tmp_path / "P"
+    root = parent / "R"
+    # W stays outside P: a W under the swapped parent would lose its bind
+    # source, and the start would fail before the verifier runs.
+    writable = tmp_path / "W"
+    root.mkdir(parents=True)
+    writable.mkdir()
+
+    def swap() -> None:
+        parent.rename(tmp_path / "P-aside")
+        parent.symlink_to(outside)
+
+    _swap_after_create(monkeypatch, swap)
+
+    _assert_refused_unread(cages, root, writable, secret)
+
+
+def test_a_root_deleted_and_recreated_after_the_check_is_refused_in_the_cage(
+    cages: _Cages, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The held descriptor keeps the old inode, so the new directory's differs."""
+    secret = secrets.token_hex(16)
+    root = tmp_path / "roots" / "R"
+    writable = tmp_path / "roots" / "W"
+    root.mkdir(parents=True)
+    writable.mkdir()
+
+    def swap() -> None:
+        shutil.rmtree(root)
+        root.mkdir()
+        (root / "secret").write_text(secret)
+
+    _swap_after_create(monkeypatch, swap)
+
+    _assert_refused_unread(cages, root, writable, secret)
+
+
+def test_an_action_the_image_lacks_fails_to_start(
+    cages: _Cages, labelled_containers: Callable[[], list[Container]]
+) -> None:
+    """The verifier cannot exec a missing program; the runner raises a start error."""
+    action = CommandAction(
+        name="missing",
+        input_schema={"type": "object"},
+        credentials=(),
+        timeout=timedelta(seconds=10),
+        argv=("/apx-no-such-program",),
+        parameters=(),
+        passthrough_args=False,
+    )
+
+    with pytest.raises(CageStartError, match="apx-no-such-program"):
+        cages.run(action, {}, _grant())
+
+    assert labelled_containers() == []
