@@ -68,6 +68,9 @@ credential must not take the environment name `PROXY_ENV_NAME`, which is `HTTPS_
 cage's network sets that variable. `DOMAIN_PATTERN` is the form of a domain, and `egress.py` checks
 it again before it writes a proxy config.
 
+A grant's credential must not take the environment name `ROOTS_ENV_NAME` either, which is
+`AGENT_PROXY_ROOTS`, because the runner sets that variable in every cage.
+
 A config that fails raises `ConfigError`, which holds one message per failure. Each message names
 the file, and a failure inside the file also names its location.
 
@@ -247,11 +250,13 @@ and returns an `Outcome`. It refuses a bad call before it takes a slot under the
    one, is removed before the descriptors close. A released inode can be reused, so a root deleted
    and recreated in the meantime could match the recorded pair; a held descriptor keeps its inode
    from any other directory.
-5. `cage_environment` reads each credential the grant gives as an environment variable.
-   `cage_mounts` binds each root at its own path with the grant's mode, then binds each credential
-   the grant gives as a file, read-only, from its file in the credential store. A credential that is
-   not stored, or an environment value that is not UTF-8 or holds a NUL, raises `CredentialError`.
-   `_create` adds one more mount to these: the verifier image, read-only, at `VERIFIER_MOUNT`.
+5. `roots_environment` gives the cage `ROOTS_ENV_NAME`, which holds the grant's root paths in grant
+   order as a compact JSON array. `cage_environment` reads each credential the grant gives as an
+   environment variable. `cage_mounts` binds each root at its own path with the grant's mode, then
+   binds each credential the grant gives as a file, read-only, from its file in the credential
+   store. A credential that is not stored, or an environment value that is not UTF-8 or holds a NUL,
+   raises `CredentialError`. `_create` adds one more mount to these: the verifier image, read-only,
+   at `VERIFIER_MOUNT`.
 
 The run then waits for a slot, creates the cage, starts it, and removes it by force whatever
 happens. The slot stays taken until the cage is removed. The cage's entrypoint is the verifier's
@@ -261,8 +266,9 @@ clears the image's command. "The root verifier" below gives what the verifier ch
 as `CONTAINER_USER`, with a read-only root filesystem, every capability dropped,
 `no-new-privileges`, a tmpfs at `TMPFS_PATH` with `TMPFS_OPTIONS`, `CONTAINER_LABELS`, and the
 `LOG_DRIVER` log driver. The runner applies the call's `CageNetwork` as given: the cage joins its
-network, and gets its environment beside the grant's credentials. A script's input goes to the
-cage's stdin, then end of file. A script that stops reading its input is not a failure in itself.
+network, and gets its environment beside the roots variable and the grant's credentials. A script's
+input goes to the cage's stdin, then end of file. A script that stops reading its input is not a
+failure in itself.
 
 The timeout is the grant's, or else the action's. It runs from the start, and covers the input and
 the wait for the exit. After the exit, an exit code of `VERIFIER_REFUSED_EXIT` sends the run to the
@@ -419,6 +425,13 @@ check fails the build. The final stage is `FROM scratch` and holds the one file 
 must be on the instance's daemon under the reference `VERIFIER_IMAGE` before the first call, because
 an image mount never pulls; a missing image fails the create with `CageStartError`. The cage sees
 that one file, read-only, at `VERIFIER_PATH`.
+
+## The git plugin
+
+The git plugin is the uv package in `plugins/git/`, placed as `docs/design.md` sets out under
+"Repository layout". The `manifest-check` job in `.github/workflows/ci.yml` builds the image of each
+plugin under `plugins/` and runs `agent-proxy manifest check` on it. `plugins/git/README.md` gives
+everything about the plugin itself: its actions, its rules, its layout, and its tests.
 
 ## Where state lives
 
