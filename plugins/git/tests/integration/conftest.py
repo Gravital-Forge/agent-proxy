@@ -1,5 +1,6 @@
 import secrets
 import shlex
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
@@ -14,11 +15,13 @@ from agent_proxy.plugins import Manifest
 from agent_proxy.results import new_call_id
 from agent_proxy.runner import CageCall, CageLimiter, CageRunner, Outcome
 from docker import DockerClient
+from docker.models.containers import Container
 from harness import (
     FIXTURE_EMAIL,
     FIXTURE_NAME,
     GrantedCredentials,
     OtherUidRepo,
+    RemotePair,
     RunAction,
     host_git,
 )
@@ -34,6 +37,9 @@ VERIFIER_IMAGE_TAG = "apx-git-verifier:it"
 MAX_CAGES = 4
 ROOT_USER = "0:0"
 OTHER_USER = "1000:1000"
+AUTH_SERVER_PATH = Path(__file__).with_name("auth_server.py")
+AUTH_ALIAS = "auth"
+AUTH_START_SECONDS = 30
 
 
 @pytest.fixture(autouse=True)
@@ -261,3 +267,127 @@ def _run_fixture(
         labels=TEST_LABELS,
         remove=True,
     )
+
+
+@pytest.fixture
+def remote_pair(tmp_path: Path) -> RemotePair:
+    """A bare remote, a clone work that pushed main, and a clone peer, in one root.
+
+    work's origin is the plain path of the remote, and both clones carry an identity.
+    """
+    root = tmp_path / "pair-root"
+    root.mkdir()
+    pair = RemotePair(
+        root=root,
+        remote=root / "remote.git",
+        work=root / "work",
+        peer=root / "peer",
+    )
+    host_git(root, "init", "-q", "--bare", "-b", "main", str(pair.remote))
+    host_git(root, "init", "-q", "-b", "main", str(pair.work))
+    _set_identity(pair.work)
+    (pair.work / "a.txt").write_text("one\n")
+    host_git(pair.work, "add", "a.txt")
+    host_git(pair.work, "commit", "-q", "-m", "first")
+    host_git(pair.work, "remote", "add", "origin", str(pair.remote))
+    host_git(pair.work, "push", "-q", "-u", "origin", "main")
+    host_git(root, "clone", "-q", str(pair.remote), str(pair.peer))
+    _set_identity(pair.peer)
+    return pair
+
+
+@pytest.fixture
+def lfs_remote_pair(
+    docker_client: DockerClient, fixture_image: str, tmp_path: Path
+) -> RemotePair:
+    """A remote pair whose work committed a 2 KiB big.bin tracked by git LFS.
+
+    The fixture image builds it as uid 0, so the files are the host user's.
+    peer is cloned with smudging skipped, so its big.bin is an LFS pointer.
+    """
+    root = tmp_path / "lfs-root"
+    root.mkdir()
+    pair = RemotePair(
+        root=root,
+        remote=root / "remote.git",
+        work=root / "work",
+        peer=root / "peer",
+    )
+    remote = shlex.quote(str(pair.remote))
+    work = shlex.quote(str(pair.work))
+    peer = shlex.quote(str(pair.peer))
+    _run_fixture(
+        docker_client,
+        fixture_image,
+        root,
+        ROOT_USER,
+        " && ".join(
+            [
+                f"git init -q --bare -b main {remote}",
+                f"git init -q -b main {work}",
+                f"cd {work}",
+                "git lfs install --local",
+                f"git config user.name {FIXTURE_NAME}",
+                f"git config user.email {FIXTURE_EMAIL}",
+                "head -c 2048 /dev/urandom > big.bin",
+                "git lfs track big.bin",
+                "git add .gitattributes big.bin",
+                "git commit -q -m big",
+                f"git remote add origin {remote}",
+                "git lfs push origin main",
+                "git push -q -u origin main",
+                f"GIT_LFS_SKIP_SMUDGE=1 git clone -q {remote} {peer}",
+                f"cd {peer}",
+                "git lfs install --local",
+            ]
+        ),
+    )
+    return pair
+
+
+@pytest.fixture
+def auth_server(
+    docker_client: DockerClient, plugin_manifest: Manifest, cage_network: str
+) -> Iterator[Container]:
+    """A server that answers 401 until the credential arrives, reached as auth:8080.
+
+    It runs from the plugin image, which plugin_manifest builds, on the network
+    every cage joins.
+    """
+    container = docker_client.containers.run(
+        PLUGIN_IMAGE_TAG,
+        ["python3", "-u", "-c", AUTH_SERVER_PATH.read_text()],
+        detach=True,
+        network=cage_network,
+        networking_config={
+            cage_network: docker_client.api.create_endpoint_config(aliases=[AUTH_ALIAS])
+        },
+        labels=TEST_LABELS,
+    )
+    try:
+        _wait_for_ready(container)
+        yield container
+    finally:
+        container.remove(force=True)
+
+
+def _set_identity(repo: Path) -> None:
+    """Give repo the fixture's commit identity in its own config."""
+    host_git(repo, "config", "user.name", FIXTURE_NAME)
+    host_git(repo, "config", "user.email", FIXTURE_EMAIL)
+
+
+def _wait_for_ready(container: Container) -> None:
+    """Return once the server's log holds READY.
+
+    Raises:
+        TimeoutError: READY did not appear within AUTH_START_SECONDS.
+    """
+    deadline = time.monotonic() + AUTH_START_SECONDS
+    while b"READY" not in container.logs():
+        if time.monotonic() > deadline:
+            raise TimeoutError(
+                f"the auth server printed no READY in {AUTH_START_SECONDS}s; "
+                f"its log: {container.logs()!r}"
+            )
+        time.sleep(0.1)

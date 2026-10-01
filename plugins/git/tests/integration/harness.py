@@ -37,6 +37,16 @@ class OtherUidRepo:
     worktree: Path
 
 
+@dataclass(frozen=True)
+class RemotePair:
+    """A bare remote, two clones of it, and the root above all three."""
+
+    root: Path
+    remote: Path
+    work: Path
+    peer: Path
+
+
 def host_git(repo: Path, *args: str) -> str:
     """Run the host's git in repo and return its stdout.
 

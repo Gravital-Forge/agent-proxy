@@ -2,6 +2,7 @@ from datetime import timedelta
 from pathlib import Path
 
 import pytest
+from agent_proxy.config import EnvMount
 from agent_proxy.plugins import (
     CommandAction,
     Manifest,
@@ -9,7 +10,7 @@ from agent_proxy.plugins import (
     ScriptAction,
     parse_manifest,
 )
-from agent_proxy.runner import InputError, validate_input
+from agent_proxy.runner import InputError, form_argv, validate_input
 
 MANIFEST_PATH = Path(__file__).parents[2] / "manifest.json"
 REPO = Parameter(name="repo", placement="flag", flag="--repo")
@@ -48,7 +49,55 @@ READ_ACTIONS: dict[str, tuple[tuple[str, ...], tuple[Parameter, ...]]] = {
     "lfs_ls_files": (("git-cage", "lfs", "ls-files"), ()),
     "lfs_status": (("git-cage", "lfs", "status"), ()),
 }
-REQUIRED_BEYOND_REPO = {"rev_parse": {"ref"}, "blame": {"file"}, "config_get": {"key"}}
+REQUIRED_BEYOND_REPO = {
+    "rev_parse": {"ref"},
+    "blame": {"file"},
+    "config_get": {"key"},
+    "merge": {"branch"},
+    "worktree": {"action"},
+    "stash": {"action"},
+}
+ACTION = Parameter(name="action", placement="positional", flag=None)
+# Each action that changes a repository or reaches a remote: its argv, and its
+# parameters after repo.
+CHANGE_ACTIONS: dict[str, tuple[tuple[str, ...], tuple[Parameter, ...]]] = {
+    "fetch": (("git-cage", "fetch", "origin"), ()),
+    "pull": (("git-cage", "pull"), ()),
+    "merge": (
+        ("git-cage", "merge"),
+        (Parameter(name="branch", placement="positional", flag=None),),
+    ),
+    "worktree": (
+        ("git-cage", "worktree"),
+        (
+            ACTION,
+            Parameter(name="path", placement="positional", flag=None),
+            Parameter(name="branch", placement="flag", flag="-b"),
+        ),
+    ),
+    "stash": (
+        ("git-cage", "stash"),
+        (
+            ACTION,
+            Parameter(name="message", placement="flag", flag="-m"),
+            Parameter(name="index", placement="positional", flag=None),
+        ),
+    ),
+    "lfs_fetch": (("git-cage", "lfs", "fetch", "origin"), ()),
+    "lfs_pull": (("git-cage", "lfs", "pull", "origin"), ()),
+}
+COMMAND_ACTIONS = READ_ACTIONS | CHANGE_ACTIONS
+GH_TOKEN = EnvMount(env="GH_TOKEN")
+MINUTE = timedelta(seconds=60)
+CHANGE_LIMITS: dict[str, tuple[tuple[EnvMount, ...], timedelta]] = {
+    "fetch": ((GH_TOKEN,), MINUTE),
+    "pull": ((GH_TOKEN,), MINUTE),
+    "merge": ((), MINUTE),
+    "worktree": ((), MINUTE),
+    "stash": ((), MINUTE),
+    "lfs_fetch": ((GH_TOKEN,), timedelta(minutes=10)),
+    "lfs_pull": ((GH_TOKEN,), timedelta(minutes=10)),
+}
 
 
 @pytest.fixture(scope="module")
@@ -82,10 +131,10 @@ def test_manifest_parses_with_no_warning(manifest: Manifest) -> None:
     assert manifest.warnings() == ()
 
 
-@pytest.mark.parametrize("name", sorted(READ_ACTIONS))
-def test_read_action_runs_its_git_words(manifest: Manifest, name: str) -> None:
-    """Each read-only action runs git-cage with its git words and parameters."""
-    argv, parameters = READ_ACTIONS[name]
+@pytest.mark.parametrize("name", sorted(COMMAND_ACTIONS))
+def test_command_action_runs_its_git_words(manifest: Manifest, name: str) -> None:
+    """Each command action runs git-cage with its git words and parameters."""
+    argv, parameters = COMMAND_ACTIONS[name]
     action = manifest.actions[name]
 
     assert isinstance(action, CommandAction)
@@ -102,11 +151,21 @@ def test_read_action_takes_no_credential_and_a_minute(
     assert (action.credentials, action.timeout) == ((), timedelta(seconds=60))
 
 
-@pytest.mark.parametrize("name", sorted(READ_ACTIONS))
-def test_read_action_requires_repo_and_its_own_parameter(
+@pytest.mark.parametrize("name", sorted(CHANGE_LIMITS))
+def test_change_action_declares_its_credential_and_timeout(
     manifest: Manifest, name: str
 ) -> None:
-    """Only repo, and the ref, file, or key some actions take, are required."""
+    """Actions that reach a remote declare GH_TOKEN; LFS transfers take ten minutes."""
+    action = manifest.actions[name]
+
+    assert (action.credentials, action.timeout) == CHANGE_LIMITS[name]
+
+
+@pytest.mark.parametrize("name", sorted(COMMAND_ACTIONS))
+def test_command_action_requires_repo_and_its_own_parameter(
+    manifest: Manifest, name: str
+) -> None:
+    """Only repo, and the one parameter some actions need, are required."""
     required = _required(manifest.actions[name])
 
     assert required == {"repo"} | REQUIRED_BEYOND_REPO.get(name, set())
@@ -222,3 +281,86 @@ def test_log_refuses_a_max_count_below_one(manifest: Manifest) -> None:
     """The max_count of log must be at least 1."""
     with pytest.raises(InputError):
         validate_input(manifest.actions["log"], {"repo": "/repo", "max_count": 0})
+
+
+def test_merge_states_branch_as_a_non_empty_string(manifest: Manifest) -> None:
+    """The branch of merge is a non-empty string."""
+    assert _properties(manifest.actions["merge"]) == {
+        "repo": REPO_PROPERTY,
+        "branch": {"type": "string", "minLength": 1},
+    }
+
+
+def test_worktree_states_each_parameter(manifest: Manifest) -> None:
+    """The worktree action is add, list, or remove; path and branch are strings."""
+    assert _properties(manifest.actions["worktree"]) == {
+        "repo": REPO_PROPERTY,
+        "action": {"type": "string", "minLength": 1, "enum": ["add", "list", "remove"]},
+        "path": {"type": "string", "minLength": 1},
+        "branch": {"type": "string", "minLength": 1},
+    }
+
+
+def test_stash_states_each_parameter(manifest: Manifest) -> None:
+    """The stash action is one of git-sidecar's five; its index is not negative."""
+    assert _properties(manifest.actions["stash"]) == {
+        "repo": REPO_PROPERTY,
+        "action": {
+            "type": "string",
+            "minLength": 1,
+            "enum": ["push", "pop", "apply", "drop", "show"],
+        },
+        "message": {"type": "string", "minLength": 1},
+        "index": {"type": "integer", "minimum": 0},
+    }
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("worktree", {"action": "prune"}),
+        ("stash", {"action": "clear"}),
+        ("stash", {"action": "show", "index": -1}),
+        ("merge", {}),
+    ],
+)
+def test_change_action_refuses_an_input_outside_its_schema(
+    manifest: Manifest, name: str, arguments: dict[str, object]
+) -> None:
+    """An unknown sub-action, a negative index, or a missing branch is refused."""
+    with pytest.raises(InputError):
+        validate_input(manifest.actions[name], {"repo": "/repo", **arguments})
+
+
+def test_stash_places_its_index_after_its_action(manifest: Manifest) -> None:
+    """A stash show with index 0 forms 'show 0', which git reads as stash@{0}."""
+    arguments = {"repo": "/repo", "action": "show", "index": 0}
+
+    argv = form_argv(manifest.actions["stash"], arguments)
+
+    assert argv == ("git-cage", "stash", "--repo", "/repo", "show", "0")
+
+
+def test_worktree_add_places_the_path_then_the_branch_flag(
+    manifest: Manifest,
+) -> None:
+    """A worktree add forms 'add <path> -b <branch>', which git's parser takes."""
+    arguments = {
+        "repo": "/repo",
+        "action": "add",
+        "path": "/root/wt",
+        "branch": "task/wt",
+    }
+
+    argv = form_argv(manifest.actions["worktree"], arguments)
+
+    assert argv == (
+        "git-cage",
+        "worktree",
+        "--repo",
+        "/repo",
+        "add",
+        "/root/wt",
+        "-b",
+        "task/wt",
+    )
