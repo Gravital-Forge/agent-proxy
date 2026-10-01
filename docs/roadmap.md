@@ -82,8 +82,9 @@ decisions each entry builds on.
    swap the root, or a parent of it, for a link. The daemon then mounts whatever the link names that
    the service user can read, the credential store included. An action must never run against a
    directory other than the one the runner checked. The mechanism verifies each root mount's device
-   and inode inside the cage, against the pair the runner recorded, before the action runs. It adds
-   no privilege to the instance or the cage.
+   and inode inside the cage, against the pair the runner recorded, before the action runs. The
+   verifier is the static Go executable the design's Repository layout names, and the cage sees that
+   one file, read-only. It adds no privilege to the instance or the cage.
 
    **Done when**, on the agent's daemon, a test that swaps a root, and one that swaps a parent, for
    a link to an outside directory between the check and the start finds that the action's code never
