@@ -1,4 +1,5 @@
 import secrets
+import time
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from agent_proxy.plugins import Manifest
 from agent_proxy.results import new_call_id
 from agent_proxy.runner import CageCall, CageLimiter, CageRunner, Outcome
 from docker import DockerClient
+from docker.models.containers import Container
 from harness import RunAction
 
 TEST_LABELS = {"agent-proxy.test": "1"}
@@ -19,6 +21,10 @@ PLUGIN_DIR = Path(__file__).parents[2]
 PLUGIN_IMAGE_TAG = "apx-github-plugin:it"
 STUB_DIR = Path(__file__).parents[1] / "stub"
 STUB_IMAGE_TAG = "apx-github-stub:it"
+FAKE_API_DIR = Path(__file__).parents[1] / "fake-api"
+FAKE_API_IMAGE_TAG = "apx-github-fake-api:it"
+FAKE_API_ALIAS = "api.github.com"
+FAKE_API_START_SECONDS = 30
 VERIFIER_DIR = Path(__file__).parents[4] / "core" / "verifier"
 VERIFIER_BUILD_TAG = "apx-github-verifier-build:it"
 VERIFIER_IMAGE_TAG = "apx-github-verifier:it"
@@ -111,6 +117,33 @@ def stub_image(docker_client: DockerClient, plugin_manifest: Manifest) -> Iterat
 
 
 @pytest.fixture(scope="session")
+def plugin_image(plugin_manifest: Manifest) -> str:
+    """The tag of the plugin image, whose gh is the pinned one from apk."""
+    return PLUGIN_IMAGE_TAG
+
+
+@pytest.fixture(scope="session")
+def fake_api_image(docker_client: DockerClient) -> Iterator[str]:
+    """The tag of the fake api.github.com image, built from tests/fake-api/.
+
+    It builds without the cache, so its certificates, which last one day, are
+    always new.
+    """
+    image, _ = docker_client.images.build(
+        path=str(FAKE_API_DIR),
+        tag=FAKE_API_IMAGE_TAG,
+        labels=TEST_LABELS,
+        nocache=True,
+        rm=True,
+        forcerm=True,
+    )
+    try:
+        yield FAKE_API_IMAGE_TAG
+    finally:
+        docker_client.images.remove(image.id, force=True)
+
+
+@pytest.fixture(scope="session")
 def cage_network(docker_client: DockerClient) -> Iterator[str]:
     """The name of the internal network every cage in these tests joins."""
     network = docker_client.networks.create(
@@ -164,3 +197,64 @@ def run_action(
         )
 
     return run
+
+
+@pytest.fixture
+def fake_api_network(docker_client: DockerClient, fake_api_image: str) -> Iterator[str]:
+    """The name of an internal network on which the fake answers as api.github.com."""
+    network = docker_client.networks.create(
+        f"apx-github-fake-{secrets.token_hex(4)}", internal=True, labels=TEST_LABELS
+    )
+    try:
+        container = docker_client.containers.run(
+            fake_api_image,
+            detach=True,
+            network=network.name,
+            networking_config={
+                network.name: docker_client.api.create_endpoint_config(
+                    aliases=[FAKE_API_ALIAS]
+                )
+            },
+            labels=TEST_LABELS,
+        )
+        try:
+            _wait_for_serving(container)
+            yield network.name
+        finally:
+            container.remove(force=True)
+    finally:
+        network.remove()
+
+
+@pytest.fixture
+def fake_api_ca(
+    docker_client: DockerClient, fake_api_image: str, tmp_path: Path
+) -> Path:
+    """The fake's test CA certificate, copied from its image to tmp_path/pki/ca.crt."""
+    certificate = docker_client.containers.run(
+        fake_api_image,
+        ["cat", "/pki/ca.crt"],
+        network_mode="none",
+        labels=TEST_LABELS,
+        remove=True,
+    )
+    ca_file = tmp_path / "pki" / "ca.crt"
+    ca_file.parent.mkdir()
+    ca_file.write_bytes(certificate)
+    return ca_file
+
+
+def _wait_for_serving(container: Container) -> None:
+    """Return once the fake's log holds serving.
+
+    Raises:
+        TimeoutError: serving did not appear within FAKE_API_START_SECONDS.
+    """
+    deadline = time.monotonic() + FAKE_API_START_SECONDS
+    while b"serving" not in container.logs():
+        if time.monotonic() > deadline:
+            raise TimeoutError(
+                f"the fake api printed no serving in {FAKE_API_START_SECONDS}s; "
+                f"its log: {container.logs()!r}"
+            )
+        time.sleep(0.1)
