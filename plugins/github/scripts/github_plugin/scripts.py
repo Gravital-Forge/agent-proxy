@@ -235,7 +235,7 @@ ACTIONS: Mapping[str, Callable[..., ScriptResult]] = {
 }
 
 
-def run_script(name: str, stdin: bytes, environ: Mapping[str, str]) -> ScriptResult:
+def run_script(name: str, stdin: bytes) -> ScriptResult:
     """Run the script action name on the JSON input stdin holds.
 
     A refusal is returned as the result: exit code 2, no stdout, and the

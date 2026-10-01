@@ -264,7 +264,7 @@ def test_run_script_runs_the_named_action_on_its_json_input() -> None:
     """The input on stdin is decoded and given to the action of that name."""
     stdin = json.dumps({"repo": "o/n", "pr_number": 5}).encode()
 
-    result = scripts.run_script("pr_close", stdin, {})
+    result = scripts.run_script("pr_close", stdin)
 
     assert result == _echo("pr", "close", "5", "--repo", "o/n")
 
@@ -273,7 +273,7 @@ def test_run_script_returns_a_refusal_as_a_result() -> None:
     """A refusal is exit code 2, no stdout, and the prefixed reason on stderr."""
     stdin = json.dumps({"repo": "o/n", "pr_number": 9}).encode()
 
-    result = scripts.run_script("pr_fetch", stdin, {})
+    result = scripts.run_script("pr_fetch", stdin)
 
     assert result == {
         "exit_code": 2,

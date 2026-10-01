@@ -1,7 +1,6 @@
 """The image's one executable, which acts by the name it runs under."""
 
 import json
-import os
 import sys
 from collections.abc import Sequence
 from pathlib import PurePosixPath
@@ -18,7 +17,7 @@ def main(argv: Sequence[str]) -> int:
     """
     name = PurePosixPath(argv[0]).name
     if name in scripts.ACTIONS:
-        result = scripts.run_script(name, sys.stdin.buffer.read(), os.environ)
+        result = scripts.run_script(name, sys.stdin.buffer.read())
         print(json.dumps(result, separators=(",", ":")))
         return 0
     print(f"{scripts.REFUSAL_PREFIX}no action is named {name!r}", file=sys.stderr)
