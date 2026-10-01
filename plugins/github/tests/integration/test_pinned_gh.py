@@ -19,7 +19,8 @@ def test_pr_create_with_a_head_and_no_checkout_fails_at_the_network(
 
     The fake answers gh's first request, the repository query, so gh passes
     the steps that need the current branch and git, then fails at its next
-    request, which the fake answers with 404.
+    request, the check for an existing pull request, which the fake answers
+    with 404.
     """
     arguments = {
         "repo": "o/n",
@@ -43,6 +44,7 @@ def test_pr_create_with_a_head_and_no_checkout_fails_at_the_network(
     stderr = outcome.content["stderr"]
     assert outcome.content["exit_code"] != 0
     assert "api.github.com" in stderr
+    assert "error checking for existing pull request" in stderr
     assert "could not determine the current branch" not in stderr
     assert "unable to find git executable" not in stderr
 
