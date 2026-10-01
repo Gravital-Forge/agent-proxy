@@ -113,13 +113,17 @@ decisions each entry builds on.
    the state directory, the agent tree, and the overflow directory at the host paths the daemon
    resolves, because the runner bind-mounts a file credential from the store and each egress proxy's
    config directory from under the state directory. The runbook says `agent_tree` names its resolved
-   path, because the runner refuses a root or overflow directory under a symbolic link.
+   path, because the runner refuses a root or overflow directory under a symbolic link. Provisioning
+   builds `core/verifier/` into `agent-proxy-verifier:1` on the instance's daemon before the
+   instance starts, because an image mount never pulls, and the runbook says so.
    `docs/architecture.md` describes `serve` as the instance image's process under its own heading,
    apart from "The admin command", whose verbs the admin runs through `docker exec`.
 
    **Done when** `shellcheck` passes both scripts; the instance image builds; started on the agent's
    own daemon with the sample config and that daemon's socket, the instance serves an MCP client
    that runs a git-plugin action on a fixture repository and a github-plugin action against a
-   stubbed `gh`, each with its audit line; an egress proxy the instance starts reads the config the
-   instance wrote, and a cage reads a file credential the instance stored, both under the instance's
-   own mapped uid; and the runbook names every acceptance check with the command that runs it.
+   stubbed `gh`, each with its audit line; the git-plugin action's root passes the in-cage root
+   verifier, so the device and inode the runner records inside the instance match the pair the cage
+   sees; an egress proxy the instance starts reads the config the instance wrote, and a cage reads a
+   file credential the instance stored, both under the instance's own mapped uid; and the runbook
+   names every acceptance check with the command that runs it.

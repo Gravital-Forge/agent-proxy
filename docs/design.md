@@ -349,7 +349,8 @@ The `S` checks need no counterpart on the agent's daemon: in a deployment, cages
 - Traverse on the agent's home lets `agentproxy-<agent>` open any world-readable file there by path.
 - A file created with an explicit restrictive mode (for example a mode-preserving copy of a `0644`
   file) is read-only to the other side; the ACL cannot widen it.
-- Every call pays a cage start: a median of about half a second on the agent's daemon (`C2`).
+- Every call pays a cage start: a median of about half a second on the agent's daemon (`C2`), and
+  the in-cage root verifier adds about a tenth of a second more.
 
 ## Decision directives
 
