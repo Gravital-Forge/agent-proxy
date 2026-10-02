@@ -743,6 +743,34 @@ def test_run_gives_the_cage_its_network_s_environment_beside_its_credentials(
     }
 
 
+def test_run_gives_the_cage_its_grant_s_env_beside_its_other_variables(
+    store: CredentialStore,
+) -> None:
+    """The grant's env joins the network's variable, the credentials, and the roots."""
+    store.set("api-token", b"s3cret")
+    grant = Grant(
+        roots=[],
+        domains=[],
+        credentials={"api-token": EnvMount(env="API_TOKEN")},
+        env={"GIT_AUTHOR_NAME": "Agent One"},
+    )
+    network = CageNetwork(
+        name="apx-egress-0123456789abcdef", environment=PROXY_VARIABLE
+    )
+    client = _client()
+
+    _run(
+        client, store, _cage_call(_echo(), {"text": "hi"}, grant=grant, network=network)
+    )
+
+    assert client.containers.create.call_args.kwargs["environment"] == {
+        "HTTPS_PROXY": "http://egress:1080",
+        "API_TOKEN": "s3cret",
+        "AGENT_PROXY_ROOTS": "[]",
+        "GIT_AUTHOR_NAME": "Agent One",
+    }
+
+
 def test_run_gives_the_cage_its_roots_in_grant_order(
     tmp_path: Path, store: CredentialStore
 ) -> None:

@@ -104,9 +104,27 @@ grant of such an action a credential as `GH_TOKEN`.
 
 ### Commit identity
 
-`commit` takes its author and committer from `user.name` and `user.email`. The cage sees no global
-git config of the agent's, so set both in the repository's own config. `commit` refuses when either
-is unset or empty.
+`commit` takes its author and committer from the repository's `user.name` and `user.email`. The cage
+sees no global git config of the agent's. For a value that the repository leaves unset or empty,
+`commit` takes `GIT_AUTHOR_NAME` or `GIT_AUTHOR_EMAIL` from the cage's environment, which the
+grant's `env` sets. The repository's own value wins, and each value resolves on its own. `commit`
+refuses when a value is unset or empty in both places. The author and the committer are always the
+same identity.
+
+A `git.commit` grant that gives every repository under its roots one identity:
+
+```yaml
+git.commit:
+  roots: [{path: /home/agent-01/Projects/example-repo, mode: rw}]
+  domains: []
+  credentials: {}
+  env: {GIT_AUTHOR_NAME: Agent One, GIT_AUTHOR_EMAIL: agent-01@example.com}
+```
+
+`merge` reads no identity itself. git takes a merge commit's author and committer from
+`GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME`, and `GIT_COMMITTER_EMAIL` when they are
+set, and these variables win over the repository's config. So a `git.merge` grant whose `env` sets
+all four makes merge commits as that identity.
 
 ### Hooks
 

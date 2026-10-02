@@ -128,8 +128,9 @@ Inside the cage:
 
 - The root filesystem is read-only. Write scratch files under `/tmp`, a small tmpfs.
 - The environment holds `AGENT_PROXY_ROOTS`: the grant's root paths, in grant order, as a compact
-  JSON array of strings, `[]` for a grant with no roots. A credential cannot take that environment
-  name. The config refuses a grant that gives one.
+  JSON array of strings, `[]` for a grant with no roots. Neither a credential nor a grant's `env`
+  can take that environment name. The config refuses a grant that gives one.
+- The environment also holds each variable that the grant's `env` sets.
 
 A script succeeds when it exits 0 and prints on stdout one JSON object that its `output_schema`
 validates. That stdout must decode as the manifest must, by the rules under "The manifest". The call
@@ -145,8 +146,8 @@ cage", and `docs/architecture.md` gives the network and its proxy under `egress.
   honours that variable. The proxy passes each host the grant names and refuses a host the grant
   does not name.
 - The cage gets no proxy variable for plain HTTP.
-- A credential cannot take the environment name `HTTPS_PROXY`. The config refuses a grant that gives
-  one.
+- Neither a credential nor a grant's `env` can take the environment name `HTTPS_PROXY`. The config
+  refuses a grant that gives one.
 
 ## Checking a manifest
 

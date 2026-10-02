@@ -220,6 +220,7 @@ class Grant(BaseModel):
     domains: list[Domain]
     credentials: dict[Name, EnvMount | FileMount]
     timeout: Timeout = None
+    env: dict[EnvName, str] = Field(default_factory=dict)
 
 
 class Scope(BaseModel):
@@ -331,6 +332,31 @@ def _reserved_env_failures(
             )
 
 
+def _grant_env_failures(
+    where: str,
+    env: Mapping[str, str],
+    credentials: Mapping[str, EnvMount | FileMount],
+) -> Iterator[str]:
+    credential_envs = {
+        mount.env: name
+        for name, mount in credentials.items()
+        if isinstance(mount, EnvMount)
+    }
+    for env_name, value in env.items():
+        if env_name in _RESERVED_ENV_SETTERS:
+            yield (
+                f"{where}.env must not name {env_name!r}, "
+                f"which {_RESERVED_ENV_SETTERS[env_name]} sets"
+            )
+        if env_name in credential_envs:
+            yield (
+                f"{where}.env must not name {env_name!r}, "
+                f"which credential {credential_envs[env_name]!r} takes"
+            )
+        if "\0" in value:
+            yield f"{where}.env.{env_name} must not hold a NUL"
+
+
 def _unknown_credential_failures(
     where: str, credentials: Mapping[str, EnvMount | FileMount], known: Set[str]
 ) -> Iterator[str]:
@@ -382,6 +408,7 @@ class InstanceConfig(BaseModel):
         yield from _duplicate_domain_failures(f"{where}.domains", grant.domains)
         yield from _mount_failures(f"{where}.credentials", grant.credentials)
         yield from _reserved_env_failures(f"{where}.credentials", grant.credentials)
+        yield from _grant_env_failures(where, grant.env, grant.credentials)
         yield from _unknown_credential_failures(
             f"{where}.credentials", grant.credentials, credential_names
         )

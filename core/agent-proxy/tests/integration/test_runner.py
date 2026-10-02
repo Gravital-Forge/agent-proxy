@@ -122,6 +122,7 @@ def _grant(
     *roots: Root,
     credentials: Mapping[str, EnvMount | FileMount] | None = None,
     timeout: str | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> Grant:
     document: dict[str, object] = {
         "roots": list(roots),
@@ -130,6 +131,8 @@ def _grant(
     }
     if timeout is not None:
         document["timeout"] = timeout
+    if env is not None:
+        document["env"] = dict(env)
     return Grant.model_validate(document)
 
 
@@ -306,6 +309,15 @@ def test_a_cage_with_no_roots_reads_an_empty_roots_array(cages: _Cages) -> None:
     outcome = cages.run(_shell('printf %s "$AGENT_PROXY_ROOTS"'), {}, _grant())
 
     assert outcome.content["stdout"] == "[]"
+
+
+def test_the_cage_receives_its_grant_s_env(cages: _Cages) -> None:
+    """A variable the grant's env sets reaches the cage's environment."""
+    grant = _grant(env={"GIT_AUTHOR_NAME": "Agent One"})
+
+    outcome = cages.run(_shell('printf %s "$GIT_AUTHOR_NAME"'), {}, grant)
+
+    assert outcome.content["stdout"] == "Agent One"
 
 
 def test_the_cage_passes_the_hardening_probes(cages: _Cages) -> None:

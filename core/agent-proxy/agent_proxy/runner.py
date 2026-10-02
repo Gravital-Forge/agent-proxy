@@ -496,6 +496,7 @@ def _set_up(call: CageCall, store: CredentialStore, held: ExitStack) -> _CageSet
         environment={
             **roots_environment(call.grant.roots),
             **cage_environment(credentials, store),
+            **call.grant.env,
         },
         mounts=cage_mounts(call.grant.roots, credentials, store),
     )

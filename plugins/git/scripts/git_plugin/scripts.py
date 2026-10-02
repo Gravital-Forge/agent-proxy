@@ -133,18 +133,21 @@ def lfs_untrack(arguments: PatternsInput, roots: Sequence[str]) -> ScriptResult:
 
 
 def commit(arguments: CommitInput, roots: Sequence[str]) -> ScriptResult:
-    """Commit what is staged, as the identity the repository's config names.
+    """Commit what is staged, as the repository's identity or else the grant's.
 
-    A git failure in a check before the commit is returned as the result.
+    The name comes from user.name in the repository's config, or else from
+    GIT_AUTHOR_NAME in the environment, which the grant's env sets. The email
+    comes from user.email, or else from GIT_AUTHOR_EMAIL. A git failure in a
+    check before the commit is returned as the result.
 
     Raises:
-        RefusalError: user.name or user.email is unset or empty, or nothing
-            is staged.
+        RefusalError: the name or the email is unset or empty in both
+            sources, or nothing is staged.
     """
     repo = arguments["repo"]
     try:
-        name = _config_value(repo, roots, "user.name")
-        email = _config_value(repo, roots, "user.email")
+        name = _identity_value(repo, roots, "user.name", "GIT_AUTHOR_NAME")
+        email = _identity_value(repo, roots, "user.email", "GIT_AUTHOR_EMAIL")
         _require_staged(repo, roots)
     except _GitFailedError as failure:
         return failure.result
@@ -157,19 +160,23 @@ def commit(arguments: CommitInput, roots: Sequence[str]) -> ScriptResult:
     return run_git(repo, roots, ["commit", "-m", arguments["message"]], identity)
 
 
-def _config_value(repo: str, roots: Sequence[str], key: str) -> str:
-    """Return the value of key in repo's config.
+def _identity_value(repo: str, roots: Sequence[str], key: str, env_name: str) -> str:
+    """Return key's value in repo's config, or else env_name's in the environment.
+
+    An empty value counts as unset in both sources.
 
     Raises:
-        RefusalError: key is unset or empty.
+        RefusalError: key and env_name are both unset or empty.
         _GitFailedError: git failed other than by finding key unset.
     """
     result = run_git(repo, roots, ["config", "--get", key])
     if result["exit_code"] not in (0, CONFIG_UNSET_EXIT):
         raise _GitFailedError(result)
-    value = result["stdout"].strip()
+    value = result["stdout"].strip() or os.environ.get(env_name, "")
     if not value:
-        raise cage.RefusalError(f"git config {key} is not set")
+        raise cage.RefusalError(
+            f"git config {key} is not set, nor is {env_name} in the grant's env"
+        )
     return value
 
 

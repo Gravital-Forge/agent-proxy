@@ -2,8 +2,8 @@
 
 agent-proxy is a per-agent MCP proxy. An agent calls a tool with a token minted for one scope, and
 the proxy runs the scoped, credentialed action in a short-lived container. That container holds only
-the files, the domains, and the credentials the scope grants the action, so the agent never holds a
-credential.
+what the scope grants the action: files, domains, credentials, and plain environment variables. The
+credentials stay in the container, so the agent never holds one.
 
 `task/poc` carries the proof of concept, and `main` carries what the operator has merged.
 

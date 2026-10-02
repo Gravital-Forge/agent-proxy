@@ -12,6 +12,8 @@ from agent_proxy.runner import Outcome
 
 FIXTURE_NAME = "Fixture"
 FIXTURE_EMAIL = "fixture@example.invalid"
+AGENT_NAME = "Agent One"
+AGENT_EMAIL = "agent-01@example.com"
 _ISOLATED_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 
 type GrantedCredentials = Mapping[str, tuple[EnvMount | FileMount, bytes]]
@@ -24,8 +26,9 @@ class RunAction(Protocol):
         arguments: Mapping[str, object],
         roots: Sequence[Path],
         credentials: GrantedCredentials | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> Outcome:
-        """Run the named action in a cage whose grant gives each root read-write."""
+        """Run the named action in a cage whose grant has roots read-write and env."""
 
 
 @dataclass(frozen=True)

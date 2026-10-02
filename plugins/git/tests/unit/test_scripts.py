@@ -11,13 +11,23 @@ from git_plugin.cage import RefusalError
 
 NAME = "Fixture"
 EMAIL = "fixture@example.invalid"
+AGENT_NAME = "Agent One"
+AGENT_EMAIL = "agent-01@example.com"
+NO_NAME = (
+    r"^git config user\.name is not set, nor is GIT_AUTHOR_NAME in the grant's env$"
+)
+NO_EMAIL = (
+    r"^git config user\.email is not set, nor is GIT_AUTHOR_EMAIL in the grant's env$"
+)
 
 
 @pytest.fixture(autouse=True)
 def _isolate_git(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the host's global and system git config away from every git run."""
+    """Keep the host's git config and identity variables away from every git run."""
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for variable in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"):
+        monkeypatch.delenv(variable, raising=False)
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -276,11 +286,46 @@ def test_commit_records_the_staged_change_as_the_repos_identity(
     assert logged == f"{NAME} <{EMAIL}>|{NAME} <{EMAIL}>|second\n"
 
 
+def test_commit_takes_the_environments_identity_when_the_repo_has_none(
+    repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no identity in the config, author and committer are the environment's."""
+    _git(repo, "config", "--unset", "user.name")
+    _git(repo, "config", "--unset", "user.email")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", AGENT_NAME)
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", AGENT_EMAIL)
+    (repo / "a.txt").write_text("two\n")
+    _git(repo, "add", "a.txt")
+
+    result = scripts.commit({"repo": str(repo), "message": "second"}, roots)
+
+    assert result["exit_code"] == 0
+    logged = _git(repo, "log", "-1", "--format=%an <%ae>|%cn <%ce>")
+    assert logged == f"{AGENT_NAME} <{AGENT_EMAIL}>|{AGENT_NAME} <{AGENT_EMAIL}>\n"
+
+
+def test_commit_resolves_the_name_and_the_email_each_on_its_own(
+    repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A repository with only user.name keeps it and takes the environment's email."""
+    _git(repo, "config", "--unset", "user.email")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", AGENT_NAME)
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", AGENT_EMAIL)
+    (repo / "a.txt").write_text("two\n")
+    _git(repo, "add", "a.txt")
+
+    result = scripts.commit({"repo": str(repo), "message": "second"}, roots)
+
+    assert result["exit_code"] == 0
+    logged = _git(repo, "log", "-1", "--format=%an <%ae>|%cn <%ce>")
+    assert logged == f"{NAME} <{AGENT_EMAIL}>|{NAME} <{AGENT_EMAIL}>\n"
+
+
 def test_commit_refuses_without_user_name(repo: Path, roots: list[str]) -> None:
-    """An unset user.name is refused before anything is committed."""
+    """An unset user.name, with no GIT_AUTHOR_NAME, is refused before a commit."""
     _git(repo, "config", "--unset", "user.name")
 
-    with pytest.raises(RefusalError, match=r"^git config user\.name is not set$"):
+    with pytest.raises(RefusalError, match=NO_NAME):
         scripts.commit({"repo": str(repo), "message": "m"}, roots)
 
 
@@ -288,15 +333,26 @@ def test_commit_refuses_an_empty_user_name(repo: Path, roots: list[str]) -> None
     """An empty user.name counts as unset."""
     _git(repo, "config", "user.name", "")
 
-    with pytest.raises(RefusalError, match=r"^git config user\.name is not set$"):
+    with pytest.raises(RefusalError, match=NO_NAME):
+        scripts.commit({"repo": str(repo), "message": "m"}, roots)
+
+
+def test_commit_refuses_an_empty_git_author_name(
+    repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An empty GIT_AUTHOR_NAME counts as unset."""
+    _git(repo, "config", "--unset", "user.name")
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "")
+
+    with pytest.raises(RefusalError, match=NO_NAME):
         scripts.commit({"repo": str(repo), "message": "m"}, roots)
 
 
 def test_commit_refuses_without_user_email(repo: Path, roots: list[str]) -> None:
-    """An unset user.email is refused once user.name is set."""
+    """An unset user.email, with no GIT_AUTHOR_EMAIL, is refused once a name is set."""
     _git(repo, "config", "--unset", "user.email")
 
-    with pytest.raises(RefusalError, match=r"^git config user\.email is not set$"):
+    with pytest.raises(RefusalError, match=NO_EMAIL):
         scripts.commit({"repo": str(repo), "message": "m"}, roots)
 
 
