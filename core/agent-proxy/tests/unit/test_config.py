@@ -151,6 +151,22 @@ def test_load_config_leaves_an_omitted_timeout_unset(tmp_path: Path) -> None:
     assert config.scopes["dev"].grants["git.clone"].timeout is None
 
 
+def test_load_config_returns_a_grant_s_env(tmp_path: Path) -> None:
+    """A grant's env loads as the file states it."""
+    config = _load(tmp_path, _with_grant(env={"GIT_AUTHOR_NAME": "Agent One"}))
+
+    assert config.scopes["dev"].grants["git.clone"].env == {
+        "GIT_AUTHOR_NAME": "Agent One"
+    }
+
+
+def test_load_config_leaves_an_omitted_env_empty(tmp_path: Path) -> None:
+    """A grant without env loads with an empty env."""
+    config = _load(tmp_path, _config())
+
+    assert config.scopes["dev"].grants["git.clone"].env == {}
+
+
 def test_load_config_accepts_a_root_beside_the_overflow_dir(tmp_path: Path) -> None:
     """A root whose path starts with overflow_dir's text, but lies beside it, loads."""
     root = {"path": f"{OVERFLOW_DIR}-archive", "mode": "rw"}
@@ -347,6 +363,63 @@ def test_load_config_refuses_an_invalid_config(
     )
 
 
+ENV_REFUSALS = [
+    pytest.param(
+        {"git_author": "Agent One"},
+        "scopes.dev.grants.git.clone.env.git_author.[key]: String should match "
+        "pattern '^[A-Z_][A-Z0-9_]*$', got 'git_author'",
+        id="grant-env-name-lowercase",
+    ),
+    pytest.param(
+        {"1NAME": "Agent One"},
+        "scopes.dev.grants.git.clone.env.1NAME.[key]: String should match "
+        "pattern '^[A-Z_][A-Z0-9_]*$', got '1NAME'",
+        id="grant-env-name-leading-digit",
+    ),
+    pytest.param(
+        {"GIT_AUTHOR_NAME": 123},
+        "scopes.dev.grants.git.clone.env.GIT_AUTHOR_NAME: "
+        "Input should be a valid string, got 123",
+        id="grant-env-value-number",
+    ),
+    pytest.param(
+        {"HTTPS_PROXY": "http://elsewhere:1080"},
+        "scopes.dev.grants.git.clone.env must not name 'HTTPS_PROXY', "
+        "which the egress proxy sets",
+        id="grant-env-https-proxy",
+    ),
+    pytest.param(
+        {"AGENT_PROXY_ROOTS": "[]"},
+        "scopes.dev.grants.git.clone.env must not name 'AGENT_PROXY_ROOTS', "
+        "which the core sets",
+        id="grant-env-agent-proxy-roots",
+    ),
+    pytest.param(
+        {"GH_TOKEN": "not-a-secret"},
+        "scopes.dev.grants.git.clone.env must not name 'GH_TOKEN', "
+        "which credential 'gh-token' takes",
+        id="grant-env-credential-env",
+    ),
+    pytest.param(
+        {"GIT_AUTHOR_NAME": "Agent\x00One"},
+        "scopes.dev.grants.git.clone.env.GIT_AUTHOR_NAME must not hold a NUL",
+        id="grant-env-value-nul",
+    ),
+]
+
+
+@pytest.mark.parametrize(("env", "expected"), ENV_REFUSALS)
+def test_load_config_refuses_a_bad_grant_env(
+    tmp_path: Path, env: dict[str, object], expected: str
+) -> None:
+    """A bad name or value in a grant's env is one failure, naming it and the file."""
+    error = _refusal(tmp_path, _with_grant(env=env))
+
+    assert error.errors == (
+        f"config file {str(tmp_path / 'config.yaml')!r}: {expected}",
+    )
+
+
 INSTANCE_FIELD_REFUSALS = [
     pytest.param(
         _config(overflow_dir=OMIT),
@@ -525,6 +598,23 @@ def test_load_config_reports_every_rule_failure_together(tmp_path: Path) -> None
     assert len(error.errors) == 2
     assert any("'/srv/other'" in message for message in error.errors)
     assert any("'npm-token'" in message for message in error.errors)
+
+
+def test_load_config_reports_an_env_failure_beside_the_other_rule_failures(
+    tmp_path: Path,
+) -> None:
+    """A reserved env name and a missing credential are both reported."""
+    error = _refusal(
+        tmp_path,
+        _with_grant(
+            credentials={"npm-token": {"env": "NPM_TOKEN"}},
+            env={"HTTPS_PROXY": "http://elsewhere:1080"},
+        ),
+    )
+
+    assert len(error.errors) == 2
+    assert any("env must not name 'HTTPS_PROXY'" in m for m in error.errors)
+    assert any("'npm-token'" in m for m in error.errors)
 
 
 def test_load_config_names_a_domain_named_three_times_once(tmp_path: Path) -> None:
