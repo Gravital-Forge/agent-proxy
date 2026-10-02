@@ -267,9 +267,9 @@ and returns an `Outcome`. It refuses a bad call before it takes a slot under the
    order as a compact JSON array. `cage_environment` reads each credential the grant gives as an
    environment variable. The grant's `env` adds each of its pairs as given. `cage_mounts` binds each
    root at its own path with the grant's mode, then binds each credential the grant gives as a file,
-   read-only, from its file in the credential store. A credential that is not stored, or an
-   environment value that is not UTF-8 or holds a NUL, raises `CredentialError`. `_create` adds one
-   more mount to these: the verifier image, read-only, at `VERIFIER_MOUNT`.
+   read-only, from its file in the credential store. A credential that is not stored, or a
+   credential's environment value that is not UTF-8 or holds a NUL, raises `CredentialError`.
+   `_create` adds one more mount to these: the verifier image, read-only, at `VERIFIER_MOUNT`.
 
 The run then waits for a slot, creates the cage, starts it, and removes it by force whatever
 happens. The slot stays taken until the cage is removed. The cage's entrypoint is the verifier's

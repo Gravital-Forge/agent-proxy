@@ -112,9 +112,10 @@ returns only the actions the token's scope grants. MCP tool names are `<plugin>_
   states `roots`, `domains`, and `credentials` explicitly, empty values included — an omitted field
   is an error; every credential a grant names exists in the credential store; every root lies inside
   the instance's agent tree; every plugin image is present, pulled at reload by digest; every `env`
-  name is a valid environment variable name of upper-case letters, digits, and `_`, and is neither
-  `HTTPS_PROXY`, `AGENT_PROXY_ROOTS`, nor an env name that a credential of the same grant takes; no
-  `env` value holds a NUL; every action declaring pass-through `args` is reported as a warning.
+  name begins with an upper-case letter or `_`, holds only upper-case letters, digits, and `_`, and
+  is neither `HTTPS_PROXY`, `AGENT_PROXY_ROOTS`, nor an env name that a credential of the same grant
+  takes; no `env` value holds a NUL; every action declaring pass-through `args` is reported as a
+  warning.
 - There are no scope-level defaults and no layering between files. Repetition across grants and
   across agents is accepted.
 
