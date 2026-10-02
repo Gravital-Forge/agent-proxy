@@ -3,7 +3,14 @@ from pathlib import Path
 
 import pytest
 from agent_proxy.runner import InputError
-from harness import OtherUidRepo, RunAction, host_git, stdout_of
+from harness import (
+    AGENT_EMAIL,
+    AGENT_NAME,
+    OtherUidRepo,
+    RunAction,
+    host_git,
+    stdout_of,
+)
 
 LFS_POINTER_HEADER = "version https://git-lfs.github.com/spec/v1"
 NOTHING_STAGED = "git plugin refused: nothing staged; stage changes with git add\n"
@@ -36,6 +43,26 @@ def test_add_then_commit_on_a_repository_another_uid_owns(
 
     stdout_of(run_action("add", {"repo": repo, "files": ["b.txt"]}, roots))
     stdout_of(run_action("commit", {"repo": repo, "message": "add b"}, roots))
+
+
+def test_commit_takes_the_grants_identity_when_the_repo_has_none(
+    run_action: RunAction, host_repo: Path
+) -> None:
+    """With no identity in the repository, commit takes the one the grant's env sets."""
+    repo = str(host_repo)
+    roots = [host_repo.parent]
+    host_git(host_repo, "config", "--unset", "user.name")
+    host_git(host_repo, "config", "--unset", "user.email")
+    (host_repo / "b.txt").write_text("new\n")
+    identity = {"GIT_AUTHOR_NAME": AGENT_NAME, "GIT_AUTHOR_EMAIL": AGENT_EMAIL}
+
+    stdout_of(run_action("add", {"repo": repo, "files": ["b.txt"]}, roots))
+    stdout_of(
+        run_action("commit", {"repo": repo, "message": "add b"}, roots, env=identity)
+    )
+
+    logged = host_git(host_repo, "log", "-1", "--format=%an <%ae>|%cn <%ce>")
+    assert logged == f"{AGENT_NAME} <{AGENT_EMAIL}>|{AGENT_NAME} <{AGENT_EMAIL}>\n"
 
 
 def test_rm_removes_a_tracked_file_from_the_index(

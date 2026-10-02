@@ -154,6 +154,7 @@ def run_action(
         arguments: Mapping[str, object],
         roots: Sequence[Path],
         credentials: GrantedCredentials | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> Outcome:
         mounts: dict[str, EnvMount | FileMount] = {}
         for credential_name, (mount, value) in (credentials or {}).items():
@@ -164,6 +165,7 @@ def run_action(
                 "roots": [Root(path=str(root), mode="rw") for root in roots],
                 "domains": [],
                 "credentials": mounts,
+                "env": dict(env or {}),
             }
         )
         return cage_runner.run(

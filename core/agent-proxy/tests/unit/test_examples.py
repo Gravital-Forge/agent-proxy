@@ -33,6 +33,16 @@ def test_example_github_grants_name_only_the_api_host() -> None:
     }
 
 
+def test_example_commit_grant_sets_the_agents_identity() -> None:
+    """The example's git.commit grant gives its cages the placeholder's identity."""
+    config = load_config(EXAMPLE_CONFIG, CREDENTIAL_NAMES)
+
+    assert config.scopes["dev-agent"].grants["git.commit"].env == {
+        "GIT_AUTHOR_NAME": "Agent One",
+        "GIT_AUTHOR_EMAIL": "agent-01@example.com",
+    }
+
+
 def test_example_config_needs_the_github_token_credential() -> None:
     """With an empty credential store, the example is refused for github-token."""
     with pytest.raises(

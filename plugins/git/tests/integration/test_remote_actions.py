@@ -2,7 +2,7 @@ import hashlib
 
 from agent_proxy.config import EnvMount
 from docker.models.containers import Container
-from harness import RemotePair, RunAction, host_git, stdout_of
+from harness import AGENT_EMAIL, AGENT_NAME, RemotePair, RunAction, host_git, stdout_of
 
 AUTH_URL = "http://auth:8080/repo.git"
 
@@ -55,6 +55,41 @@ def test_merge_merges_a_task_branch_into_main(
 
     stdout_of(outcome)
     assert host_git(work, "rev-parse", "main") == host_git(work, "rev-parse", "task/m")
+
+
+def test_merge_takes_its_identity_from_the_grants_env(
+    run_action: RunAction, remote_pair: RemotePair
+) -> None:
+    """A merge commit in a repository with no identity carries the grant env's."""
+    work = remote_pair.work
+    host_git(work, "checkout", "-q", "-b", "task/m")
+    (work / "m.txt").write_text("merged\n")
+    host_git(work, "add", "m.txt")
+    host_git(work, "commit", "-q", "-m", "on task/m")
+    host_git(work, "checkout", "-q", "main")
+    (work / "a.txt").write_text("two\n")
+    host_git(work, "commit", "-q", "-am", "on main")
+    host_git(work, "config", "--unset", "user.name")
+    host_git(work, "config", "--unset", "user.email")
+    identity = {
+        "GIT_AUTHOR_NAME": AGENT_NAME,
+        "GIT_AUTHOR_EMAIL": AGENT_EMAIL,
+        "GIT_COMMITTER_NAME": AGENT_NAME,
+        "GIT_COMMITTER_EMAIL": AGENT_EMAIL,
+    }
+
+    outcome = run_action(
+        "merge",
+        {"repo": str(work), "branch": "task/m"},
+        [remote_pair.root],
+        env=identity,
+    )
+
+    stdout_of(outcome)
+    logged = host_git(work, "log", "-1", "--format=%p|%an <%ae>|%cn <%ce>", "main")
+    parents, author, committer = logged.rstrip("\n").split("|")
+    assert len(parents.split()) == 2
+    assert author == committer == f"{AGENT_NAME} <{AGENT_EMAIL}>"
 
 
 def test_worktree_adds_lists_and_removes_a_worktree(

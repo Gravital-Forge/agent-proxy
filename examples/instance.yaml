@@ -32,6 +32,7 @@ scopes:
         roots: [{path: /home/agent-01/Projects/example-repo, mode: rw}]
         domains: []
         credentials: {}
+        env: {GIT_AUTHOR_NAME: Agent One, GIT_AUTHOR_EMAIL: agent-01@example.com}
       git.push:
         roots: [{path: /home/agent-01/Projects/example-repo, mode: rw}]
         domains: [github.com]

@@ -152,13 +152,15 @@ def test_main_refuses_a_name_with_no_action(
 
 
 def test_a_script_link_prints_its_result_as_compact_json(
-    tmp_path: Path, repo: Path
+    tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A link named for a script action prints one JSON line and exits 0.
 
-    The repository has no identity, so commit is refused, and the refusal is
-    the printed result.
+    The repository and the environment hold no identity, so commit is refused,
+    and the refusal is the printed result.
     """
+    for variable in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"):
+        monkeypatch.delenv(variable, raising=False)
     link = tmp_path / "bin" / "commit"
     link.parent.mkdir()
     link.symlink_to(ENTRY)
@@ -169,7 +171,8 @@ def test_a_script_link_prints_its_result_as_compact_json(
     assert (completed.returncode, completed.stdout) == (
         0,
         '{"exit_code":2,"stdout":"","stderr":'
-        '"git plugin refused: git config user.name is not set\\n"}\n',
+        '"git plugin refused: git config user.name is not set, '
+        "nor is GIT_AUTHOR_NAME in the grant's env\\n\"}\n",
     )
 
 

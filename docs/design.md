@@ -66,8 +66,8 @@ These terms carry one meaning each through the plan, the code, and the docs.
 - **Scope** — a named policy in the instance's config file (for example `dev-agent`): the complete
   list of grants a token holding it may use.
 - **Token** — a bearer secret that names exactly one scope. It carries no policy of its own.
-- **Grant** — one entry in a scope: an action, plus that action's roots, domains, credentials, and
-  optional timeout override.
+- **Grant** — one entry in a scope: an action, plus that action's roots, domains, and credentials,
+  an optional timeout override, and an optional `env`.
 - **Action** — one operation a plugin offers, of kind `command` or `script`.
 - **Plugin** — an OCI image, pinned by digest, whose manifest declares its actions.
 - **Manifest** — the JSON a plugin image's `describe` entrypoint prints.
@@ -105,11 +105,16 @@ returns only the actions the token's scope grants. MCP tool names are `<plugin>_
   that fails validation is refused and the running config stays. Calls already running finish under
   the config they started with. Reload starts every egress proxy the new config needs before the
   swap, and removes a proxy no grant names once no cage runs on its network.
+- A grant may set `env`, a map of plain environment variables that every cage under the grant
+  receives. Its values are settings, not secrets: they live in the config file, and the credential
+  store holds none of them.
 - Validation checks: every grant names an action a pinned plugin's manifest declares; every grant
   states `roots`, `domains`, and `credentials` explicitly, empty values included — an omitted field
   is an error; every credential a grant names exists in the credential store; every root lies inside
-  the instance's agent tree; every plugin image is present, pulled at reload by digest; every action
-  declaring pass-through `args` is reported as a warning.
+  the instance's agent tree; every plugin image is present, pulled at reload by digest; every `env`
+  name is a valid environment variable name of upper-case letters, digits, and `_`, and is neither
+  `HTTPS_PROXY`, `AGENT_PROXY_ROOTS`, nor an env name that a credential of the same grant takes; no
+  `env` value holds a NUL; every action declaring pass-through `args` is reported as a warning.
 - There are no scope-level defaults and no layering between files. Repetition across grants and
   across agents is accepted.
 
