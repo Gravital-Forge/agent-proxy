@@ -1,8 +1,18 @@
 import hashlib
 
+import pytest
 from agent_proxy.config import EnvMount
 from docker.models.containers import Container
-from harness import AGENT_EMAIL, AGENT_NAME, RemotePair, RunAction, host_git, stdout_of
+from harness import (
+    AGENT_EMAIL,
+    AGENT_NAME,
+    FIXTURE_EMAIL,
+    FIXTURE_NAME,
+    RemotePair,
+    RunAction,
+    host_git,
+    stdout_of,
+)
 
 AUTH_URL = "http://auth:8080/repo.git"
 
@@ -57,10 +67,15 @@ def test_merge_merges_a_task_branch_into_main(
     assert host_git(work, "rev-parse", "main") == host_git(work, "rev-parse", "task/m")
 
 
+@pytest.mark.parametrize(
+    "repo_has_identity",
+    [False, True],
+    ids=["repo-sets-no-identity", "repo-sets-another-identity"],
+)
 def test_merge_takes_its_identity_from_the_grants_env(
-    run_action: RunAction, remote_pair: RemotePair
+    run_action: RunAction, remote_pair: RemotePair, repo_has_identity: bool
 ) -> None:
-    """A merge commit in a repository with no identity carries the grant env's."""
+    """A merge commit carries the grant env's identity, whatever the repository sets."""
     work = remote_pair.work
     host_git(work, "checkout", "-q", "-b", "task/m")
     (work / "m.txt").write_text("merged\n")
@@ -69,8 +84,12 @@ def test_merge_takes_its_identity_from_the_grants_env(
     host_git(work, "checkout", "-q", "main")
     (work / "a.txt").write_text("two\n")
     host_git(work, "commit", "-q", "-am", "on main")
-    host_git(work, "config", "--unset", "user.name")
-    host_git(work, "config", "--unset", "user.email")
+    if repo_has_identity:
+        assert host_git(work, "config", "user.name").strip() == FIXTURE_NAME
+        assert host_git(work, "config", "user.email").strip() == FIXTURE_EMAIL
+    else:
+        host_git(work, "config", "--unset", "user.name")
+        host_git(work, "config", "--unset", "user.email")
     identity = {
         "GIT_AUTHOR_NAME": AGENT_NAME,
         "GIT_AUTHOR_EMAIL": AGENT_EMAIL,
