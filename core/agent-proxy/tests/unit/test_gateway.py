@@ -1,0 +1,618 @@
+import errno
+import json
+import os
+import re
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import MappingProxyType
+
+import pytest
+from audit_faults import fail_next_write_after_half
+from egress_fakes import RecordingEgress
+
+from agent_proxy.audit import AuditError, AuditRecord, AuditWriter, tail
+from agent_proxy.auth import TokenStore
+from agent_proxy.config import InstanceConfig
+from agent_proxy.egress import cage_network
+from agent_proxy.errors import ProxyError
+from agent_proxy.mcp import (
+    REFUSAL_PREFIX,
+    CallGateway,
+    CallRefusedError,
+    ToolSpec,
+)
+from agent_proxy.plugins import parse_manifest
+from agent_proxy.reload import LiveConfig, Snapshot
+from agent_proxy.results import CALL_ID_PATTERN
+from agent_proxy.runner import CageCall, CageTimeoutError, InputError, Outcome
+
+MINTED_AT = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
+LATER = MINTED_AT + timedelta(minutes=5)
+AGENT_TREE = "/srv/agents/alpha"
+OVERFLOW_DIR = f"{AGENT_TREE}/overflow"
+MAX_CAGES = 3
+TOOLS_IMAGE = "ghcr.io/example/tools@sha256:" + "a" * 64
+OTHER_IMAGE = "ghcr.io/example/other@sha256:" + "b" * 64
+UNKNOWN_TOKEN = "apx_" + "x" * 43
+ECHO_ARGUMENTS = {"text": "hello"}
+TOKEN_REFUSAL = "the bearer token is missing, unknown, revoked, or expired"
+TOKEN_STORE_REFUSAL = "the token store could not be read"
+AUDIT_REFUSAL = re.compile(
+    r"the audit log could not record call [0-9a-f]{32}, so its result is withheld"
+)
+NOT_SQLITE = b"this file is not a SQLite database\n" * 8
+
+TOOLS_MANIFEST = parse_manifest(
+    json.dumps(
+        {
+            "actions": {
+                "echo": {
+                    "kind": "command",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}},
+                        "required": ["text"],
+                        "additionalProperties": False,
+                    },
+                    "credentials": [],
+                    "timeout": "10s",
+                    "argv": ["echo"],
+                    "parameters": [{"name": "text", "as": "positional"}],
+                    "passthrough_args": False,
+                },
+                "count_bytes": {
+                    "kind": "script",
+                    "input_schema": {"type": "object"},
+                    "credentials": [],
+                    "timeout": "10s",
+                    "executable": "/plugin/count-bytes",
+                    "output_schema": {"type": "object"},
+                },
+            }
+        }
+    ).encode()
+)
+
+
+def _grant(domains: list[str]) -> dict[str, object]:
+    return {"roots": [], "domains": domains, "credentials": {}}
+
+
+CONFIG = InstanceConfig.model_validate(
+    {
+        "agent_tree": AGENT_TREE,
+        "overflow_dir": OVERFLOW_DIR,
+        "max_cages": MAX_CAGES,
+        "plugins": {"tools": TOOLS_IMAGE, "other": OTHER_IMAGE},
+        "scopes": {
+            "dev": {
+                "grants": {
+                    "tools.echo": _grant(["example.com"]),
+                    "tools.count_bytes": _grant([]),
+                }
+            },
+            "ops": {"grants": {"other.echo": _grant([])}},
+        },
+    },
+    context={"credential_names": frozenset()},
+)
+SNAPSHOT = Snapshot(
+    config=CONFIG,
+    manifests=MappingProxyType({"tools": TOOLS_MANIFEST, "other": TOOLS_MANIFEST}),
+    warnings=(),
+)
+ECHO_OUTCOME = Outcome(
+    content={"exit_code": 0, "stdout": {"text": "hello\n"}},
+    exit_code=0,
+    duration_ms=42,
+    stdout_bytes=6,
+    stderr_bytes=0,
+    truncated=False,
+)
+FAILED_SCRIPT = Outcome(
+    content={"exit_code": 3, "stderr": {"text": "boom\n"}},
+    exit_code=3,
+    duration_ms=7,
+    stdout_bytes=0,
+    stderr_bytes=5,
+    truncated=False,
+)
+LATCH_RECORD = AuditRecord(
+    timestamp=MINTED_AT,
+    call_id="0" * 32,
+    token_name=None,
+    scope=None,
+    action="tools_echo",
+    arguments={},
+    exit_code=None,
+    duration_ms=0,
+    stdout_bytes=None,
+    stderr_bytes=None,
+    truncated=False,
+    refusal="latch",
+)
+
+
+class Clock:
+    """A settable clock the store and the gateway read."""
+
+    def __init__(self, moment: datetime) -> None:
+        """Start the clock at moment."""
+        self.moment = moment
+
+    def __call__(self) -> datetime:
+        """Return the current moment."""
+        return self.moment
+
+
+class FakeRunner:
+    """A cage runner that records each call and the use held while it runs."""
+
+    def __init__(self, live: LiveConfig) -> None:
+        """Return ECHO_OUTCOME until result is changed."""
+        self.result: Outcome | ProxyError = ECHO_OUTCOME
+        self.calls: list[CageCall] = []
+        self.held: list[tuple[Snapshot, int]] = []
+        self._live = live
+
+    def run(self, call: CageCall) -> Outcome:
+        """Record call and the snapshot in use, then return or raise result."""
+        self.calls.append(call)
+        current = self._live.current
+        self.held.append((current, self._live._uses[id(current)].count))
+        if isinstance(self.result, ProxyError):
+            raise self.result
+        return self.result
+
+
+@dataclass
+class Harness:
+    gateway: CallGateway
+    runner: FakeRunner
+    store: TokenStore
+    clock: Clock
+    live: LiveConfig
+    audit: AuditWriter
+    audit_dir: Path
+    tokens_path: Path
+    token: str
+
+
+@pytest.fixture
+def harness(tmp_path: Path) -> Harness:
+    """Return a gateway over real stores in tmp_path, a dev token, and a fake runner."""
+    clock = Clock(MINTED_AT)
+    tokens_path = tmp_path / "tokens.db"
+    store = TokenStore(tokens_path, now=clock)
+    audit_dir = tmp_path / "audit"
+    audit = AuditWriter(audit_dir)
+    live = LiveConfig(SNAPSHOT, RecordingEgress())
+    runner = FakeRunner(live)
+    return Harness(
+        gateway=CallGateway(store, live, runner, audit, clock),
+        runner=runner,
+        store=store,
+        clock=clock,
+        live=live,
+        audit=audit,
+        audit_dir=audit_dir,
+        tokens_path=tokens_path,
+        token=store.mint("ci-bot", "dev", None),
+    )
+
+
+def _bearer(token: str) -> str:
+    return f"Bearer {token}"
+
+
+def _audit_lines(harness: Harness) -> list[dict[str, object]]:
+    return [json.loads(line) for line in tail(harness.audit_dir, 1000)]
+
+
+def _last_used(harness: Harness) -> datetime | None:
+    [record] = [r for r in harness.store.records() if r.name == "ci-bot"]
+    return record.last_used_at
+
+
+def _refusal(
+    harness: Harness,
+    authorization: str | None,
+    tool: str = "tools_echo",
+) -> str:
+    with pytest.raises(CallRefusedError) as caught:
+        harness.gateway.call(authorization, tool, ECHO_ARGUMENTS)
+    return str(caught.value)
+
+
+def _latch(audit: AuditWriter, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Latch audit by failing one write and its rollback, then restore os."""
+
+    def fail(*args: object) -> int:
+        raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+    with monkeypatch.context() as patch:
+        patch.setattr("agent_proxy.audit.os.write", fail)
+        patch.setattr("agent_proxy.audit.os.ftruncate", fail)
+        with pytest.raises(AuditError):
+            audit.write(LATCH_RECORD)
+    assert audit.available is False
+
+
+def _missing(harness: Harness) -> str | None:
+    return None
+
+
+def _not_bearer(harness: Harness) -> str | None:
+    return f"Basic {harness.token}"
+
+
+def _two_spaces(harness: Harness) -> str | None:
+    return f"Bearer  {harness.token}"
+
+
+def _unknown(harness: Harness) -> str | None:
+    return _bearer(UNKNOWN_TOKEN)
+
+
+def _revoked(harness: Harness) -> str | None:
+    harness.store.revoke("ci-bot")
+    return _bearer(harness.token)
+
+
+def _expired(harness: Harness) -> str | None:
+    token = harness.store.mint("short-bot", "dev", timedelta(minutes=1))
+    harness.clock.moment = MINTED_AT + timedelta(minutes=2)
+    return _bearer(token)
+
+
+BAD_AUTHORIZATIONS = [
+    pytest.param(_missing, id="missing"),
+    pytest.param(_not_bearer, id="not-bearer"),
+    pytest.param(_two_spaces, id="two-spaces"),
+    pytest.param(_unknown, id="unknown"),
+    pytest.param(_revoked, id="revoked"),
+    pytest.param(_expired, id="expired"),
+]
+MakeAuthorization = Callable[[Harness], str | None]
+
+
+def test_the_refusal_prefix_is_fixed() -> None:
+    """A client sees each refusal after this prefix."""
+    assert REFUSAL_PREFIX == "agent-proxy refused: "
+
+
+def test_a_refusal_is_a_proxy_error() -> None:
+    """CallRefusedError subclasses ProxyError."""
+    assert issubclass(CallRefusedError, ProxyError)
+
+
+def test_the_listing_holds_the_scopes_grants_sorted_with_their_schemas(
+    harness: Harness,
+) -> None:
+    """Each grant of the scope lists as plugin_action with its manifest schema."""
+    listed = harness.gateway.list_tools(_bearer(harness.token))
+
+    assert listed == [
+        ToolSpec(
+            "tools_count_bytes", TOOLS_MANIFEST.actions["count_bytes"].input_schema
+        ),
+        ToolSpec("tools_echo", TOOLS_MANIFEST.actions["echo"].input_schema),
+    ]
+
+
+@pytest.mark.parametrize("scheme", ["bearer", "BEARER", "bEaReR"])
+def test_the_bearer_scheme_is_matched_case_insensitively(
+    harness: Harness, scheme: str
+) -> None:
+    """The scheme's case does not matter."""
+    listed = harness.gateway.list_tools(f"{scheme} {harness.token}")
+
+    assert [spec.name for spec in listed] == ["tools_count_bytes", "tools_echo"]
+
+
+@pytest.mark.parametrize("make_authorization", BAD_AUTHORIZATIONS)
+def test_the_listing_is_empty_for_a_token_that_does_not_authenticate(
+    harness: Harness, make_authorization: MakeAuthorization
+) -> None:
+    """A missing, malformed, unknown, revoked, or expired token lists nothing."""
+    assert harness.gateway.list_tools(make_authorization(harness)) == []
+
+
+def test_the_listing_is_empty_for_a_scope_the_config_does_not_define(
+    harness: Harness,
+) -> None:
+    """A token whose scope the snapshot lacks lists nothing."""
+    token = harness.store.mint("ghost-bot", "ghost", None)
+
+    assert harness.gateway.list_tools(_bearer(token)) == []
+
+
+def test_the_listing_is_empty_when_the_token_store_cannot_be_read(
+    harness: Harness,
+) -> None:
+    """A store file overwritten with bytes that are not SQLite lists nothing."""
+    harness.tokens_path.write_bytes(NOT_SQLITE)
+
+    assert harness.gateway.list_tools(_bearer(harness.token)) == []
+
+
+def test_the_listing_leaves_last_used_at_unset(harness: Harness) -> None:
+    """Listing verifies the token and never records its use."""
+    harness.gateway.list_tools(_bearer(harness.token))
+
+    assert _last_used(harness) is None
+
+
+def test_the_listing_writes_no_audit_line(harness: Harness) -> None:
+    """Only a call writes an audit line."""
+    harness.gateway.list_tools(_bearer(harness.token))
+
+    assert _audit_lines(harness) == []
+
+
+@pytest.mark.parametrize("make_authorization", BAD_AUTHORIZATIONS)
+def test_a_token_that_does_not_authenticate_is_refused(
+    harness: Harness, make_authorization: MakeAuthorization
+) -> None:
+    """Every token that does not authenticate gets the one token refusal."""
+    assert _refusal(harness, make_authorization(harness)) == TOKEN_REFUSAL
+    assert harness.runner.calls == []
+
+
+def test_a_token_store_that_cannot_be_read_is_refused(harness: Harness) -> None:
+    """The refusal is fixed and never names the store's file."""
+    harness.tokens_path.write_bytes(NOT_SQLITE)
+
+    assert _refusal(harness, _bearer(harness.token)) == TOKEN_STORE_REFUSAL
+    assert harness.runner.calls == []
+
+
+def test_a_scope_the_config_does_not_define_is_refused(harness: Harness) -> None:
+    """The refusal names the scope."""
+    token = harness.store.mint("ghost-bot", "ghost", None)
+
+    assert _refusal(harness, _bearer(token)) == (
+        "scope 'ghost' is not defined in the config in force"
+    )
+    assert harness.runner.calls == []
+
+
+@pytest.mark.parametrize(
+    "tool",
+    [
+        pytest.param("echo", id="no-underscore"),
+        pytest.param("ghost_echo", id="unknown-plugin"),
+        pytest.param("tools_nope", id="undeclared-action"),
+        pytest.param("other_echo", id="not-granted"),
+    ],
+)
+def test_a_tool_that_names_no_grant_of_the_scope_is_refused(
+    harness: Harness, tool: str
+) -> None:
+    """The refusal names the tool and the scope."""
+    assert _refusal(harness, _bearer(harness.token), tool) == (
+        f"tool {tool!r} is not granted to scope 'dev'"
+    )
+    assert harness.runner.calls == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        CageTimeoutError(
+            "action 'echo' did not finish within its timeout of 10 seconds"
+        ),
+        InputError("$.text: 3 is not of type 'string'"),
+    ],
+)
+def test_a_runner_refusal_surfaces_its_own_text(
+    harness: Harness, error: ProxyError
+) -> None:
+    """Any other ProxyError is refused with its own text."""
+    harness.runner.result = error
+
+    assert _refusal(harness, _bearer(harness.token)) == str(error)
+
+
+def test_a_granted_call_returns_the_outcomes_content(harness: Harness) -> None:
+    """The reply is the outcome's content."""
+    reply = harness.gateway.call(_bearer(harness.token), "tools_echo", ECHO_ARGUMENTS)
+
+    assert reply == ECHO_OUTCOME.content
+
+
+def test_a_granted_call_gives_the_runner_its_cage_call(harness: Harness) -> None:
+    """The cage call carries the ID, image, action, grant, network, and limits."""
+    harness.gateway.call(_bearer(harness.token), "tools_echo", ECHO_ARGUMENTS)
+
+    [call] = harness.runner.calls
+    assert re.fullmatch(CALL_ID_PATTERN, call.call_id)
+    assert call.image == TOOLS_IMAGE
+    assert call.action == TOOLS_MANIFEST.actions["echo"]
+    assert call.grant == CONFIG.scopes["dev"].grants["tools.echo"]
+    assert call.arguments == ECHO_ARGUMENTS
+    assert call.network == cage_network(["example.com"])
+    assert call.overflow_dir == OVERFLOW_DIR
+    assert call.max_cages == MAX_CAGES
+
+
+def test_a_tool_name_splits_at_its_first_underscore(harness: Harness) -> None:
+    """tools_count_bytes is plugin tools and action count_bytes."""
+    harness.gateway.call(_bearer(harness.token), "tools_count_bytes", {})
+
+    [call] = harness.runner.calls
+    assert call.action == TOOLS_MANIFEST.actions["count_bytes"]
+    assert call.network == cage_network([])
+
+
+def test_a_granted_call_sets_last_used_at(harness: Harness) -> None:
+    """The call records the token's use at the clock's time."""
+    harness.clock.moment = LATER
+
+    harness.gateway.call(_bearer(harness.token), "tools_echo", ECHO_ARGUMENTS)
+
+    assert _last_used(harness) == LATER
+
+
+def test_a_refused_call_still_sets_last_used_at(harness: Harness) -> None:
+    """Every call authenticates, a refused call included."""
+    harness.clock.moment = LATER
+
+    _refusal(harness, _bearer(harness.token), "other_echo")
+
+    assert _last_used(harness) == LATER
+
+
+def test_a_failed_script_returns_its_content_as_a_normal_reply(
+    harness: Harness,
+) -> None:
+    """A failed script's reply is its command-shaped content, not a refusal."""
+    harness.runner.result = FAILED_SCRIPT
+
+    reply = harness.gateway.call(_bearer(harness.token), "tools_count_bytes", {})
+
+    assert reply == FAILED_SCRIPT.content
+
+
+def test_the_runner_runs_while_the_snapshot_is_in_use(harness: Harness) -> None:
+    """The call holds live.use() around run and releases it afterwards."""
+    harness.gateway.call(_bearer(harness.token), "tools_echo", ECHO_ARGUMENTS)
+
+    [(snapshot, count)] = harness.runner.held
+    assert snapshot is SNAPSHOT
+    assert count == 1
+    assert harness.live._uses == {}
+
+
+def test_every_call_writes_one_audit_line(harness: Harness) -> None:
+    """Granted and refused calls each write exactly one line."""
+    harness.gateway.call(_bearer(harness.token), "tools_echo", ECHO_ARGUMENTS)
+    _refusal(harness, _bearer(harness.token), "other_echo")
+    _refusal(harness, _bearer(UNKNOWN_TOKEN))
+
+    assert len(_audit_lines(harness)) == 3
+
+
+def test_a_granted_calls_audit_line(harness: Harness) -> None:
+    """The line holds the call's start, token, tool, arguments, and outcome."""
+    harness.clock.moment = LATER
+
+    harness.gateway.call(_bearer(harness.token), "tools_echo", ECHO_ARGUMENTS)
+
+    assert _audit_lines(harness) == [
+        {
+            "timestamp": LATER.isoformat(),
+            "call_id": harness.runner.calls[0].call_id,
+            "token_name": "ci-bot",
+            "scope": "dev",
+            "action": "tools_echo",
+            "arguments": ECHO_ARGUMENTS,
+            "exit_code": 0,
+            "duration_ms": 42,
+            "stdout_bytes": 6,
+            "stderr_bytes": 0,
+            "truncated": False,
+            "refusal": None,
+        }
+    ]
+
+
+def test_a_bad_tokens_audit_line_has_no_token_fields(harness: Harness) -> None:
+    """A token that does not authenticate leaves the token fields None."""
+    _refusal(harness, _bearer(UNKNOWN_TOKEN))
+
+    [line] = _audit_lines(harness)
+    duration_ms = line.pop("duration_ms")
+    call_id = line.pop("call_id")
+    assert isinstance(duration_ms, int)
+    assert duration_ms >= 0
+    assert isinstance(call_id, str)
+    assert re.fullmatch(CALL_ID_PATTERN, call_id)
+    assert line == {
+        "timestamp": MINTED_AT.isoformat(),
+        "token_name": None,
+        "scope": None,
+        "action": "tools_echo",
+        "arguments": ECHO_ARGUMENTS,
+        "exit_code": None,
+        "stdout_bytes": None,
+        "stderr_bytes": None,
+        "truncated": False,
+        "refusal": TOKEN_REFUSAL,
+    }
+
+
+def test_a_refusal_after_authentication_names_the_token_in_its_line(
+    harness: Harness,
+) -> None:
+    """A refusal past authentication records the token and the message."""
+    _refusal(harness, _bearer(harness.token), "other_echo")
+
+    [line] = _audit_lines(harness)
+    assert line["token_name"] == "ci-bot"
+    assert line["scope"] == "dev"
+    assert line["exit_code"] is None
+    assert line["refusal"] == "tool 'other_echo' is not granted to scope 'dev'"
+
+
+def test_a_runner_refusals_line_carries_the_cage_calls_id(harness: Harness) -> None:
+    """The runner, the refusal, and the line share one call ID."""
+    error = CageTimeoutError("action 'echo' did not finish within its timeout")
+    harness.runner.result = error
+
+    _refusal(harness, _bearer(harness.token))
+
+    [line] = _audit_lines(harness)
+    assert line["call_id"] == harness.runner.calls[0].call_id
+    assert line["refusal"] == str(error)
+    assert line["exit_code"] is None
+    assert line["stdout_bytes"] is None
+    assert line["stderr_bytes"] is None
+    assert line["truncated"] is False
+
+
+def test_a_failed_audit_write_withholds_the_result_and_the_next_call_succeeds(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The failed call is refused and absent from the log; the next one lands."""
+    fail_next_write_after_half(monkeypatch)
+    bearer = _bearer(harness.token)
+
+    with pytest.raises(CallRefusedError) as caught:
+        harness.gateway.call(bearer, "tools_echo", ECHO_ARGUMENTS)
+    first_id = harness.runner.calls[0].call_id
+    assert str(caught.value) == (
+        f"the audit log could not record call {first_id}, so its result is withheld"
+    )
+
+    reply = harness.gateway.call(bearer, "tools_echo", ECHO_ARGUMENTS)
+
+    assert reply == ECHO_OUTCOME.content
+    second_id = harness.runner.calls[1].call_id
+    log = (harness.audit_dir / "audit.log").read_text(encoding="utf-8")
+    lines = [json.loads(line) for line in log.splitlines()]
+    assert [line["call_id"] for line in lines] == [second_id]
+    assert first_id not in log
+
+
+def test_a_failed_audit_write_replaces_a_refusal(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A refused call whose line fails gets the audit refusal instead."""
+    fail_next_write_after_half(monkeypatch)
+
+    assert AUDIT_REFUSAL.fullmatch(_refusal(harness, _bearer(UNKNOWN_TOKEN)))
+
+
+def test_a_latched_writer_refuses_before_authenticating(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A latched writer refuses at once: no use recorded, no cage, no line."""
+    _latch(harness.audit, monkeypatch)
+
+    assert AUDIT_REFUSAL.fullmatch(_refusal(harness, _bearer(harness.token)))
+    assert _last_used(harness) is None
+    assert harness.runner.calls == []
+    assert _audit_lines(harness) == []

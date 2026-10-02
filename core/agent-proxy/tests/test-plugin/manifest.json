@@ -1,0 +1,71 @@
+{
+  "actions": {
+    "echo": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "no_newline": {"type": "boolean"},
+          "text": {"type": "string"}
+        },
+        "required": ["text"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "10s",
+      "argv": ["echo"],
+      "parameters": [
+        {"name": "no_newline", "as": "flag", "flag": "-n"},
+        {"name": "text", "as": "positional"}
+      ],
+      "passthrough_args": false
+    },
+    "count": {
+      "kind": "script",
+      "input_schema": {"type": "object"},
+      "credentials": [],
+      "timeout": "10s",
+      "executable": "/plugin/count-bytes",
+      "output_schema": {
+        "type": "object",
+        "properties": {"bytes": {"type": "integer"}},
+        "required": ["bytes"]
+      }
+    },
+    "sleep": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "seconds": {"type": "integer", "minimum": 0, "maximum": 60}
+        },
+        "required": ["seconds"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "90s",
+      "argv": ["sleep"],
+      "parameters": [
+        {"name": "seconds", "as": "positional"}
+      ],
+      "passthrough_args": false
+    },
+    "fail": {
+      "kind": "script",
+      "input_schema": {"type": "object"},
+      "credentials": [],
+      "timeout": "10s",
+      "executable": "/plugin/fail",
+      "output_schema": {"type": "object"}
+    },
+    "read_credential": {
+      "kind": "command",
+      "input_schema": {"type": "object", "additionalProperties": false},
+      "credentials": [{"file": "/run/credentials/probe"}],
+      "timeout": "10s",
+      "argv": ["cat", "/run/credentials/probe"],
+      "parameters": [],
+      "passthrough_args": false
+    }
+  }
+}

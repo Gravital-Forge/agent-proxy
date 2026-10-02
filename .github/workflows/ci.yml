@@ -1,0 +1,95 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  lint-md:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          python-version: "3.12"
+      - name: Lint markdown
+        run: uvx rumdl@0.2.78 check .
+  discover:
+    runs-on: ubuntu-latest
+    outputs:
+      packages: ${{ steps.list.outputs.packages }}
+      plugins: ${{ steps.list.outputs.plugins }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: list
+        run: |
+          {
+            echo -n 'packages=['
+            sep=''
+            for p in core/*/pyproject.toml plugins/*/pyproject.toml; do
+              if [ -e "$p" ]; then
+                echo -n "$sep\"$(dirname "$p")\""
+                sep=','
+              fi
+            done
+            echo ']'
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo -n 'plugins=['
+            sep=''
+            for d in plugins/*/Dockerfile; do
+              if [ -e "$d" ]; then
+                echo -n "$sep\"$(dirname "$d")\""
+                sep=','
+              fi
+            done
+            echo ']'
+          } >> "$GITHUB_OUTPUT"
+  check:
+    needs: discover
+    # A matrix over an empty list fails the job, so the job is skipped
+    # while no package exists.
+    if: needs.discover.outputs.packages != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJSON(needs.discover.outputs.packages) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          python-version: "3.12"
+      # uv installs the tool outside the job's PATH, and GITHUB_PATH takes
+      # effect only in later steps, so poe --version runs as its own step.
+      - name: Install the task runner
+        run: |
+          uv tool install poethepoet==0.48.0
+          uv tool dir --bin >> "$GITHUB_PATH"
+      - name: Confirm the task runner is on the path
+        run: poe --version
+      - name: Lint
+        working-directory: ${{ matrix.package }}
+        run: poe lint
+      - name: Test
+        working-directory: ${{ matrix.package }}
+        run: poe test
+  manifest-check:
+    needs: discover
+    if: needs.discover.outputs.plugins != '[]'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        plugin: ${{ fromJSON(needs.discover.outputs.plugins) }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v8.2.0
+        with:
+          python-version: "3.12"
+      - name: Build the plugin image
+        run: docker build -t apx-plugin:ci ${{ matrix.plugin }}
+      - name: Check the manifest
+        working-directory: core/agent-proxy
+        run: uv run agent-proxy manifest check apx-plugin:ci
