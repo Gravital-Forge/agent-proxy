@@ -62,16 +62,15 @@ reviews, and its conversation comments. Each call fetches one page, as gh api do
 all three succeed, `exit_code` is 0, `stderr` is empty, and `stdout` is one compact JSON object:
 `{"inline_comments": [...], "reviews": [...], "conversation": [...]}`.
 
-`pr_edit` runs `gh api -X PATCH repos/<repo>/pulls/<n>` with one `-f name=value` item for each of
-`title`, `body`, and `base` that the input holds, an empty string included, and `--jq .html_url`.
-`-f` sends each value as a JSON string, so a value that begins with `@` stays text. On success,
-`stdout` is the pull request's URL and a newline. On an HTTP error, `exit_code` is 1, `stderr` is
-`gh: <GitHub's message> (HTTP <status>)`, and `stdout` holds GitHub's error JSON, because gh skips
-`--jq` on an error answer.
+`pr_edit` runs `gh api -X PATCH repos/<repo>/pulls/<n>` with one `-f name=value` item for each field
+it passes, as "Optional inputs" gives, and `--jq .html_url`. `-f` sends each value as a JSON string,
+so a value that begins with `@` stays text. On success, `stdout` is the pull request's URL and a
+newline. On an HTTP error, `exit_code` is 1, `stderr` is `gh: <GitHub's message> (HTTP <status>)`,
+and `stdout` holds GitHub's error JSON, because gh skips `--jq` on an error answer.
 
 `pr_edit` does not run `gh pr edit`. That command looks the pull request up over GraphQL before it
 edits, and the gh this image pins asks that lookup for the pull request's Projects (classic) cards,
-a field GitHub now rejects. The PATCH asks for nothing but the edit.
+a field GitHub rejects. The PATCH asks for nothing but the edit.
 
 `pr_checks` runs `gh pr checks`. When that call fails with an empty stdout, its result is the
 action's result. Otherwise the script reads its stdout line by line. A line that holds `fail`, in
@@ -221,16 +220,17 @@ scopes:
   real cage through the core's `CageRunner`. `tests/fake-api/` builds a fake `api.github.com`, which
   runs on an internal network. It answers a known job's log request with a redirect to a host the
   network cannot resolve, so a client that follows the redirect fails. It answers one expected
-  `PATCH` of pull request 1 with the pull request's URL, and any other `PATCH` with 422 and the body
-  it received. `test_actions.py` runs every action in an image that puts the stub gh ahead of the
-  real one, built from `tests/stub/Dockerfile`. Its `pr_checks` test joins the fake's network and
-  gets the fake's log URLs. `test_pinned_gh.py` runs the plugin image against the fake, and checks
-  claims this plugin rests on. `pr_create` with `head` and no checkout gets past the steps that need
-  the current branch and git, and fails at the fake's answer to its next request. `run_view` with
-  `log_failed` writes its log cache under the image's `XDG_CACHE_HOME` while the root filesystem is
-  read-only. `job_log_url` returns the fake's `Location` without following it, and the fake's 404
-  for a job the fake does not know. `pr_edit` sends its fields as one `PATCH` with no GraphQL lookup
-  and returns the pull request's URL, and returns gh's error for a `PATCH` the fake rejects.
+  `PATCH` of pull request 1 with a pull-request JSON object that holds `html_url`, and any other
+  `PATCH` with 422 and the body it received. `test_actions.py` runs every action in an image that
+  puts the stub gh ahead of the real one, built from `tests/stub/Dockerfile`. Its `pr_checks` test
+  joins the fake's network and gets the fake's log URLs. `test_pinned_gh.py` runs the plugin image
+  against the fake, and checks claims this plugin rests on. `pr_create` with `head` and no checkout
+  gets past the steps that need the current branch and git, and fails at the fake's answer to its
+  next request. `run_view` with `log_failed` writes its log cache under the image's `XDG_CACHE_HOME`
+  while the root filesystem is read-only. `job_log_url` returns the fake's `Location` without
+  following it, and the fake's 404 for a job the fake does not know. `pr_edit` sends its fields as
+  one `PATCH` with no GraphQL lookup and returns the pull request's URL, and returns gh's error for
+  a `PATCH` the fake rejects.
 
 ## Build and test
 
