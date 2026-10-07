@@ -35,9 +35,9 @@ before a cage starts.
 ### What an action returns
 
 A command action returns `{exit_code, stdout, stderr}`, as `docs/design.md` gives under "Results". A
-script action prints the same three members, and its `output_schema` states them. `diff` with
-`output` is the one exception: it returns the result that "`diff`" gives. The script exits 0
-whenever it runs to its end, and git's exit code goes in `exit_code`.
+script action prints the same three members, and its `output_schema` states them. The script exits 0
+whenever it runs to its end, and git's exit code goes in `exit_code`. `diff` with `output` is the
+one exception to both rules: "`diff`" gives its result.
 
 When a git step inside a script fails for a reason other than the outcome that step checks, the
 script stops and returns that step's git result. For example, `push` returns git's own result when
@@ -54,12 +54,12 @@ gives the reason. The wrapper refuses as its own exit; a script refuses through 
 - `--repo` is missing, repeated, or has no value.
 - A call breaks a branch rule.
 - `push` or `checkout` runs while `GIT_BRANCH_PREFIXES` is unset or names no prefix.
-- `diff`'s `output` resolves outside the repository's `.agent-proxy` directory.
+- `diff`'s `output` does not resolve strictly beneath the repository's `.agent-proxy` directory.
 - `worktree` with `add` names a `path` inside the repository it comes from.
 - `commit` finds no identity, or nothing staged.
 - The image's executable runs under a name that is neither `git-cage` nor a script action's.
 
-The refusal text of `push` and `checkout` uses git-sidecar's wording.
+The refusal text of a broken branch rule uses git-sidecar's wording.
 
 ### Output past the cap
 

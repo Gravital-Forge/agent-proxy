@@ -1,16 +1,17 @@
 # The github plugin
 
 The github plugin runs gh, the GitHub CLI, in a cage. It offers one action for each GitHub tool that
-git-sidecar offers. `docs/writing-a-plugin.md` gives the plugin model this follows.
+git-sidecar offers, and `job_log_url`, which git-sidecar lacks. `docs/writing-a-plugin.md` gives the
+plugin model this follows.
 
 ## The actions
 
-Each action is named as its git-sidecar tool, without the `gh_` prefix: `gh_pr_create` becomes
-`pr_create`, and `gh_run_view` becomes `run_view`. The name a config pins the image as sets the MCP
-tool names, which `docs/design.md` gives as `<plugin>_<action>`. A config that pins the image as
-`github`, as "A grant" does, serves `github_pr_create` and the rest. A config that pins it as `gh`
-instead serves the names that git-sidecar serves. `manifest.json` declares every action, its input
-schema, its credentials, and its timeout.
+Each action that git-sidecar has is named as its git-sidecar tool, without the `gh_` prefix:
+`gh_pr_create` becomes `pr_create`, and `gh_run_view` becomes `run_view`. The name a config pins the
+image as sets the MCP tool names, which `docs/design.md` gives as `<plugin>_<action>`. A config that
+pins the image as `github`, as "A grant" does, serves `github_pr_create` and the rest. A config that
+pins it as `gh` instead serves the names that git-sidecar serves, and `gh_job_log_url`.
+`manifest.json` declares every action, its input schema, its credentials, and its timeout.
 
 An action is a command action when its gh argv is a fixed prefix plus typed parameters, as for
 `pr_list`, `run_view`, and `run_list`. The others are script actions, because each does more than
@@ -48,8 +49,9 @@ branch from the checkout, and the cage has no checkout.
 
 A command action returns `{exit_code, stdout, stderr}`, as `docs/design.md` gives under "Results". A
 script action prints the same three members, and its `output_schema` states them. The script exits 0
-whenever it runs to its end, and gh's exit code goes in `exit_code`. Each action returns gh's stdout
-as gh prints it, except for `pr_fetch`, `pr_checks`, and `job_log_url`.
+whenever it runs to its end, and gh's exit code goes in `exit_code`. `job_log_url` runs no gh, so
+its exit code is its own, as given below. Each action returns gh's stdout as gh prints it, except
+for `pr_fetch`, `pr_checks`, and `job_log_url`.
 
 `pr_fetch` makes three `gh api` calls in this order: the pull request's inline comments, its
 reviews, and its conversation comments. Each call fetches one page, as gh api does without
@@ -203,7 +205,7 @@ scopes:
   and no gh.
 - `tests/integration/` builds the plugin image and the core's verifier image, and runs actions in a
   real cage through the core's `CageRunner`. `tests/fake-api/` builds a fake `api.github.com`, which
-  runs on an internal network. It answers two jobs' log requests with a redirect to a host the
+  runs on an internal network. It answers a known job's log request with a redirect to a host the
   network cannot resolve, so a client that follows the redirect fails. `test_actions.py` runs every
   action in an image that puts the stub gh ahead of the real one, built from
   `tests/stub/Dockerfile`. Its `pr_checks` test joins the fake's network and gets the fake's log
