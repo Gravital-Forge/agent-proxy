@@ -6,6 +6,6 @@ COPY describe /usr/local/bin/describe
 COPY scripts/github_plugin /plugin/github_plugin
 COPY scripts/entry /plugin/entry
 RUN mkdir /plugin/bin \
-    && for action in pr_create pr_edit pr_view pr_fetch pr_reply pr_checks pr_close; do \
+    && for action in pr_create pr_edit pr_view pr_fetch pr_reply pr_checks pr_close job_log_url; do \
         ln -s /plugin/entry "/plugin/bin/$action"; \
     done

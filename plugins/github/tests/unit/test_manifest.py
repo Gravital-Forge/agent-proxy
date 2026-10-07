@@ -64,6 +64,7 @@ SCRIPT_TIMEOUTS = {
     "pr_reply": MINUTE,
     "pr_checks": timedelta(minutes=5),
     "pr_close": MINUTE,
+    "job_log_url": MINUTE,
 }
 SCRIPT_OUTPUT_SCHEMA = {
     "type": "object",
@@ -132,6 +133,10 @@ INPUTS: dict[str, tuple[dict[str, dict[str, object]], set[str]]] = {
         },
         {"repo", "pr_number"},
     ),
+    "job_log_url": (
+        {"repo": REPO_PROPERTY, "job_id": NUMBER_PROPERTY},
+        {"repo", "job_id"},
+    ),
     "run_view": (
         {
             "repo": REPO_PROPERTY,
@@ -167,13 +172,13 @@ def test_manifest_parses_with_no_warning(manifest: Manifest) -> None:
     assert manifest.warnings() == ()
 
 
-def test_manifest_declares_one_action_per_git_sidecar_gh_tool(
+def test_manifest_declares_git_sidecars_gh_tools_and_job_log_url(
     manifest: Manifest,
 ) -> None:
-    """The actions are git-sidecar's ten GitHub tools, each without its gh_ prefix."""
+    """The actions are git-sidecar's GitHub tools without gh_, and job_log_url."""
     assert set(manifest.actions) == {
         tool.removeprefix("gh_") for tool in GIT_SIDECAR_GH_TOOLS
-    }
+    } | {"job_log_url"}
 
 
 @pytest.mark.parametrize("name", sorted(COMMAND_ACTIONS))
@@ -316,6 +321,7 @@ def test_repo_pattern_accepts_an_owner_and_name(manifest: Manifest, repo: str) -
         ("pr_edit", {"pr_number": 5}),
         ("pr_view", {"pr": "-x"}),
         ("pr_close", {"pr_number": 0}),
+        ("job_log_url", {"job_id": 0}),
         ("pr_create", {"base": "main", "head": "", "title": "t", "body": "b"}),
         ("pr_close", {"pr_number": 5, "force": True}),
     ],
@@ -335,6 +341,7 @@ def test_action_refuses_an_input_outside_its_schema(
         ("pr_view", {"pr": "task/x"}),
         ("pr_reply", {"pr_number": 5, "body": "b", "comment_id": 9}),
         ("pr_close", {"pr_number": 5, "comment": "", "delete_branch": True}),
+        ("job_log_url", {"job_id": 1}),
     ],
 )
 def test_action_accepts_an_input_inside_its_schema(

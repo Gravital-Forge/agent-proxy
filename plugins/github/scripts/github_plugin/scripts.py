@@ -1,19 +1,31 @@
 """The script actions: each reads its input as JSON and returns gh's result."""
 
 import json
+import os
 import re
 import subprocess
+import urllib.error
+import urllib.request
 from collections.abc import Callable, Mapping, Sequence
-from typing import NotRequired, TypedDict
+from email.message import Message
+from typing import IO, NotRequired, TypedDict
 
 REFUSAL_EXIT = 2
 REFUSAL_PREFIX = "github plugin refused: "
 DEFAULT_VIEW_FIELDS = "number,title,url,headRefName,state,statusCheckRollup"
-RUN_ID = re.compile(r"/runs/(\d+)")
+API_URL = "https://api.github.com"
+USER_AGENT = "agent-proxy-github-plugin"
+LOG_URL_TIMEOUT_SECONDS = 30
+REASON_BODY_CHARACTERS = 200
+FAILED_JOB_ID = re.compile(r"/actions/runs/\d+/job/(\d+)")
 
 
 class RefusalError(Exception):
     """A call the plugin refuses; the message is the reason."""
+
+
+class LogUrlError(Exception):
+    """A job's log URL could not be read; the message is the reason."""
 
 
 class ScriptResult(TypedDict):
@@ -61,6 +73,11 @@ class CloseInput(TypedDict):
     pr_number: float
     comment: NotRequired[str]
     delete_branch: NotRequired[bool]
+
+
+class JobLogInput(TypedDict):
+    repo: str
+    job_id: float
 
 
 def run_gh(args: Sequence[str]) -> ScriptResult:
@@ -176,36 +193,130 @@ def pr_reply(arguments: ReplyInput) -> ScriptResult:
 
 
 def pr_checks(arguments: NumberInput) -> ScriptResult:
-    """Show a pull request's checks, then the failed logs of each run that failed.
+    """Show a pull request's checks, then a signed log URL for each failed job.
 
     A failed checks call with nothing on stdout is the result. Otherwise each
-    log fetch adds its stdout whatever its exit code, and the result keeps
-    the checks call's exit code and stderr.
+    failed job adds one line, its log URL or the reason it has none, and the
+    result keeps the checks call's exit code and stderr.
+
+    Raises:
+        RefusalError: a job failed and GH_TOKEN is unset or empty.
     """
     repo = arguments["repo"]
     number = _decimal(arguments["pr_number"])
     checks = run_gh(["pr", "checks", number, "--repo", repo])
     if checks["exit_code"] != 0 and not checks["stdout"]:
         return checks
+    log_lines = [
+        _job_log_line(repo, job_id) for job_id in _failed_job_ids(checks["stdout"])
+    ]
     stdout = checks["stdout"]
-    for run_id in _failed_run_ids(checks["stdout"]):
-        log = run_gh(["run", "view", run_id, "--log-failed", "--repo", repo])
-        stdout += f"\n--- Failed logs for run {run_id} ---\n{log['stdout']}"
+    if log_lines and not stdout.endswith("\n"):
+        stdout += "\n"
     return {
         "exit_code": checks["exit_code"],
-        "stdout": stdout,
+        "stdout": stdout + "".join(log_lines),
         "stderr": checks["stderr"],
     }
 
 
-def _failed_run_ids(checks_stdout: str) -> list[str]:
-    """Return each failing check's run ID, once, in first-seen order."""
-    run_ids: dict[str, None] = {}
+def _failed_job_ids(checks_stdout: str) -> list[int]:
+    """Return each failing check's job ID, once, in first-seen order."""
+    job_ids: dict[int, None] = {}
     for line in checks_stdout.splitlines():
-        found = RUN_ID.search(line)
+        found = FAILED_JOB_ID.search(line)
         if found and "fail" in line.lower():
-            run_ids[found.group(1)] = None
-    return list(run_ids)
+            job_ids[int(found.group(1))] = None
+    return list(job_ids)
+
+
+def _job_log_line(repo: str, job_id: int) -> str:
+    """Return the line naming a failed job's log URL, or why it has none."""
+    try:
+        url = job_log_location(repo, job_id)
+    except LogUrlError as error:
+        return f"Failed job {job_id} log unavailable: {error}\n"
+    return f"Failed job {job_id} log: {url}\n"
+
+
+def job_log_url(arguments: JobLogInput) -> ScriptResult:
+    """Return a fresh signed URL to a job's log, or the reason there is none."""
+    try:
+        url = job_log_location(arguments["repo"], arguments["job_id"])
+    except LogUrlError as error:
+        return {"exit_code": 1, "stdout": "", "stderr": f"{error}\n"}
+    return {"exit_code": 0, "stdout": f"{url}\n", "stderr": ""}
+
+
+class _KeepRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect handler that follows nothing, so a 3xx raises HTTPError."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: IO[bytes],
+        code: int,
+        msg: str,
+        headers: Message,
+        newurl: str,
+    ) -> None:
+        """Decline every redirect."""
+
+
+def job_log_location(repo: str, job_id: float) -> str:
+    """Return the signed URL GitHub redirects a job's log request to.
+
+    The redirect is not followed: its host lies outside a grant that names
+    only GitHub's API, and the agent fetches the URL itself. The opener keeps
+    urllib's proxy handler, which reads HTTPS_PROXY, and its default TLS
+    context, which reads SSL_CERT_FILE.
+
+    Raises:
+        RefusalError: GH_TOKEN is unset or empty.
+        LogUrlError: the answer is not a redirect with a Location, or the
+            request failed.
+    """
+    token = os.environ.get("GH_TOKEN")
+    if not token:
+        raise RefusalError("GH_TOKEN is not set")
+    path = f"/repos/{repo}/actions/jobs/{_decimal(job_id)}/logs"
+    request = urllib.request.Request(  # noqa: S310 - the URL is built from the API_URL constant
+        f"{API_URL}{path}",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "User-Agent": USER_AGENT,
+        },
+    )
+    opener = urllib.request.build_opener(_KeepRedirect())
+    try:
+        response = opener.open(request, timeout=LOG_URL_TIMEOUT_SECONDS)
+    except urllib.error.HTTPError as answer:
+        with answer:
+            return _redirect_location(path, answer)
+    except OSError as error:
+        raise LogUrlError(f"GET {path} failed: {error}") from error
+    with response:
+        raise LogUrlError(_answer_reason(path, response.status, response.read()))
+
+
+def _redirect_location(path: str, answer: urllib.error.HTTPError) -> str:
+    """Return the Location of the redirect GET path answered with.
+
+    Raises:
+        LogUrlError: the answer is not a 3xx with a Location.
+    """
+    location = answer.headers.get("Location")
+    if 300 <= answer.code < 400 and location:
+        return location
+    raise LogUrlError(_answer_reason(path, answer.code, answer.read()))
+
+
+def _answer_reason(path: str, status: int, body: bytes) -> str:
+    """Return why an answer to GET path is not a log URL."""
+    text = body.decode("utf-8", errors="replace")[:REASON_BODY_CHARACTERS]
+    return f"GET {path} answered {status}: {text}"
 
 
 def pr_close(arguments: CloseInput) -> ScriptResult:
@@ -232,6 +343,7 @@ ACTIONS: Mapping[str, Callable[..., ScriptResult]] = {
     "pr_reply": pr_reply,
     "pr_checks": pr_checks,
     "pr_close": pr_close,
+    "job_log_url": job_log_url,
 }
 
 
