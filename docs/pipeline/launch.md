@@ -92,10 +92,10 @@ The last three lines are the worktree cleanup `.dev/version-control.md` sets, so
 whether auto mode lets a job run it.
 
 Then, through the proxy with `repo` set to the dry-run worktree, the worker runs `git_status`,
-`git_log`, `git_add` and `git_commit` of one scratch file, `git_push`, and `github_pr_checks`
-against any open pull request or a recorded refusal. With `repo` set to the project worktree, it
-runs `git_worktree` remove. Last, the worker records whether the `PushNotification` and
-`clover_reply` tools are present in its session, runs
+`git_log`, `git_add` and `git_commit` of one scratch file, and `git_push`. It runs
+`github_pr_checks` against any open pull request, or records a refusal. With `repo` set to the
+project worktree, it runs `git_worktree` remove. Last, the worker records whether the
+`PushNotification` and `clover_reply` tools are present in its session, runs
 `<workspace root>/.claude/skills/checking-usage/usage-check.sh`, and records its line.
 
 A denial reaches the worker in one of two forms. The auto-mode classifier's own denial begins

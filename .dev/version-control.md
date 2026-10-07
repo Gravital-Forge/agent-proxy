@@ -11,7 +11,7 @@ Two checkouts serve the project, each at a fixed place under `<workspace root>/p
 - A `git_*` call passes the checkout it acts on as `repo`, by absolute path. Every pull of `main`
   and every `git_worktree` add and remove pass the primary clone, because an item branch is cut from
   the primary clone's `main`. Every call that acts on the item's branch passes the item worktree:
-  status, add, commit, push, and diff. A `github_*` call passes `owner/name`, per the root topic.
+  status, add, commit, push, and diff.
 - One plain git write is sanctioned: `git worktree prune` after a proxy timeout on a worktree
   removal.
 - The CI watch runs on the root topic's inconclusive threshold, because this project's CI waits on

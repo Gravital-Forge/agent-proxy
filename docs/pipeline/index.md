@@ -18,8 +18,8 @@ the item's pull request body carries.
 
 - `<workspace root>` is the harness clone. Run `pwd` from a workspace session to read it.
 - `.dev/version-control.md` places the primary clone, the project worktree, and every item worktree,
-  names their branches, names which checkout each proxy call acts on, and owns the worktree cleanup
-  rule and the CI watch threshold. Every job reads those there.
+  names their branches, names which checkout each `git_*` call acts on, and owns the worktree
+  cleanup rule and the CI watch threshold. Every job reads those there.
 - The **project worktree**, `<workspace root>/projects/agent-proxy-poc` on `task/poc`, holds this
   directory, the **design** `docs/design.md`, and the **roadmap** `docs/roadmap.md`.
 - An **item worktree**, `<workspace root>/projects/agent-proxy-<slug>` on `task/<slug>`, holds the
