@@ -2,9 +2,18 @@
 
 It runs in a container on the test's internal network, under the network alias
 api.github.com, and serves TLS with a certificate the image's test CA signs. It
-answers two jobs' log requests with a redirect to a host the test network
-cannot reach, so a client that follows it fails. It prints serving once its
-socket is bound.
+prints serving once its socket is bound.
+
+Its GET answers serve run 1 of repository o/n: the run, its workflow, its jobs,
+of which one failed, and the run's log archive. It answers two jobs' log
+requests with a redirect to a host the test network cannot reach, so a client
+that follows it fails.
+
+On /graphql it answers gh's repository query, and the three requests gh's pr
+edit sends for pull request 1: the pull-request lookup, the project-items
+query, and the update. It refuses a lookup that asks for the classic-Projects
+field projectCards with the error GitHub gives for that field. It answers any
+other request with 404.
 """
 
 import io
@@ -36,6 +45,7 @@ JSON_ANSWERS: dict[str, object] = {
         "jobs": [
             {
                 "name": "build",
+                "conclusion": "failure",
                 "steps": [{"name": "test", "number": 1, "conclusion": "failure"}],
             }
         ]
@@ -58,6 +68,53 @@ REPOSITORY = {
     "rebaseMergeAllowed": True,
     "squashMergeAllowed": True,
 }
+PULL_REQUEST_QUERY = "query PullRequestByNumber("
+PROJECT_CARDS_FIELD = "projectCards"
+PROJECT_ITEMS_QUERY = "query PullRequestProjectItems("
+UPDATE_MUTATION = "mutation PullRequestUpdate("
+PULL_REQUEST = {
+    "id": "PR_1",
+    "number": 1,
+    "url": "https://github.com/o/n/pull/1",
+    "title": "t",
+    "body": "old",
+    "baseRefName": "main",
+    "author": {"login": "a"},
+    "reviewRequests": {"nodes": []},
+    "labels": {"nodes": [], "totalCount": 0},
+    "assignedActors": {"nodes": [], "totalCount": 0},
+    "milestone": None,
+}
+CLASSIC_PROJECTS_ERROR = {
+    "data": {"repository": {"pullRequest": None}},
+    "errors": [
+        {
+            "type": "DEPRECATED",
+            "path": ["repository", "pullRequest", "projectCards"],
+            "message": (
+                "Projects (classic) is being deprecated in favor of the new"
+                " Projects experience, see:"
+                " https://github.blog/changelog/2024-05-23-sunset-notice-projects-classic/."
+            ),
+        }
+    ],
+}
+PROJECT_ITEMS = {
+    "data": {
+        "repository": {
+            "pullRequest": {
+                "projectItems": {
+                    "totalCount": 0,
+                    "nodes": [],
+                    "pageInfo": {"hasNextPage": False, "endCursor": None},
+                }
+            }
+        }
+    }
+}
+UPDATE_PAYLOAD = {
+    "data": {"updatePullRequest": {"__typename": "UpdatePullRequestPayload"}}
+}
 
 
 def logs_archive() -> bytes:
@@ -66,6 +123,21 @@ def logs_archive() -> bytes:
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr(STEP_LOG_NAME, STEP_LOG)
     return buffer.getvalue()
+
+
+def graphql_answer(body: str) -> object | None:
+    """Return the answer to the GraphQL request body, or None for one not known."""
+    if REPOSITORY_QUERY in body:
+        return {"data": {"repository": REPOSITORY}}
+    if PULL_REQUEST_QUERY in body:
+        if PROJECT_CARDS_FIELD in body:
+            return CLASSIC_PROJECTS_ERROR
+        return {"data": {"repository": {"pullRequest": PULL_REQUEST}}}
+    if PROJECT_ITEMS_QUERY in body:
+        return PROJECT_ITEMS
+    if UPDATE_MUTATION in body:
+        return UPDATE_PAYLOAD
+    return None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -84,13 +156,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(404, NOT_FOUND)
 
     def do_POST(self) -> None:
-        """Answer gh's repository query on /graphql, and any other POST with 404."""
+        """Answer gh's GraphQL requests on /graphql, and any other POST with 404."""
         body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
         path = self.path.split("?", 1)[0]
-        if path == GRAPHQL_PATH and REPOSITORY_QUERY in body:
-            self._send_json(200, {"data": {"repository": REPOSITORY}})
-        else:
+        answer = graphql_answer(body) if path == GRAPHQL_PATH else None
+        if answer is None:
             self._send_json(404, NOT_FOUND)
+        else:
+            self._send_json(200, answer)
 
     def _send_json(self, status: int, document: object) -> None:
         self._send(status, "application/json", json.dumps(document).encode())

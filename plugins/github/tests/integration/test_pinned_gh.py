@@ -134,3 +134,34 @@ def test_job_log_url_names_the_404_for_a_job_the_api_does_not_know(
         "stderr": "GET /repos/o/n/actions/jobs/2/logs answered 404: "
         '{"message": "Not Found"}\n',
     }
+
+
+def test_pr_edit_gets_past_the_lookup_and_applies_the_edit(
+    run_action: RunAction,
+    plugin_image: str,
+    fake_api_network: str,
+    fake_api_ca: Path,
+) -> None:
+    """The pinned gh's pr edit applies the edit and prints the pull request's URL.
+
+    The fake refuses a pull-request lookup that asks for the classic-Projects
+    field projectCards, as GitHub does, so the edit succeeds only on a gh whose
+    lookup no longer asks for that field.
+    """
+    network = CageNetwork(
+        name=fake_api_network, environment={"SSL_CERT_FILE": str(fake_api_ca)}
+    )
+
+    outcome = run_action(
+        "pr_edit",
+        {"repo": "o/n", "pr_number": 1, "body": "b"},
+        image=plugin_image,
+        roots=[Root(path=str(fake_api_ca.parent), mode="ro")],
+        network=network,
+    )
+
+    assert outcome.content == {
+        "exit_code": 0,
+        "stdout": "https://github.com/o/n/pull/1\n",
+        "stderr": "",
+    }

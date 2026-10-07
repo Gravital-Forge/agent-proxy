@@ -206,15 +206,17 @@ scopes:
 - `tests/integration/` builds the plugin image and the core's verifier image, and runs actions in a
   real cage through the core's `CageRunner`. `tests/fake-api/` builds a fake `api.github.com`, which
   runs on an internal network. It answers a known job's log request with a redirect to a host the
-  network cannot resolve, so a client that follows the redirect fails. `test_actions.py` runs every
-  action in an image that puts the stub gh ahead of the real one, built from
-  `tests/stub/Dockerfile`. Its `pr_checks` test joins the fake's network and gets the fake's log
-  URLs. `test_pinned_gh.py` runs the plugin image against the fake, and checks claims this plugin
-  rests on. `pr_create` with `head` and no checkout gets past the steps that need the current branch
-  and git, and fails at the fake's answer to its next request. `run_view` with `log_failed` writes
-  its log cache under the image's `XDG_CACHE_HOME` while the root filesystem is read-only.
-  `job_log_url` returns the fake's `Location` without following it, and the fake's 404 for a job the
-  fake does not know.
+  network cannot resolve, so a client that follows the redirect fails. It also answers gh's
+  pull-request lookup, project-items query, and update. `test_actions.py` runs every action in an
+  image that puts the stub gh ahead of the real one, built from `tests/stub/Dockerfile`. Its
+  `pr_checks` test joins the fake's network and gets the fake's log URLs. `test_pinned_gh.py` runs
+  the plugin image against the fake, and checks claims this plugin rests on. `pr_create` with `head`
+  and no checkout gets past the steps that need the current branch and git, and fails at the fake's
+  answer to its next request. `run_view` with `log_failed` writes its log cache under the image's
+  `XDG_CACHE_HOME` while the root filesystem is read-only. `job_log_url` returns the fake's
+  `Location` without following it, and the fake's 404 for a job the fake does not know. `pr_edit`
+  gets past gh's pull-request lookup, which no longer asks for the classic-Projects field GitHub
+  refuses, and applies the edit.
 
 ## Build and test
 
