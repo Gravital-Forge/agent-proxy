@@ -1,5 +1,6 @@
 """The script actions: each reads its input as JSON and returns gh's result."""
 
+import http.client
 import json
 import os
 import re
@@ -291,12 +292,24 @@ def job_log_location(repo: str, job_id: float) -> str:
     )
     opener = urllib.request.build_opener(_KeepRedirect())
     try:
+        return _unfollowed_location(opener, request, path)
+    except (OSError, http.client.HTTPException) as error:
+        raise LogUrlError(f"GET {path} failed: {error}") from error
+
+
+def _unfollowed_location(
+    opener: urllib.request.OpenerDirector, request: urllib.request.Request, path: str
+) -> str:
+    """Send request through opener, and return the Location it redirects to.
+
+    Raises:
+        LogUrlError: the answer is not a redirect with a Location.
+    """
+    try:
         response = opener.open(request, timeout=LOG_URL_TIMEOUT_SECONDS)
     except urllib.error.HTTPError as answer:
         with answer:
             return _redirect_location(path, answer)
-    except OSError as error:
-        raise LogUrlError(f"GET {path} failed: {error}") from error
     with response:
         raise LogUrlError(_answer_reason(path, response.status, response.read()))
 

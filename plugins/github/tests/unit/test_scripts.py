@@ -90,6 +90,53 @@ def api(monkeypatch: pytest.MonkeyPatch, direct: None) -> Iterator[FakeApi]:
         thread.join()
 
 
+@dataclass
+class RawApi:
+    """A socket that answers every request with the same bytes, then closes."""
+
+    answer: bytes = b""
+
+
+def _read_request(connection: socket.socket) -> None:
+    """Read a request up to the blank line that ends its headers."""
+    request = b""
+    while b"\r\n\r\n" not in request:
+        chunk = connection.recv(65536)
+        if not chunk:
+            return
+        request += chunk
+
+
+@pytest.fixture
+def raw_api(monkeypatch: pytest.MonkeyPatch, direct: None) -> Iterator[RawApi]:
+    """Serve a RawApi on 127.0.0.1, and point scripts.API_URL at it."""
+    raw = RawApi()
+    listener = socket.create_server(("127.0.0.1", 0))
+    listener.settimeout(0.1)
+    stop = threading.Event()
+
+    def serve() -> None:
+        while not stop.is_set():
+            try:
+                connection, _ = listener.accept()
+            except TimeoutError:
+                continue
+            with connection:
+                _read_request(connection)
+                connection.sendall(raw.answer)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    port = listener.getsockname()[1]
+    monkeypatch.setattr(scripts, "API_URL", f"http://127.0.0.1:{port}")
+    try:
+        yield raw
+    finally:
+        stop.set()
+        thread.join()
+        listener.close()
+
+
 def _calls(log: Path) -> list[list[str]]:
     """Return each argv the stub gh logged, in the order it ran."""
     return [json.loads(line) for line in log.read_text().splitlines()]
@@ -429,6 +476,43 @@ def test_job_log_location_names_a_refused_connection(
         match=r"^GET /repos/o/n/actions/jobs/1/logs failed: .*Connection refused",
     ):
         scripts.job_log_location("o/n", 1)
+
+
+def test_job_log_location_names_an_answer_that_is_not_http(raw_api: RawApi) -> None:
+    """An answer with no HTTP status line fails with the protocol error."""
+    raw_api.answer = b"garbage\r\n\r\n"
+
+    with pytest.raises(
+        scripts.LogUrlError,
+        match=r"^GET /repos/o/n/actions/jobs/1/logs failed: ",
+    ):
+        scripts.job_log_location("o/n", 1)
+
+
+@pytest.mark.parametrize("status", ["200 OK", "404 Not Found"])
+def test_job_log_location_names_a_body_shorter_than_its_length(
+    raw_api: RawApi, status: str
+) -> None:
+    """A body cut short of its Content-Length fails with the protocol error."""
+    raw_api.answer = f"HTTP/1.1 {status}\r\nContent-Length: 100\r\n\r\nshort".encode()
+
+    with pytest.raises(
+        scripts.LogUrlError,
+        match=r"^GET /repos/o/n/actions/jobs/1/logs failed: IncompleteRead\(5 bytes",
+    ):
+        scripts.job_log_location("o/n", 1)
+
+
+def test_pr_checks_names_a_protocol_failure_as_unavailable(raw_api: RawApi) -> None:
+    """A protocol failure on a job's log request gives an unavailable line."""
+    raw_api.answer = b"garbage\r\n\r\n"
+
+    result = scripts.pr_checks({"repo": "o/n", "pr_number": 7})
+
+    assert result["stdout"].startswith(
+        f"{CHECKS_7}Failed job 1 log unavailable: "
+        "GET /repos/o/n/actions/jobs/1/logs failed: "
+    )
 
 
 def test_job_log_location_refuses_without_gh_token(
