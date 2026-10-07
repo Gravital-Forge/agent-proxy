@@ -19,6 +19,13 @@ NO_NAME = (
 NO_EMAIL = (
     r"^git config user\.email is not set, nor is GIT_AUTHOR_EMAIL in the grant's env$"
 )
+NO_PREFIXES = (
+    r"^GIT_BRANCH_PREFIXES is not set or names no prefix; the grant's env sets it$"
+)
+NO_PREFIXES_STDERR = (
+    "git plugin refused: "
+    "GIT_BRANCH_PREFIXES is not set or names no prefix; the grant's env sets it\n"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -28,6 +35,12 @@ def _isolate_git(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     for variable in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"):
         monkeypatch.delenv(variable, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _task_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Allow task/ as the one branch prefix, as the grant's env would."""
+    monkeypatch.setenv("GIT_BRANCH_PREFIXES", "task/")
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -549,6 +562,32 @@ def test_push_refuses_a_detached_head(
     assert _git(origin, "for-each-ref") == ""
 
 
+def test_push_refuses_without_branch_prefixes(
+    repo: Path, roots: list[str], origin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With GIT_BRANCH_PREFIXES unset, even a task branch is refused."""
+    _commit_on_branch(repo, "task/p")
+    monkeypatch.delenv("GIT_BRANCH_PREFIXES")
+
+    with pytest.raises(RefusalError, match=NO_PREFIXES):
+        scripts.push({"repo": str(repo)}, roots)
+
+    assert _git(origin, "for-each-ref") == ""
+
+
+def test_push_sends_a_branch_under_a_second_prefix(
+    repo: Path, roots: list[str], origin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With dependabot/ among the prefixes, dependabot/x reaches origin."""
+    monkeypatch.setenv("GIT_BRANCH_PREFIXES", "task/,dependabot/")
+    pushed = _commit_on_branch(repo, "dependabot/x")
+
+    result = scripts.push({"repo": str(repo)}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert _git(origin, "rev-parse", "refs/heads/dependabot/x") == pushed
+
+
 def test_push_does_not_force_through_a_planted_push_refspec(
     repo: Path, roots: list[str], origin: Path
 ) -> None:
@@ -651,6 +690,33 @@ def test_checkout_refuses_a_target_without_the_prefix(
     assert _head(repo) == "main\n"
 
 
+@pytest.mark.parametrize("target", ["main", "task/x"])
+def test_checkout_refuses_without_branch_prefixes(
+    repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    """With GIT_BRANCH_PREFIXES unset, even main is refused."""
+    _git(repo, "checkout", "-q", "-b", "task/x")
+    monkeypatch.delenv("GIT_BRANCH_PREFIXES")
+
+    with pytest.raises(RefusalError, match=NO_PREFIXES):
+        scripts.checkout({"repo": str(repo), "target": target}, roots)
+
+    assert _head(repo) == "task/x\n"
+
+
+def test_checkout_switches_to_a_branch_under_a_second_prefix(
+    repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With dependabot/ among the prefixes, dependabot/x may be checked out."""
+    monkeypatch.setenv("GIT_BRANCH_PREFIXES", "task/,dependabot/")
+    _git(repo, "branch", "dependabot/x")
+
+    result = scripts.checkout({"repo": str(repo), "target": "dependabot/x"}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert _head(repo) == "dependabot/x\n"
+
+
 def test_checkout_of_a_missing_branch_returns_gits_error(
     repo: Path, roots: list[str]
 ) -> None:
@@ -675,3 +741,16 @@ def test_run_script_returns_a_push_refusal_as_its_result(
         "stdout": "",
         "stderr": f"git plugin refused: {PROTECTED_MAIN}\n",
     }
+
+
+def test_run_script_returns_a_missing_prefixes_refusal_as_its_result(
+    repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A checkout of main without GIT_BRANCH_PREFIXES comes back as exit code 2."""
+    monkeypatch.delenv("GIT_BRANCH_PREFIXES")
+    stdin = json.dumps({"repo": str(repo), "target": "main"}).encode()
+    environ = {"AGENT_PROXY_ROOTS": json.dumps(roots)}
+
+    result = scripts.run_script("checkout", stdin, environ)
+
+    assert result == {"exit_code": 2, "stdout": "", "stderr": NO_PREFIXES_STDERR}

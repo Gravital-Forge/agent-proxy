@@ -13,6 +13,11 @@ PREFIX_REFUSAL = (
     "git plugin refused: Branch '{}' does not match any allowed prefix: task/\n"
 )
 PROTECTED_REFUSAL = "git plugin refused: Cannot push to protected branch: {}\n"
+NO_PREFIXES_REFUSAL = (
+    "git plugin refused: "
+    "GIT_BRANCH_PREFIXES is not set or names no prefix; the grant's env sets it\n"
+)
+TASK_PREFIX = {"GIT_BRANCH_PREFIXES": "task/"}
 EXECUTABLE_BITS = stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
 
 
@@ -30,15 +35,20 @@ def _refusal(stderr: str) -> dict[str, object]:
 
 
 def _push(run_action: RunAction, pair: RemotePair) -> Outcome:
-    """Run the push action in pair's work, with pair's root granted."""
-    return run_action("push", {"repo": str(pair.work)}, [pair.root])
+    """Run the push action in pair's work, with pair's root and task/ granted."""
+    return run_action("push", {"repo": str(pair.work)}, [pair.root], env=TASK_PREFIX)
 
 
 def _checkout(
     run_action: RunAction, pair: RemotePair, arguments: dict[str, object]
 ) -> Outcome:
-    """Run the checkout action in pair's work, with pair's root granted."""
-    return run_action("checkout", {"repo": str(pair.work), **arguments}, [pair.root])
+    """Run the checkout action in pair's work, with pair's root and task/ granted."""
+    return run_action(
+        "checkout",
+        {"repo": str(pair.work), **arguments},
+        [pair.root],
+        env=TASK_PREFIX,
+    )
 
 
 def _head(repo: Path) -> str:
@@ -92,6 +102,19 @@ def test_push_refuses_a_detached_head(
     assert host_git(remote_pair.remote, "for-each-ref") == refs
 
 
+def test_push_refuses_without_branch_prefixes(
+    run_action: RunAction, remote_pair: RemotePair
+) -> None:
+    """A push whose grant's env lacks GIT_BRANCH_PREFIXES is refused, naming it."""
+    _commit_on_branch(remote_pair.work, "task/p")
+    refs = host_git(remote_pair.remote, "for-each-ref")
+
+    outcome = run_action("push", {"repo": str(remote_pair.work)}, [remote_pair.root])
+
+    assert outcome.content == _refusal(NO_PREFIXES_REFUSAL)
+    assert host_git(remote_pair.remote, "for-each-ref") == refs
+
+
 def test_push_with_force_is_refused_before_a_cage(
     run_action: RunAction, remote_pair: RemotePair
 ) -> None:
@@ -99,7 +122,7 @@ def test_push_with_force_is_refused_before_a_cage(
     arguments = {"repo": str(remote_pair.work), "force": True}
 
     with pytest.raises(InputError):
-        run_action("push", arguments, [remote_pair.root])
+        run_action("push", arguments, [remote_pair.root], env=TASK_PREFIX)
 
 
 def test_push_does_not_force_through_a_planted_push_refspec(
@@ -174,6 +197,22 @@ def test_checkout_with_create_makes_a_task_branch(
     assert _head(remote_pair.work) == "task/c\n"
 
 
+def test_checkout_with_create_makes_a_branch_under_a_second_prefix(
+    run_action: RunAction, remote_pair: RemotePair
+) -> None:
+    """With dependabot/ granted beside task/, create makes dependabot/x."""
+    arguments = {
+        "repo": str(remote_pair.work),
+        "target": "dependabot/x",
+        "create": True,
+    }
+    prefixes = {"GIT_BRANCH_PREFIXES": "task/,dependabot/"}
+
+    stdout_of(run_action("checkout", arguments, [remote_pair.root], env=prefixes))
+
+    assert _head(remote_pair.work) == "dependabot/x\n"
+
+
 def test_checkout_refuses_a_target_without_the_prefix(
     run_action: RunAction, remote_pair: RemotePair
 ) -> None:
@@ -216,12 +255,14 @@ def test_checkout_changes_the_executable_bit_in_a_repository_another_uid_owns(
         )
     )
 
-    stdout_of(run_action("checkout", {"repo": repo, "target": "task/exec-bit"}, roots))
+    task_branch = {"repo": repo, "target": "task/exec-bit"}
+    stdout_of(run_action("checkout", task_branch, roots, env=TASK_PREFIX))
     assert run_sh.stat().st_mode & stat.S_IXUSR
 
     run_as_other_uid(f"echo more >> {shlex.quote(str(run_sh))}")
     assert run_sh.read_text() == "echo hi\nmore\n"
     run_sh.write_text("echo hi\n")
 
-    stdout_of(run_action("checkout", {"repo": repo, "target": "main"}, roots))
+    main = {"repo": repo, "target": "main"}
+    stdout_of(run_action("checkout", main, roots, env=TASK_PREFIX))
     assert not run_sh.stat().st_mode & EXECUTABLE_BITS
