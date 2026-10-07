@@ -5,7 +5,7 @@ the proxy runs the scoped, credentialed action in a short-lived container. That 
 what the scope grants the action: files, domains, credentials, and plain environment variables. The
 credentials stay in the container, so the agent never holds one.
 
-`task/poc` carries the proof of concept, and `main` carries what the operator has merged.
+Work lands on `main` through pull requests the operator merges.
 
 - `docs/design.md` is the design: the operator's closed decisions and the reasons behind them.
 - `docs/architecture.md` describes what is built, and cites the code by path.

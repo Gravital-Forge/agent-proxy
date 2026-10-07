@@ -10,9 +10,10 @@ runs it and when.
 - The **light bar** is `poe lint` and `poe test` in every package, then `uvx rumdl@0.2.78 check .`
   from the repository root. An implementer-lead runs it at every task checkpoint. A package that
   declares fewer than `lint` and `test` is a gap the bar reports, never a pass.
-- The **heavy bar** is `poe test-integration` in every package, run against the agent's own rootless
-  Docker daemon, which `DOCKER_HOST` names. The job worker alone runs it, once per Build and once
-  per Merge. A package that declares no `test-integration` is a gap the bar reports, never a pass.
+- The **heavy bar** is `poe test-integration` in each package a task changes, run against the
+  agent's own rootless Docker daemon, which `DOCKER_HOST` names. The implementer-lead runs it at the
+  task's checkpoint. A package that declares no `test-integration` is a gap the bar reports, never a
+  pass.
 - The **full bar** is the light bar, the heavy bar, and CI green on the head commit.
 
 ## Constraints
