@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,6 +20,13 @@ NO_NAME = (
 NO_EMAIL = (
     r"^git config user\.email is not set, nor is GIT_AUTHOR_EMAIL in the grant's env$"
 )
+NO_PREFIXES = (
+    r"^GIT_BRANCH_PREFIXES is not set or names no prefix; the grant's env sets it$"
+)
+NO_PREFIXES_STDERR = (
+    "git plugin refused: "
+    "GIT_BRANCH_PREFIXES is not set or names no prefix; the grant's env sets it\n"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -28,6 +36,12 @@ def _isolate_git(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     for variable in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"):
         monkeypatch.delenv(variable, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _task_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Allow task/ as the one branch prefix, as the grant's env would."""
+    monkeypatch.setenv("GIT_BRANCH_PREFIXES", "task/")
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -73,6 +87,7 @@ def test_actions_holds_each_script_action() -> None:
         "lfs_untrack",
         "push",
         "checkout",
+        "worktree",
     }
 
 
@@ -243,6 +258,232 @@ def test_diff_with_a_ref_and_files_compares_those_files(
 
     assert result["exit_code"] == 0
     assert "-one\n+two\n" in result["stdout"]
+
+
+B_STAT = " b.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n"
+
+
+def _output_dir(repo: Path) -> Path:
+    """Return the directory diff writes its output beneath, symlinks resolved."""
+    return Path(os.path.realpath(repo)) / ".agent-proxy"
+
+
+def _output_refusal(output: str, repo: Path) -> str:
+    """Return the pattern of the refusal for an output outside the directory."""
+    return (
+        rf"^output '{re.escape(output)}' resolves outside "
+        rf"{re.escape(str(_output_dir(repo)))}$"
+    )
+
+
+def _write_failure(path: Path) -> str:
+    """Return the start of the stderr of a diff that could not be written."""
+    return f"diff could not be written to {path}: "
+
+
+def test_diff_with_output_writes_the_diff_to_the_file(
+    repo: Path, roots: list[str]
+) -> None:
+    """The diff goes into the file; the result holds its path and the stat."""
+    (repo / "a.txt").write_text("two\n")
+    expected_body = _git(repo, "diff")
+    expected_stat = _git(repo, "diff", "--stat=1000,900")
+
+    result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    target = _output_dir(repo) / "a.diff"
+    assert result == {
+        "exit_code": 0,
+        "stderr": "",
+        "path": str(target),
+        "stat": expected_stat,
+    }
+    assert target.read_text() == expected_body
+
+
+def test_diff_with_output_takes_the_stat_of_the_same_selection(
+    repo: Path, roots: list[str]
+) -> None:
+    """With files, both the file and the stat cover only those files."""
+    (repo / "b.txt").write_text("b\n")
+    _git(repo, "add", "b.txt")
+    _git(repo, "commit", "-q", "-m", "b")
+    (repo / "a.txt").write_text("two\n")
+    (repo / "b.txt").write_text("bb\n")
+    arguments = {"repo": str(repo), "files": ["b.txt"], "output": "b.diff"}
+
+    result = scripts.diff(arguments, roots)
+
+    body = (_output_dir(repo) / "b.diff").read_text()
+    assert result["stat"] == B_STAT
+    assert "b.txt" in body
+    assert "a.txt" not in body
+
+
+def test_diff_with_output_ignores_the_directory_it_creates(
+    repo: Path, roots: list[str]
+) -> None:
+    """A first write leaves a .gitignore of '*', so git status stays empty."""
+    result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert (_output_dir(repo) / ".gitignore").read_bytes() == b"*\n"
+    assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_diff_with_output_leaves_an_existing_directory_as_found(
+    repo: Path, roots: list[str]
+) -> None:
+    """A directory that exists before the call gains no .gitignore."""
+    _output_dir(repo).mkdir()
+
+    result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert (_output_dir(repo) / "a.diff").exists()
+    assert not (_output_dir(repo) / ".gitignore").exists()
+
+
+def test_diff_with_output_overwrites_an_existing_file(
+    repo: Path, roots: list[str]
+) -> None:
+    """A longer file already at the path holds only the new diff afterwards."""
+    _output_dir(repo).mkdir()
+    target = _output_dir(repo) / "a.diff"
+    target.write_text("an older and longer diff\n" * 40)
+    (repo / "a.txt").write_text("two\n")
+    expected_body = _git(repo, "diff")
+
+    scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert target.read_text() == expected_body
+
+
+def test_diff_with_output_of_no_change_writes_an_empty_file(
+    repo: Path, roots: list[str]
+) -> None:
+    """A selection with no change empties a file that held an older diff."""
+    _output_dir(repo).mkdir()
+    target = _output_dir(repo) / "a.diff"
+    target.write_text("old\n")
+
+    result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert target.read_bytes() == b""
+
+
+def test_diff_with_a_nested_output_makes_its_directories(
+    repo: Path, roots: list[str]
+) -> None:
+    """A nested output creates each missing directory beneath .agent-proxy."""
+    (repo / "a.txt").write_text("two\n")
+
+    result = scripts.diff({"repo": str(repo), "output": "d/e/a.diff"}, roots)
+
+    target = _output_dir(repo) / "d" / "e" / "a.diff"
+    assert result["path"] == str(target)
+    assert "-one\n+two\n" in target.read_text()
+
+
+def test_diff_with_output_writes_bytes_that_are_not_utf8_unchanged(
+    repo: Path, roots: list[str]
+) -> None:
+    """The stdout of git reaches the file undecoded."""
+    (repo / "a.txt").write_bytes(b"\xff\n")
+
+    scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert b"+\xff\n" in (_output_dir(repo) / "a.diff").read_bytes()
+
+
+@pytest.mark.parametrize("output", ["link/a.diff", "file-link"])
+def test_diff_with_output_refuses_a_symlink_out_of_the_directory(
+    repo: Path, roots: list[str], output: str
+) -> None:
+    """A symlink inside .agent-proxy that leads out of it is refused."""
+    outside = repo.parent / "outside"
+    outside.mkdir()
+    _output_dir(repo).mkdir()
+    (_output_dir(repo) / "link").symlink_to(outside)
+    (_output_dir(repo) / "file-link").symlink_to(outside / "victim")
+    (repo / "a.txt").write_text("two\n")
+
+    with pytest.raises(RefusalError, match=_output_refusal(output, repo)):
+        scripts.diff({"repo": str(repo), "output": output}, roots)
+
+    assert list(outside.iterdir()) == []
+
+
+def test_diff_with_output_refuses_a_symlinked_directory(
+    repo: Path, roots: list[str]
+) -> None:
+    """A .agent-proxy that is itself a symlink is refused."""
+    elsewhere = repo.parent / "elsewhere"
+    elsewhere.mkdir()
+    (repo / ".agent-proxy").symlink_to(elsewhere)
+
+    with pytest.raises(RefusalError, match=_output_refusal("a.diff", repo)):
+        scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert list(elsewhere.iterdir()) == []
+
+
+@pytest.mark.parametrize("output", [".", "..", "../a.diff", "a\x00b"])
+def test_diff_with_output_refuses_an_output_outside_the_directory(
+    repo: Path, roots: list[str], output: str
+) -> None:
+    """The directory itself, a '..' out of it, or a NUL is refused."""
+    with pytest.raises(RefusalError, match=_output_refusal(output, repo)):
+        scripts.diff({"repo": str(repo), "output": output}, roots)
+
+    assert not _output_dir(repo).exists()
+
+
+def test_diff_with_output_to_a_hard_linked_file_fails_the_write(
+    repo: Path, roots: list[str]
+) -> None:
+    """A target with another hard link is not emptied, and the write fails."""
+    victim = repo.parent / "victim"
+    victim.write_bytes(b"keep\n")
+    _output_dir(repo).mkdir()
+    target = _output_dir(repo) / "a.diff"
+    target.hardlink_to(victim)
+    (repo / "a.txt").write_text("two\n")
+
+    result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert (result["exit_code"], result["stdout"]) == (1, "")
+    assert result["stderr"].startswith(_write_failure(target))
+    assert victim.read_bytes() == b"keep\n"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes past a read-only mode")
+def test_diff_with_output_into_a_read_only_directory_fails_the_write(
+    repo: Path, roots: list[str]
+) -> None:
+    """A .agent-proxy the call cannot write to returns exit code 1 and the reason."""
+    _output_dir(repo).mkdir()
+    _output_dir(repo).chmod(0o555)
+
+    result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert (result["exit_code"], result["stdout"]) == (1, "")
+    assert result["stderr"].startswith(_write_failure(_output_dir(repo) / "a.diff"))
+    assert result["stderr"].endswith("\n")
+
+
+def test_diff_with_output_and_a_bad_ref_returns_gits_error(
+    repo: Path, roots: list[str]
+) -> None:
+    """A failing git diff is the result, and nothing is written."""
+    arguments = {"repo": str(repo), "ref": "missing", "output": "a.diff"}
+
+    result = scripts.diff(arguments, roots)
+
+    assert result["exit_code"] == 128
+    assert result["stderr"].startswith("fatal: ")
+    assert not _output_dir(repo).exists()
 
 
 def test_lfs_track_writes_the_pattern_to_gitattributes(
@@ -549,6 +790,32 @@ def test_push_refuses_a_detached_head(
     assert _git(origin, "for-each-ref") == ""
 
 
+def test_push_refuses_without_branch_prefixes(
+    repo: Path, roots: list[str], origin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With GIT_BRANCH_PREFIXES unset, even a task branch is refused."""
+    _commit_on_branch(repo, "task/p")
+    monkeypatch.delenv("GIT_BRANCH_PREFIXES")
+
+    with pytest.raises(RefusalError, match=NO_PREFIXES):
+        scripts.push({"repo": str(repo)}, roots)
+
+    assert _git(origin, "for-each-ref") == ""
+
+
+def test_push_sends_a_branch_under_a_second_prefix(
+    repo: Path, roots: list[str], origin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With dependabot/ among the prefixes, dependabot/x reaches origin."""
+    monkeypatch.setenv("GIT_BRANCH_PREFIXES", "task/,dependabot/")
+    pushed = _commit_on_branch(repo, "dependabot/x")
+
+    result = scripts.push({"repo": str(repo)}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert _git(origin, "rev-parse", "refs/heads/dependabot/x") == pushed
+
+
 def test_push_does_not_force_through_a_planted_push_refspec(
     repo: Path, roots: list[str], origin: Path
 ) -> None:
@@ -651,6 +918,33 @@ def test_checkout_refuses_a_target_without_the_prefix(
     assert _head(repo) == "main\n"
 
 
+@pytest.mark.parametrize("target", ["main", "task/x"])
+def test_checkout_refuses_without_branch_prefixes(
+    repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    """With GIT_BRANCH_PREFIXES unset, even main is refused."""
+    _git(repo, "checkout", "-q", "-b", "task/x")
+    monkeypatch.delenv("GIT_BRANCH_PREFIXES")
+
+    with pytest.raises(RefusalError, match=NO_PREFIXES):
+        scripts.checkout({"repo": str(repo), "target": target}, roots)
+
+    assert _head(repo) == "task/x\n"
+
+
+def test_checkout_switches_to_a_branch_under_a_second_prefix(
+    repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With dependabot/ among the prefixes, dependabot/x may be checked out."""
+    monkeypatch.setenv("GIT_BRANCH_PREFIXES", "task/,dependabot/")
+    _git(repo, "branch", "dependabot/x")
+
+    result = scripts.checkout({"repo": str(repo), "target": "dependabot/x"}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert _head(repo) == "dependabot/x\n"
+
+
 def test_checkout_of_a_missing_branch_returns_gits_error(
     repo: Path, roots: list[str]
 ) -> None:
@@ -674,4 +968,172 @@ def test_run_script_returns_a_push_refusal_as_its_result(
         "exit_code": 2,
         "stdout": "",
         "stderr": f"git plugin refused: {PROTECTED_MAIN}\n",
+    }
+
+
+def test_run_script_returns_a_missing_prefixes_refusal_as_its_result(
+    repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A checkout of main without GIT_BRANCH_PREFIXES comes back as exit code 2."""
+    monkeypatch.delenv("GIT_BRANCH_PREFIXES")
+    stdin = json.dumps({"repo": str(repo), "target": "main"}).encode()
+    environ = {"AGENT_PROXY_ROOTS": json.dumps(roots)}
+
+    result = scripts.run_script("checkout", stdin, environ)
+
+    assert result == {"exit_code": 2, "stdout": "", "stderr": NO_PREFIXES_STDERR}
+
+
+def _nested_refusal(path: str) -> str:
+    """Return the pattern of the refusal for a worktree path inside the repository."""
+    return (
+        rf"^worktree path '{re.escape(path)}' is inside the repository it comes from$"
+    )
+
+
+def _worktree_list(repo: Path) -> str:
+    """Return the host git's porcelain worktree list for repo."""
+    return _git(repo, "worktree", "list", "--porcelain")
+
+
+def test_worktree_add_creates_the_branch(repo: Path, roots: list[str]) -> None:
+    """The add action with branch makes it at HEAD and checks it out in the new tree."""
+    path = repo.parent / "wt"
+    arguments = {
+        "repo": str(repo),
+        "action": "add",
+        "path": str(path),
+        "branch": "task/wt",
+    }
+
+    result = scripts.worktree(arguments, roots)
+
+    assert result["exit_code"] == 0, result
+    assert _head(path) == "task/wt\n"
+
+
+def test_worktree_add_attaches_an_existing_branch(repo: Path, roots: list[str]) -> None:
+    """The add action with create_branch false checks out the branch that exists."""
+    _git(repo, "branch", "task/wt")
+    path = repo.parent / "wt"
+    arguments = {
+        "repo": str(repo),
+        "action": "add",
+        "path": str(path),
+        "branch": "task/wt",
+        "create_branch": False,
+    }
+
+    result = scripts.worktree(arguments, roots)
+
+    assert result["exit_code"] == 0, result
+    assert _head(path) == "task/wt\n"
+
+
+def test_worktree_add_looks_up_a_dash_branch_as_a_name(
+    repo: Path, roots: list[str]
+) -> None:
+    """A branch --detach, with create_branch false, fails rather than detaching."""
+    path = repo.parent / "wt"
+    arguments = {
+        "repo": str(repo),
+        "action": "add",
+        "path": str(path),
+        "branch": "--detach",
+        "create_branch": False,
+    }
+
+    result = scripts.worktree(arguments, roots)
+
+    assert result["exit_code"] != 0
+    assert "--detach" in result["stderr"]
+    assert str(path) not in _worktree_list(repo)
+
+
+def test_worktree_add_without_a_branch_lets_git_name_one(
+    repo: Path, roots: list[str]
+) -> None:
+    """The add action with no branch makes a branch named after the path's last part."""
+    path = repo.parent / "wt"
+
+    result = scripts.worktree(
+        {"repo": str(repo), "action": "add", "path": str(path)}, roots
+    )
+
+    assert result["exit_code"] == 0, result
+    assert _head(path) == "wt\n"
+
+
+def test_worktree_add_without_a_path_returns_gits_error(
+    repo: Path, roots: list[str]
+) -> None:
+    """The add action with no path runs git worktree add, whose usage error returns."""
+    result = scripts.worktree({"repo": str(repo), "action": "add"}, roots)
+
+    assert result["exit_code"] != 0
+    assert "usage: git worktree add" in result["stderr"]
+
+
+@pytest.mark.parametrize("relative", ["repo", "repo/wt", "other/../repo/wt", "link/wt"])
+def test_worktree_add_refuses_a_path_inside_the_repository(
+    repo: Path, roots: list[str], relative: str
+) -> None:
+    """A path that is the repository, or resolves beneath it, is refused before git."""
+    (repo.parent / "link").symlink_to(repo)
+    path = f"{repo.parent}/{relative}"
+    arguments = {
+        "repo": str(repo),
+        "action": "add",
+        "path": path,
+        "branch": "task/wt",
+    }
+
+    with pytest.raises(RefusalError, match=_nested_refusal(path)):
+        scripts.worktree(arguments, roots)
+
+    assert _git(repo, "branch", "--list", "task/wt") == ""
+
+
+def test_worktree_list_names_each_worktree(repo: Path, roots: list[str]) -> None:
+    """The list action shows the repository and every linked worktree."""
+    path = repo.parent / "wt"
+    _git(repo, "worktree", "add", "-q", "-b", "task/wt", str(path))
+
+    result = scripts.worktree({"repo": str(repo), "action": "list"}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert f"{path} " in result["stdout"]
+
+
+def test_worktree_remove_deletes_the_worktree(repo: Path, roots: list[str]) -> None:
+    """The remove action with path deletes that worktree and its directory."""
+    path = repo.parent / "wt"
+    _git(repo, "worktree", "add", "-q", "-b", "task/wt", str(path))
+
+    result = scripts.worktree(
+        {"repo": str(repo), "action": "remove", "path": str(path)}, roots
+    )
+
+    assert result["exit_code"] == 0, result
+    assert not path.exists()
+    assert str(path) not in _worktree_list(repo)
+
+
+def test_run_script_returns_a_nested_worktree_refusal_as_its_result(
+    repo: Path, roots: list[str]
+) -> None:
+    """A worktree add inside the repository comes back as exit code 2."""
+    path = f"{repo}/wt"
+    stdin = json.dumps({"repo": str(repo), "action": "add", "path": path}).encode()
+    environ = {"AGENT_PROXY_ROOTS": json.dumps(roots)}
+
+    result = scripts.run_script("worktree", stdin, environ)
+
+    assert result == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": (
+            f"git plugin refused: worktree path '{path}' "
+            "is inside the repository it comes from\n"
+        ),
     }

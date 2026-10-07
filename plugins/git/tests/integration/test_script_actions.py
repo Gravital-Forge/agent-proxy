@@ -15,6 +15,8 @@ from harness import (
 
 LFS_POINTER_HEADER = "version https://git-lfs.github.com/spec/v1"
 NOTHING_STAGED = "git plugin refused: nothing staged; stage changes with git add\n"
+NESTED = "worktree path '{}' is inside the repository it comes from"
+A_STAT = " a.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n"
 
 
 def test_add_then_commit_makes_a_commit_that_log_shows(
@@ -131,6 +133,44 @@ def test_diff_with_staged_shows_a_staged_change(
     assert "+four" not in diff
 
 
+def test_diff_with_output_writes_the_file_under_an_rw_root(
+    run_action: RunAction, host_repo: Path
+) -> None:
+    """The diff action with output writes the diff and a .gitignore, and the stat."""
+    (host_repo / "a.txt").write_text("three\n")
+    arguments = {"repo": str(host_repo), "output": "a.diff"}
+
+    outcome = run_action("diff", arguments, [host_repo.parent])
+
+    target = host_repo / ".agent-proxy" / "a.diff"
+    assert outcome.content == {
+        "exit_code": 0,
+        "stderr": "",
+        "path": str(target),
+        "stat": A_STAT,
+    }
+    assert "-two\n+three\n" in target.read_text()
+    assert (host_repo / ".agent-proxy" / ".gitignore").read_text() == "*\n"
+
+
+def test_diff_with_output_under_an_ro_root_returns_the_write_failure(
+    run_action: RunAction, host_repo: Path
+) -> None:
+    """Under a read-only root the diff cannot be written, and the result says so."""
+    (host_repo / "a.txt").write_text("three\n")
+    arguments = {"repo": str(host_repo), "output": "a.diff"}
+
+    outcome = run_action("diff", arguments, [host_repo.parent], mode="ro")
+
+    target = host_repo / ".agent-proxy" / "a.diff"
+    stderr = outcome.content["stderr"]
+    assert isinstance(stderr, str)
+    assert (outcome.content["exit_code"], outcome.content["stdout"]) == (1, "")
+    assert stderr.startswith(f"diff could not be written to {target}: ")
+    assert "Read-only file system" in stderr
+    assert not (host_repo / ".agent-proxy").exists()
+
+
 def test_commit_with_nothing_staged_returns_the_refusal(
     run_action: RunAction, host_repo: Path
 ) -> None:
@@ -201,3 +241,39 @@ def test_add_of_a_dot_dot_file_is_refused_before_a_cage(
 
     with pytest.raises(InputError):
         run_action("add", arguments, [host_repo.parent])
+
+
+def test_worktree_add_attaches_an_existing_branch(
+    run_action: RunAction, host_repo: Path
+) -> None:
+    """The worktree add with create_branch false checks out the existing branch."""
+    worktree = host_repo.parent / "wt"
+    host_git(host_repo, "branch", "task/wt")
+    add = {
+        "repo": str(host_repo),
+        "action": "add",
+        "path": str(worktree),
+        "branch": "task/wt",
+        "create_branch": False,
+    }
+
+    stdout_of(run_action("worktree", add, [host_repo.parent]))
+
+    assert host_git(worktree, "rev-parse", "--abbrev-ref", "HEAD") == "task/wt\n"
+
+
+def test_worktree_add_of_a_nested_path_returns_the_refusal(
+    run_action: RunAction, host_repo: Path
+) -> None:
+    """The worktree add of a path inside the repository is refused, and adds none."""
+    path = str(host_repo / "wt")
+    add = {"repo": str(host_repo), "action": "add", "path": path, "branch": "task/wt"}
+
+    outcome = run_action("worktree", add, [host_repo.parent])
+
+    assert outcome.content == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": f"git plugin refused: {NESTED.format(path)}\n",
+    }
+    assert not (host_repo / "wt").exists()

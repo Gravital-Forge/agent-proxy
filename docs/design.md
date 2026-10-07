@@ -368,9 +368,11 @@ The `S` checks need no counterpart on the agent's daemon: in a deployment, cages
   file) is read-only to the other side; the ACL cannot widen it.
 - Every call pays a cage start: a median of about half a second on the agent's daemon (`C2`), and
   the in-cage root verifier adds about a tenth of a second more.
-- A run's log is out of reach under a grant that names only GitHub's hosts. GitHub redirects a log
-  fetch to a storage host it picks, and a domain takes no wildcard, so a grant that wants logs names
-  each storage host. `plugins/github/README.md` gives the detail.
+- A run's log through `run_view` with `log_failed` is out of reach under a grant that names only
+  GitHub's hosts. gh follows GitHub's redirect to a storage host GitHub picks, and a domain takes no
+  wildcard, so a grant that wants such a log names each storage host. Under a grant that names only
+  `api.github.com`, `pr_checks` and `job_log_url` return a failed job's signed log URL instead, and
+  the agent fetches the log itself. `plugins/github/README.md` gives the detail.
 
 ## Decision directives
 

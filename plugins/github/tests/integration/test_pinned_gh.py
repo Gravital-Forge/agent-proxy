@@ -77,3 +77,60 @@ def test_run_view_log_failed_caches_its_log_on_a_read_only_root(
         "stdout": FAILED_STEP_LOG,
         "stderr": "",
     }
+
+
+def test_job_log_url_returns_the_fakes_location_without_following_it(
+    run_action: RunAction,
+    plugin_image: str,
+    fake_api_network: str,
+    fake_api_ca: Path,
+) -> None:
+    """The job_log_url action for job 1 returns the fake's 302 Location.
+
+    The Location's host does not resolve on the test network, so a followed
+    redirect would fail the call.
+    """
+    network = CageNetwork(
+        name=fake_api_network, environment={"SSL_CERT_FILE": str(fake_api_ca)}
+    )
+
+    outcome = run_action(
+        "job_log_url",
+        {"repo": "o/n", "job_id": 1},
+        image=plugin_image,
+        roots=[Root(path=str(fake_api_ca.parent), mode="ro")],
+        network=network,
+    )
+
+    assert outcome.content == {
+        "exit_code": 0,
+        "stdout": "https://results-receiver.invalid/job/1?sig=s\n",
+        "stderr": "",
+    }
+
+
+def test_job_log_url_names_the_404_for_a_job_the_api_does_not_know(
+    run_action: RunAction,
+    plugin_image: str,
+    fake_api_network: str,
+    fake_api_ca: Path,
+) -> None:
+    """The job_log_url action for job 2 returns exit code 1 and the fake's 404."""
+    network = CageNetwork(
+        name=fake_api_network, environment={"SSL_CERT_FILE": str(fake_api_ca)}
+    )
+
+    outcome = run_action(
+        "job_log_url",
+        {"repo": "o/n", "job_id": 2},
+        image=plugin_image,
+        roots=[Root(path=str(fake_api_ca.parent), mode="ro")],
+        network=network,
+    )
+
+    assert outcome.content == {
+        "exit_code": 1,
+        "stdout": "",
+        "stderr": "GET /repos/o/n/actions/jobs/2/logs answered 404: "
+        '{"message": "Not Found"}\n',
+    }

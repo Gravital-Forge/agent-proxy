@@ -13,6 +13,7 @@ from agent_proxy.plugins import (
 )
 from agent_proxy.runner import InputError, form_argv, validate_input
 from git_plugin import scripts
+from jsonschema import Draft202012Validator
 
 MANIFEST_PATH = Path(__file__).parents[2] / "manifest.json"
 DOCKERFILE_PATH = Path(__file__).parents[2] / "Dockerfile"
@@ -89,7 +90,6 @@ REQUIRED_BEYOND_REPO = {
     "blame": {"file"},
     "config_get": {"key"},
     "merge": {"branch"},
-    "worktree": {"action"},
     "stash": {"action"},
 }
 ACTION = Parameter(name="action", placement="positional", flag=None)
@@ -101,14 +101,6 @@ CHANGE_ACTIONS: dict[str, tuple[tuple[str, ...], tuple[Parameter, ...]]] = {
     "merge": (
         ("git-cage", "merge"),
         (Parameter(name="branch", placement="positional", flag=None),),
-    ),
-    "worktree": (
-        ("git-cage", "worktree"),
-        (
-            ACTION,
-            Parameter(name="path", placement="positional", flag=None),
-            Parameter(name="branch", placement="flag", flag="-b"),
-        ),
     ),
     "stash": (
         ("git-cage", "stash"),
@@ -128,7 +120,6 @@ CHANGE_LIMITS: dict[str, tuple[tuple[EnvMount, ...], timedelta]] = {
     "fetch": ((GH_TOKEN,), MINUTE),
     "pull": ((GH_TOKEN,), MINUTE),
     "merge": ((), MINUTE),
-    "worktree": ((), MINUTE),
     "stash": ((), MINUTE),
     "lfs_fetch": ((GH_TOKEN,), timedelta(minutes=10)),
     "lfs_pull": ((GH_TOKEN,), timedelta(minutes=10)),
@@ -143,6 +134,21 @@ SCRIPT_OUTPUT_SCHEMA = {
     "required": ["exit_code", "stdout", "stderr"],
     "additionalProperties": False,
 }
+DIFF_FILE_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "exit_code": {"type": "integer"},
+        "stderr": {"type": "string"},
+        "path": {"type": "string"},
+        "stat": {"type": "string"},
+    },
+    "required": ["exit_code", "stderr", "path", "stat"],
+    "additionalProperties": False,
+}
+DIFF_OUTPUT_SCHEMA = {
+    "type": "object",
+    "oneOf": [SCRIPT_OUTPUT_SCHEMA, DIFF_FILE_OUTPUT_SCHEMA],
+}
 PATH_LIST_PROPERTY = {
     "type": "array",
     "minItems": 1,
@@ -151,6 +157,11 @@ PATH_LIST_PROPERTY = {
         "minLength": 1,
         "pattern": r"^(?!([\s\S]*/)?\.\.(/|$))",
     },
+}
+OUTPUT_PROPERTY = {
+    "type": "string",
+    "minLength": 1,
+    "pattern": r"^(?!/)(?!([\s\S]*/)?\.\.(/|$))",
 }
 STAGED_PROPERTY = {"type": "boolean"}
 # Each script action's input properties, and the properties it requires.
@@ -181,6 +192,7 @@ SCRIPT_ACTIONS: dict[str, tuple[dict[str, dict[str, object]], set[str]]] = {
             "staged": STAGED_PROPERTY,
             "ref": {"type": "string", "minLength": 1, "pattern": "^[^-]"},
             "files": PATH_LIST_PROPERTY,
+            "output": OUTPUT_PROPERTY,
         },
         {"repo"},
     ),
@@ -200,6 +212,20 @@ SCRIPT_ACTIONS: dict[str, tuple[dict[str, dict[str, object]], set[str]]] = {
             "create": {"type": "boolean"},
         },
         {"repo", "target"},
+    ),
+    "worktree": (
+        {
+            "repo": REPO_PROPERTY,
+            "action": {
+                "type": "string",
+                "minLength": 1,
+                "enum": ["add", "list", "remove"],
+            },
+            "path": {"type": "string", "minLength": 1, "pattern": "^/"},
+            "branch": {"type": "string", "minLength": 1, "pattern": "^[^-]"},
+            "create_branch": {"type": "boolean", "default": True},
+        },
+        {"repo", "action"},
     ),
 }
 # A script action's credentials and timeout, where they are not none and a minute.
@@ -399,16 +425,6 @@ def test_merge_states_branch_as_a_non_empty_string(manifest: Manifest) -> None:
     }
 
 
-def test_worktree_states_each_parameter(manifest: Manifest) -> None:
-    """The worktree action is add, list, or remove; path and branch are strings."""
-    assert _properties(manifest.actions["worktree"]) == {
-        "repo": REPO_PROPERTY,
-        "action": {"type": "string", "minLength": 1, "enum": ["add", "list", "remove"]},
-        "path": {"type": "string", "minLength": 1},
-        "branch": {"type": "string", "minLength": 1},
-    }
-
-
 def test_stash_states_each_parameter(manifest: Manifest) -> None:
     """The stash action is one of git-sidecar's five; its index is not negative."""
     assert _properties(manifest.actions["stash"]) == {
@@ -426,7 +442,6 @@ def test_stash_states_each_parameter(manifest: Manifest) -> None:
 @pytest.mark.parametrize(
     ("name", "arguments"),
     [
-        ("worktree", {"action": "prune"}),
         ("stash", {"action": "clear"}),
         ("stash", {"action": "show", "index": -1}),
         ("merge", {}),
@@ -449,34 +464,9 @@ def test_stash_places_its_index_after_its_action(manifest: Manifest) -> None:
     assert argv == ("git-cage", "stash", "--repo", "/repo", "show", "0")
 
 
-def test_worktree_add_places_the_path_then_the_branch_flag(
-    manifest: Manifest,
-) -> None:
-    """A worktree add forms 'add <path> -b <branch>', which git's parser takes."""
-    arguments = {
-        "repo": "/repo",
-        "action": "add",
-        "path": "/root/wt",
-        "branch": "task/wt",
-    }
-
-    argv = form_argv(manifest.actions["worktree"], arguments)
-
-    assert argv == (
-        "git-cage",
-        "worktree",
-        "--repo",
-        "/repo",
-        "add",
-        "/root/wt",
-        "-b",
-        "task/wt",
-    )
-
-
-@pytest.mark.parametrize("name", sorted(SCRIPT_ACTIONS))
+@pytest.mark.parametrize("name", sorted(SCRIPT_ACTIONS.keys() - {"diff"}))
 def test_script_action_runs_its_executable(manifest: Manifest, name: str) -> None:
-    """Each script action runs /plugin/bin/<name> with its credentials and timeout."""
+    """Each script action but diff runs /plugin/bin/<name> with the plain result."""
     credentials, timeout = SCRIPT_LIMITS.get(name, ((), MINUTE))
     action = manifest.actions[name]
 
@@ -487,6 +477,58 @@ def test_script_action_runs_its_executable(manifest: Manifest, name: str) -> Non
         action.timeout,
         action.output_schema,
     ) == (f"/plugin/bin/{name}", credentials, timeout, SCRIPT_OUTPUT_SCHEMA)
+
+
+def test_diff_runs_its_executable_with_two_result_shapes(manifest: Manifest) -> None:
+    """The diff output_schema is the plain result or the four-member file result."""
+    action = manifest.actions["diff"]
+
+    assert isinstance(action, ScriptAction)
+    assert (
+        action.executable,
+        action.credentials,
+        action.timeout,
+        action.output_schema,
+    ) == ("/plugin/bin/diff", (), MINUTE, DIFF_OUTPUT_SCHEMA)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"exit_code": 0, "stdout": "diff --git a/a b/a\n", "stderr": ""},
+        {
+            "exit_code": 0,
+            "stderr": "",
+            "path": "/repo/.agent-proxy/a.diff",
+            "stat": " a | 2 +-\n",
+        },
+    ],
+)
+def test_diff_output_schema_accepts_each_result_shape(
+    manifest: Manifest, result: dict[str, object]
+) -> None:
+    """A result of either shape the diff script returns validates."""
+    action = manifest.actions["diff"]
+
+    assert isinstance(action, ScriptAction)
+    assert Draft202012Validator(action.output_schema).is_valid(result)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"exit_code": 0, "stdout": "", "stderr": "", "path": "/x", "stat": ""},
+        {"exit_code": 0, "stderr": "", "path": "/x"},
+    ],
+)
+def test_diff_output_schema_refuses_a_mixed_or_partial_result(
+    manifest: Manifest, result: dict[str, object]
+) -> None:
+    """A result with stdout beside path, or with no stat, matches neither shape."""
+    action = manifest.actions["diff"]
+
+    assert isinstance(action, ScriptAction)
+    assert not Draft202012Validator(action.output_schema).is_valid(result)
 
 
 @pytest.mark.parametrize("name", sorted(SCRIPT_ACTIONS))
@@ -509,6 +551,10 @@ def test_script_action_states_its_input(manifest: Manifest, name: str) -> None:
         ("restore", {"files": ["a.txt"], "staged": "yes"}),
         ("diff", {"files": ["x\n/../y"]}),
         ("diff", {"ref": "--output=/tmp/x"}),
+        ("diff", {"output": ""}),
+        ("diff", {"output": "/x"}),
+        ("diff", {"output": ".."}),
+        ("diff", {"output": "a/../b"}),
         ("lfs_track", {"patterns": [".."]}),
         ("lfs_untrack", {"patterns": []}),
         ("commit", {}),
@@ -518,12 +564,18 @@ def test_script_action_states_its_input(manifest: Manifest, name: str) -> None:
         ("checkout", {}),
         ("checkout", {"target": ""}),
         ("checkout", {"target": "task/c", "create": "yes"}),
+        ("worktree", {}),
+        ("worktree", {"action": "prune"}),
+        ("worktree", {"action": "add", "path": "wt"}),
+        ("worktree", {"action": "add", "path": "/wt", "branch": "-b"}),
+        ("worktree", {"action": "add", "path": "/wt", "branch": "--detach"}),
+        ("worktree", {"action": "add", "path": "/wt", "create_branch": "no"}),
     ],
 )
 def test_script_action_refuses_an_input_outside_its_schema(
     manifest: Manifest, name: str, arguments: dict[str, object]
 ) -> None:
-    """An empty list, a '..' segment, an option as ref, or a stray member is refused."""
+    """An empty list, a '..', an option, a relative path, or a stray member fails."""
     with pytest.raises(InputError):
         validate_input(manifest.actions[name], {"repo": "/repo", **arguments})
 
@@ -534,10 +586,23 @@ def test_script_action_refuses_an_input_outside_its_schema(
         ("add", {"files": ["a..b", "-v.txt", "dir/a.txt"]}),
         ("diff", {}),
         ("diff", {"staged": True, "ref": "HEAD~1", "files": ["a.txt"]}),
+        ("diff", {"output": "a.diff"}),
+        ("diff", {"output": "d/a.diff"}),
         ("lfs_track", {"patterns": ["*.bin"]}),
         ("commit", {"message": "m"}),
         ("push", {}),
         ("checkout", {"target": "task/c", "create": True}),
+        ("worktree", {"action": "list"}),
+        ("worktree", {"action": "remove", "path": "/wt"}),
+        (
+            "worktree",
+            {
+                "action": "add",
+                "path": "/wt",
+                "branch": "task/wt",
+                "create_branch": False,
+            },
+        ),
     ],
 )
 def test_script_action_accepts_an_input_inside_its_schema(

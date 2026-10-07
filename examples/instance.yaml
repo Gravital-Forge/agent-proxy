@@ -37,6 +37,7 @@ scopes:
         roots: [{path: /home/agent-01/Projects/example-repo, mode: rw}]
         domains: [github.com]
         credentials: {github-token: {env: GH_TOKEN}}
+        env: {GIT_BRANCH_PREFIXES: "task/"}
       github.pr_view:
         roots: []
         domains: [api.github.com]

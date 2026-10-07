@@ -1,5 +1,11 @@
 import json
 import os
+import socket
+import threading
+from collections.abc import Iterator
+from dataclasses import dataclass, field
+from email.message import Message
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -13,6 +19,26 @@ CHECKS_7 = (
     "lint\tpass\t10s\thttps://github.com/o/n/actions/runs/102/job/2\t\n"
     "test\tfail\t2m\thttps://github.com/o/n/actions/runs/101/job/3\t\n"
 )
+FAILED_LINE = "build\tfail\t1m\thttps://github.com/o/n/actions/runs/101/job/1\t"
+JOB_LOGS_PATH = "/repos/o/n/actions/jobs/{job_id}/logs"
+LOG_URL = "https://results-receiver.invalid/job/{job_id}?sig=s"
+NOT_FOUND = b'{"message":"Not Found"}'
+PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+
+
+@dataclass
+class FakeApi:
+    """A plain-HTTP API: its answers by path, and each request it saw."""
+
+    answers: dict[str, tuple[int, dict[str, str], bytes]] = field(default_factory=dict)
+    seen: list[tuple[str, Message]] = field(default_factory=list)
+
+    def redirect(self, job_id: int) -> str:
+        """Answer job_id's log request with a 302 to its log URL; return the URL."""
+        url = LOG_URL.format(job_id=job_id)
+        path = JOB_LOGS_PATH.format(job_id=job_id)
+        self.answers[path] = (302, {"Location": url}, b"")
+        return url
 
 
 @pytest.fixture(autouse=True)
@@ -23,6 +49,92 @@ def gh_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("GH_STUB_LOG", str(log))
     monkeypatch.setenv("GH_TOKEN", TOKEN)
     return log
+
+
+@pytest.fixture
+def direct(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear the proxy variables, so urllib connects straight to API_URL."""
+    for name in PROXY_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture
+def api(monkeypatch: pytest.MonkeyPatch, direct: None) -> Iterator[FakeApi]:
+    """Serve a FakeApi on 127.0.0.1, and point scripts.API_URL at it."""
+    fake = FakeApi()
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            """Record the request, then send the answer for its path, or 404."""
+            fake.seen.append((self.path, self.headers))
+            status, headers, body = fake.answers.get(self.path, (404, {}, NOT_FOUND))
+            self.send_response(status)
+            for name, value in headers.items():
+                self.send_header(name, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args: object) -> None:
+            """Log nothing, so the test output stays clean."""
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    monkeypatch.setattr(scripts, "API_URL", f"http://127.0.0.1:{server.server_port}")
+    try:
+        yield fake
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+@dataclass
+class RawApi:
+    """A socket that answers every request with the same bytes, then closes."""
+
+    answer: bytes = b""
+
+
+def _read_request(connection: socket.socket) -> None:
+    """Read a request up to the blank line that ends its headers."""
+    request = b""
+    while b"\r\n\r\n" not in request:
+        chunk = connection.recv(65536)
+        if not chunk:
+            return
+        request += chunk
+
+
+@pytest.fixture
+def raw_api(monkeypatch: pytest.MonkeyPatch, direct: None) -> Iterator[RawApi]:
+    """Serve a RawApi on 127.0.0.1, and point scripts.API_URL at it."""
+    raw = RawApi()
+    listener = socket.create_server(("127.0.0.1", 0))
+    listener.settimeout(0.1)
+    stop = threading.Event()
+
+    def serve() -> None:
+        while not stop.is_set():
+            try:
+                connection, _ = listener.accept()
+            except TimeoutError:
+                continue
+            with connection:
+                _read_request(connection)
+                connection.sendall(raw.answer)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    port = listener.getsockname()[1]
+    monkeypatch.setattr(scripts, "API_URL", f"http://127.0.0.1:{port}")
+    try:
+        yield raw
+    finally:
+        stop.set()
+        thread.join()
+        listener.close()
 
 
 def _calls(log: Path) -> list[list[str]]:
@@ -46,6 +158,7 @@ def test_actions_holds_each_script_action() -> None:
         "pr_reply",
         "pr_checks",
         "pr_close",
+        "job_log_url",
     }
 
 
@@ -203,19 +316,76 @@ def test_pr_reply_comments_on_the_pull_request_without_comment_id() -> None:
     )
 
 
-def test_pr_checks_appends_each_failed_runs_logs_once(gh_log: Path) -> None:
-    """Run 101 fails twice and its logs are fetched once; passing run 102's never."""
+def test_pr_checks_appends_each_failed_jobs_log_url(api: FakeApi, gh_log: Path) -> None:
+    """Failed jobs 1 and 3 each get one URL line; passing job 2 gets none."""
+    first = api.redirect(1)
+    third = api.redirect(3)
+
     result = scripts.pr_checks({"repo": "o/n", "pr_number": 7})
 
     assert result == {
         "exit_code": 1,
-        "stdout": f"{CHECKS_7}\n--- Failed logs for run 101 ---\nlog of 101\n",
+        "stdout": f"{CHECKS_7}Failed job 1 log: {first}\nFailed job 3 log: {third}\n",
         "stderr": "",
     }
-    assert _calls(gh_log) == [
-        ["pr", "checks", "7", "--repo", "o/n"],
-        ["run", "view", "101", "--log-failed", "--repo", "o/n"],
+    assert _calls(gh_log) == [["pr", "checks", "7", "--repo", "o/n"]]
+    assert [path for path, _ in api.seen] == [
+        "/repos/o/n/actions/jobs/1/logs",
+        "/repos/o/n/actions/jobs/3/logs",
     ]
+
+
+def test_pr_checks_names_why_a_failed_jobs_log_url_is_unavailable(
+    api: FakeApi,
+) -> None:
+    """A job whose log request fails gets an unavailable line with the reason."""
+    first = api.redirect(1)
+
+    result = scripts.pr_checks({"repo": "o/n", "pr_number": 7})
+
+    assert result["stdout"] == (
+        f"{CHECKS_7}Failed job 1 log: {first}\n"
+        "Failed job 3 log unavailable: "
+        f"GET /repos/o/n/actions/jobs/3/logs answered 404: {NOT_FOUND.decode()}\n"
+    )
+
+
+def test_pr_checks_ends_checks_without_a_newline_before_the_url_lines(
+    api: FakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checks output with no final newline gains one before the first URL line."""
+    url = api.redirect(1)
+    monkeypatch.setattr(
+        scripts,
+        "run_gh",
+        lambda _args: {"exit_code": 1, "stdout": FAILED_LINE, "stderr": "e\n"},
+    )
+
+    result = scripts.pr_checks({"repo": "o/n", "pr_number": 7})
+
+    assert result == {
+        "exit_code": 1,
+        "stdout": f"{FAILED_LINE}\nFailed job 1 log: {url}\n",
+        "stderr": "e\n",
+    }
+
+
+def test_pr_checks_names_a_job_failing_on_two_lines_once(
+    api: FakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A job named by two failing lines gets one URL line and one request."""
+    url = api.redirect(1)
+    checks = f"{FAILED_LINE}\n{FAILED_LINE}\n"
+    monkeypatch.setattr(
+        scripts,
+        "run_gh",
+        lambda _args: {"exit_code": 1, "stdout": checks, "stderr": ""},
+    )
+
+    result = scripts.pr_checks({"repo": "o/n", "pr_number": 7})
+
+    assert result["stdout"] == f"{checks}Failed job 1 log: {url}\n"
+    assert len(api.seen) == 1
 
 
 def test_pr_checks_returns_a_failed_call_with_no_stdout(gh_log: Path) -> None:
@@ -231,6 +401,164 @@ def test_pr_checks_returns_checks_with_no_failed_run_as_they_are() -> None:
     result = scripts.pr_checks({"repo": "o/n", "pr_number": 3})
 
     assert result == _echo("pr", "checks", "3", "--repo", "o/n")
+
+
+def test_job_log_location_returns_the_redirects_location(api: FakeApi) -> None:
+    """A 302's Location is returned; the request carries the token and API headers."""
+    url = api.redirect(5)
+
+    location = scripts.job_log_location("o/n", 5.0)
+
+    assert location == url
+    [(path, headers)] = api.seen
+    assert path == "/repos/o/n/actions/jobs/5/logs"
+    assert (
+        headers["Authorization"],
+        headers["Accept"],
+        headers["X-GitHub-Api-Version"],
+        headers["User-Agent"],
+    ) == (
+        f"Bearer {TOKEN}",
+        "application/vnd.github+json",
+        "2022-11-28",
+        "agent-proxy-github-plugin",
+    )
+
+
+def test_job_log_location_names_the_status_and_body_of_a_404(api: FakeApi) -> None:
+    """A job the API does not know fails with the answer's status and body."""
+    with pytest.raises(scripts.LogUrlError) as raised:
+        scripts.job_log_location("o/n", 2)
+
+    assert str(raised.value) == (
+        f"GET /repos/o/n/actions/jobs/2/logs answered 404: {NOT_FOUND.decode()}"
+    )
+
+
+def test_job_log_location_refuses_a_redirect_without_a_location(
+    api: FakeApi,
+) -> None:
+    """A 302 with no Location header fails with its status and body."""
+    api.answers[JOB_LOGS_PATH.format(job_id=1)] = (302, {}, b"moved")
+
+    with pytest.raises(scripts.LogUrlError) as raised:
+        scripts.job_log_location("o/n", 1)
+
+    assert str(raised.value) == "GET /repos/o/n/actions/jobs/1/logs answered 302: moved"
+
+
+def test_job_log_location_refuses_a_200_naming_200_characters_of_its_body(
+    api: FakeApi,
+) -> None:
+    """A 200 is not a log URL; the reason holds the first 200 body characters."""
+    api.answers[JOB_LOGS_PATH.format(job_id=1)] = (200, {}, b"x" * 300)
+
+    with pytest.raises(scripts.LogUrlError) as raised:
+        scripts.job_log_location("o/n", 1)
+
+    assert str(raised.value) == (
+        f"GET /repos/o/n/actions/jobs/1/logs answered 200: {'x' * 200}"
+    )
+
+
+@pytest.mark.usefixtures("direct")
+def test_job_log_location_names_a_refused_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A port nothing listens on fails with the connection error."""
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    monkeypatch.setattr(scripts, "API_URL", f"http://127.0.0.1:{port}")
+
+    with pytest.raises(
+        scripts.LogUrlError,
+        match=r"^GET /repos/o/n/actions/jobs/1/logs failed: .*Connection refused",
+    ):
+        scripts.job_log_location("o/n", 1)
+
+
+def test_job_log_location_names_an_answer_that_is_not_http(raw_api: RawApi) -> None:
+    """An answer with no HTTP status line fails with the protocol error."""
+    raw_api.answer = b"garbage\r\n\r\n"
+
+    with pytest.raises(
+        scripts.LogUrlError,
+        match=r"^GET /repos/o/n/actions/jobs/1/logs failed: ",
+    ):
+        scripts.job_log_location("o/n", 1)
+
+
+@pytest.mark.parametrize("status", ["200 OK", "404 Not Found"])
+def test_job_log_location_names_a_body_shorter_than_its_length(
+    raw_api: RawApi, status: str
+) -> None:
+    """A body cut short of its Content-Length fails with the protocol error."""
+    raw_api.answer = f"HTTP/1.1 {status}\r\nContent-Length: 100\r\n\r\nshort".encode()
+
+    with pytest.raises(
+        scripts.LogUrlError,
+        match=r"^GET /repos/o/n/actions/jobs/1/logs failed: IncompleteRead\(5 bytes",
+    ):
+        scripts.job_log_location("o/n", 1)
+
+
+def test_pr_checks_names_a_protocol_failure_as_unavailable(raw_api: RawApi) -> None:
+    """A protocol failure on a job's log request gives an unavailable line."""
+    raw_api.answer = b"garbage\r\n\r\n"
+
+    result = scripts.pr_checks({"repo": "o/n", "pr_number": 7})
+
+    assert result["stdout"].startswith(
+        f"{CHECKS_7}Failed job 1 log unavailable: "
+        "GET /repos/o/n/actions/jobs/1/logs failed: "
+    )
+
+
+def test_job_log_location_refuses_without_gh_token(
+    api: FakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GH_TOKEN unset is refused before any request."""
+    monkeypatch.delenv("GH_TOKEN")
+
+    with pytest.raises(scripts.RefusalError, match="^GH_TOKEN is not set$"):
+        scripts.job_log_location("o/n", 1)
+
+    assert api.seen == []
+
+
+def test_job_log_location_refuses_an_empty_gh_token(
+    api: FakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GH_TOKEN set to the empty string is refused before any request."""
+    monkeypatch.setenv("GH_TOKEN", "")
+
+    with pytest.raises(scripts.RefusalError, match="^GH_TOKEN is not set$"):
+        scripts.job_log_location("o/n", 1)
+
+    assert api.seen == []
+
+
+def test_job_log_url_returns_the_url_as_its_stdout(api: FakeApi) -> None:
+    """The job_log_url action prints the URL and a newline, and exits 0."""
+    url = api.redirect(1)
+
+    result = scripts.job_log_url({"repo": "o/n", "job_id": 1})
+
+    assert result == {"exit_code": 0, "stdout": f"{url}\n", "stderr": ""}
+
+
+def test_job_log_url_returns_the_reason_on_stderr(api: FakeApi) -> None:
+    """A failed request is exit code 1 with the reason and a newline on stderr."""
+    result = scripts.job_log_url({"repo": "o/n", "job_id": 2})
+
+    assert result == {
+        "exit_code": 1,
+        "stdout": "",
+        "stderr": (
+            f"GET /repos/o/n/actions/jobs/2/logs answered 404: {NOT_FOUND.decode()}\n"
+        ),
+    }
 
 
 def test_pr_close_passes_comment_and_delete_branch() -> None:
