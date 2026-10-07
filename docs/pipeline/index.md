@@ -18,8 +18,8 @@ the item's pull request body carries.
 
 - `<workspace root>` is the harness clone. Run `pwd` from a workspace session to read it.
 - `.dev/version-control.md` places the primary clone, the project worktree, and every item worktree,
-  names their branches, and owns the sidecar routes, the worktree cleanup rule, and the CI watch
-  threshold. Every job reads those there.
+  names their branches, names which checkout each `git_*` call acts on, and owns the worktree
+  cleanup rule and the CI watch threshold. Every job reads those there.
 - The **project worktree**, `<workspace root>/projects/agent-proxy-poc` on `task/poc`, holds this
   directory, the **design** `docs/design.md`, and the **roadmap** `docs/roadmap.md`.
 - An **item worktree**, `<workspace root>/projects/agent-proxy-<slug>` on `task/<slug>`, holds the
@@ -38,7 +38,7 @@ alone edits it. An entry's slug names its branch `task/<slug>` and its worktree
 
 `.dev/task-management.md` states when an item is done: a merge commit naming `task/<slug>` on the
 first-parent log of `task/poc`. Read that log with shell git in the project worktree, because the
-sidecar's `git_log` has no first-parent option. The roadmap stores no status.
+proxy's `git_log` has no first-parent option. The roadmap stores no status.
 
 ## Rules every job obeys
 
@@ -133,10 +133,10 @@ Each is an instruction, not a tool.
   spec, its plan, and the dry-run record. Read however you like, batched. `Edit` and `Write` refuse
   and report on a mismatch; a heredoc or inline script that asserts and exits discards the batch
   silently. Read a multi-edit batch back before calling it landed.
-- **Check the sidecar before the first write.** A job's first sidecar call on any route is
+- **Check the proxy before the first write.** A job's first proxy call on any checkout is
   `git_status`. A bare `Invalid request parameters` is a stale connection: reconnect with `/mcp` and
-  retry before concluding anything else. Load the sidecar tools the job needs in one `ToolSearch`
-  call at the start.
+  retry before concluding anything else. Load the proxy tools the job needs in one `ToolSearch` call
+  at the start.
 - **Compose from the pinned shape.** A pull request body, a verdict, or a handoff is written from
   the shape this document pins. Never read a prior pull request body to match its form.
 - **Leads run one at a time.** Implementer-leads share the item worktree, and concurrent leads
@@ -194,8 +194,6 @@ binding stops for a person.
   every subagent the job uses, and makes the job's lifecycle report.
 - **Primary clone**, **project worktree**, **item worktree** — the three checkouts
   `.dev/version-control.md` places.
-- **Project route**, **item route**, **primary route** — the sidecar routes
-  `.dev/version-control.md` defines.
 - **Integration branch** — `task/poc`. Every item's pull request targets it, the project worktree
   stays checked out on it, and the operator merges it into `main` when the roadmap is done.
 - **Design** — `docs/design.md` on `task/poc`: the operator's closed decisions for the proof of

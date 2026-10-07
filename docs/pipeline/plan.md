@@ -22,11 +22,12 @@ Opus 5.5, the project model; `.dev/models.md`.
 ### Set up the worktree
 
 Open `<workspace root>/projects/agent-proxy-poc/CLAUDE.md` with the `Read` tool. Run `/setup`. Pull
-the project worktree first through the project route; its HEAD is `task/poc`, and the new branch
-cuts from there. Create the worktree on the project route:
+the project worktree first with `git_pull`, with `repo` set to the project worktree; its HEAD is
+`task/poc`, and the new branch cuts from there. Create the worktree with `repo` set to the project
+worktree:
 
 ```text
-git_worktree(action="add", path=<projects/agent-proxy-<slug>, in route form>, branch="task/<slug>", create_branch=True)
+git_worktree(action="add", path=<workspace root>/projects/agent-proxy-<slug>, branch="task/<slug>", create_branch=True)
 ```
 
 Run `uv sync` in each package directory that exists in the worktree: every directory under `core/`

@@ -14,8 +14,8 @@ Opus 5.5, the project model; `.dev/models.md`.
 
 - The item worktree `projects/agent-proxy-<slug>`, holding `.local/impl/spec.md` and
   `.local/impl/plan.md`.
-- The pull request's comments, when the prompt carries a `PR` line: read them with `gh_pr_fetch` on
-  the item route. A not-ready Merge verdict lives there, and the handoff repeats none of it.
+- The pull request's comments, when the prompt carries a `PR` line: read them with
+  `github_pr_fetch`. A not-ready Merge verdict lives there, and the handoff repeats none of it.
 
 A plan whose `## Review` heading lacks an Approved line from every reviewer `writing-plans`
 dispatches is refused: hand off to PM with that blocker rather than implement it.
@@ -33,7 +33,7 @@ Run `/multiplayer` with one implementer-lead at a time. Each dispatch carries th
 and the plan's global constraints, names the *How to use it* section of `.dev/verification.md` for
 the light bar, and gives the model `.dev/models.md` sets for the lead and for every dev-worker it
 dispatches. Each lead's checkpoint runs the light bar. After a dispatch, end the turn and wait for
-the completion notification. A sidecar index-lock error is a retry, not an anomaly.
+the completion notification. A proxy index-lock error is a retry, not an anomaly.
 
 ### Close out
 
@@ -46,17 +46,17 @@ notify steps, and run in this order.
 1. **Heavy bar.** After the last fix, run the heavy bar once, as `.dev/verification.md` defines it,
    leftover check included. A red inside the item is fixed, checkpointed, and the heavy bar runs
    again. A red for a reason outside the item is something broken under `index.md`.
-2. **Pull request.** With no `PR` line in the prompt, open the pull request with `gh_pr_create` on
-   the item route and `base="task/poc"`. With a `PR` line, that pull request exists: push the fixes
-   to `task/<slug>` with `git_push` on the item route, and rewrite its body with `gh_pr_edit`.
-   Create no second pull request. The body carries the fixed headings `.dev/task-management.md`
-   sets: `## Fork log` copied from `.local/impl/spec.md`, `## Plan tasks` copied from
-   `.local/impl/plan.md`, and `## Decisions` copied from `.local/impl/spec.md` when the spec has
-   one.
+2. **Pull request.** With no `PR` line in the prompt, open the pull request with `github_pr_create`,
+   with `base="task/poc"` and `head="task/<slug>"`. With a `PR` line, that pull request exists: push
+   the fixes to `task/<slug>` with `git_push`, with `repo` set to the item worktree, and rewrite its
+   body with `github_pr_edit`. Create no second pull request. The body carries the fixed headings
+   `.dev/task-management.md` sets: `## Fork log` copied from `.local/impl/spec.md`, `## Plan tasks`
+   copied from `.local/impl/plan.md`, and `## Decisions` copied from `.local/impl/spec.md` when the
+   spec has one.
 3. **Notify.** Notify that the pull request opened, or that it was updated when the prompt carried a
    `PR` line. Notify means what `index.md` defines.
-4. **Watch CI.** Watch the pull request's checks to green with `gh_pr_checks` on the item route, by
-   the CI watch `.dev/version-control.md` sets. Count each red round under `index.md`'s rule
+4. **Watch CI.** Watch the pull request's checks to green with `github_pr_checks`, by the CI watch
+   `.dev/version-control.md` sets. Count each red round under `index.md`'s rule
    *CI rounds are counted*.
 
 ## Out

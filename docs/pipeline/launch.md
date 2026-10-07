@@ -12,8 +12,8 @@ These hold before a worker launches. Each names the command that confirms it.
 1. The `baton-worker` skill is in the harness, at `<workspace root>/.claude/skills/baton-worker/`.
    **Pass:** a workspace session lists `baton-worker` among its skills.
 2. The repository merges by merge commit. The primary clone's config sets `merge.ff false` and
-   `pull.ff only`, and every worktree shares that config. The sidecar's `git_merge` then makes a
-   merge commit, and an item's completion reads from the first-parent log. **Pass:**
+   `pull.ff only`, and every worktree shares that config. The proxy's `git_merge` then makes a merge
+   commit, and an item's completion reads from the first-parent log. **Pass:**
    `git -C <workspace root>/projects/agent-proxy config --get merge.ff` prints `false`, and
    `--get pull.ff` prints `only`.
 3. `task/poc` tracks `origin/task/poc` in the project worktree. **Pass:**
@@ -54,12 +54,13 @@ mode rejects.
    --- initial_prompt begins ---
    Job: dry run
    Read first: <workspace root>/projects/agent-proxy-poc/docs/pipeline/launch.md, section 2.
-   Create the worktree projects/agent-proxy-dry-run on branch task/dry-run through the sidecar
-   on the project route, with the path in the route form .dev/version-control.md gives.
+   Create the worktree projects/agent-proxy-dry-run on branch task/dry-run through the proxy,
+   with repo set to the project worktree and path set to
+   <workspace root>/projects/agent-proxy-dry-run.
    In it, run every command in the dry-run list, in order, and after each record the command
    and whether it ran or auto mode rejected it. Write the record to
    <workspace root>/projects/agent-proxy-poc/.local/dry-run.md. Remove the worktree through
-   the sidecar by the steps .dev/version-control.md gives, then report completed.
+   the proxy by the steps .dev/version-control.md gives, then report completed.
    --- initial_prompt ends ---
 
    Report the project id the call returns, then call `list_projects` and show the result.
@@ -90,10 +91,11 @@ docker image prune --all --force --filter label=agent-proxy.test=1
 The last three lines are the worktree cleanup `.dev/version-control.md` sets, so the dry run shows
 whether auto mode lets a job run it.
 
-Then, through the sidecar on the dry-run worktree's route, the worker runs `git_status`, `git_log`,
-`git_add` and `git_commit` of one scratch file, `git_push`, and `gh_pr_checks` against any open pull
-request or a recorded refusal. On the project route it runs `git_worktree` remove. Last, the worker
-records whether the `PushNotification` and `clover_reply` tools are present in its session, runs
+Then, through the proxy with `repo` set to the dry-run worktree, the worker runs `git_status`,
+`git_log`, `git_add` and `git_commit` of one scratch file, and `git_push`. It runs
+`github_pr_checks` against any open pull request, or records a refusal. With `repo` set to the
+project worktree, it runs `git_worktree` remove. Last, the worker records whether the
+`PushNotification` and `clover_reply` tools are present in its session, runs
 `<workspace root>/.claude/skills/checking-usage/usage-check.sh`, and records its line.
 
 A denial reaches the worker in one of two forms. The auto-mode classifier's own denial begins
@@ -160,9 +162,9 @@ To watch a worker, or to act on one that is stuck:
 
 1. PM reports `completed`. **Pass:** the first-parent log of `task/poc` carries one merge for every
    entry in `docs/roadmap.md`.
-2. Open the pull request from `task/poc` to `main`. Call `gh_pr_create` on the project route with
-   `base="main"`, or open it in the GitHub UI. **Pass:** the pull request lists on GitHub with base
-   `main`.
+2. Open the pull request from `task/poc` to `main`. Call `github_pr_create` with `base="main"` and
+   `head="task/poc"`, or open it in the GitHub UI. **Pass:** the pull request lists on GitHub with
+   base `main`.
 3. Merge that pull request with a merge commit. **Pass:** `main`'s log carries the merge commit.
 4. When the operator declares the proof of concept done, remove the project worktree with
    `/cleanup-worktrees`. The branch `task/poc` stays. **Pass:**

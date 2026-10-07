@@ -13,8 +13,8 @@ Opus 5.5, the project model; `.dev/models.md`.
 ## In
 
 - The pull request number the prompt carries.
-- The pull request's prior verdict comments, read with `gh_pr_fetch` on the item route, so a second
-  not-ready shows as one.
+- The pull request's prior verdict comments, read with `github_pr_fetch`, so a second not-ready
+  shows as one.
 - The item worktree `projects/agent-proxy-<slug>` with its spec, its plan, and its branch.
 - The item's entry in `docs/roadmap.md`, and `.dev/documentation.md`.
 
@@ -24,12 +24,12 @@ Opus 5.5, the project model; `.dev/models.md`.
 
 Every check below is named in the verdict:
 
-- **CI green on the pull request's head commit** — `gh_pr_checks` on the item route.
+- **CI green on the pull request's head commit** — `github_pr_checks`.
 - **The full bar** — the light bar and the heavy bar run in the item worktree, with CI green above,
   as `.dev/verification.md` defines them.
-- **Every task under the pull request body's `## Plan tasks` present in the diff** — `git_diff` on
-  the item route with its `ref` and `output` arguments, so the diff body streams to a file and stays
-  out of context.
+- **Every task under the pull request body's `## Plan tasks` present in the diff** — `git_diff` with
+  `repo` set to the item worktree and its `ref` and `output` arguments, so the diff body streams to
+  a file and stays out of context.
 - **Nothing outside the plan** — outside means a changed file no task names, other than a lockfile,
   a fixture, or a sibling test of a planned file.
 - **The kept documents the change affects updated** — `.dev/documentation.md` closes that set and
@@ -38,8 +38,8 @@ Every check below is named in the verdict:
 
 ### Post the verdict
 
-`gh_pr_reply` on the item route with `Ready` or `Not ready` and one line per check above: the check,
-its result, and the evidence.
+`github_pr_reply` with `Ready` or `Not ready` and one line per check above: the check, its result,
+and the evidence.
 
 Not ready hands off to Build with the findings in that comment. A second not-ready on the same pull
 request is a blocker to PM. A check red for a reason outside the item is something broken under
@@ -47,16 +47,17 @@ request is a blocker to PM. A check red for a reason outside the item is somethi
 
 ### Merge, on ready
 
-1. `gh_pr_view` with `fields="headRefOid"` on the item route — confirm the pull request's head
-   commit equals the branch tip.
-2. `git_pull` of `task/poc` on the project route. A non-fast-forward pull is a not-ready verdict.
-3. `git_merge(branch="task/<slug>")` on the project route. `.dev/version-control.md` makes it a
-   merge commit. On a merge failure run the local `git merge --abort` in the project worktree, one
-   of the plain git writes that binding sanctions, post not ready naming the conflict, and hand off
-   to Build.
-4. `git_push` on the project route.
-5. `gh_pr_view` with `fields="state"` on the item route, up to five times ten seconds apart, until
-   it reads `MERGED`.
+1. `github_pr_view` with `fields="headRefOid"` — confirm the pull request's head commit equals the
+   branch tip.
+2. `git_pull` of `task/poc`, with `repo` set to the project worktree. A non-fast-forward pull is a
+   not-ready verdict.
+3. `git_merge(branch="task/<slug>")`, with `repo` set to the project worktree.
+   `.dev/version-control.md` makes it a merge commit. On a merge failure run the local
+   `git merge --abort` in the project worktree, one of the plain git writes that binding sanctions,
+   post not ready naming the conflict, and hand off to Build.
+4. `git_push`, with `repo` set to the project worktree.
+5. `github_pr_view` with `fields="state"`, up to five times ten seconds apart, until it reads
+   `MERGED`.
 
 Once `git_push` has landed the merge commit on `task/poc`, a failure is never a not-ready verdict. A
 pull request still open after the fifth read, or any later step that fails, is something broken
@@ -68,10 +69,10 @@ Merge reaches this step once step 5 above reads `MERGED`. PM reaches it when it 
 
 1. Clear the worktree's outputs by the steps under Removing an item worktree in
    `.dev/version-control.md`, each to its done-when.
-2. Confirm the worktree's status is clean with `git_status` on the item route.
-3. `git_worktree(action="remove", path=<the worktree in route form>)` on the project route. On a
-   sidecar timeout, run the local `git worktree prune` in the project worktree and report what
-   remains.
+2. Confirm the worktree's status is clean with `git_status`, with `repo` set to the item worktree.
+3. `git_worktree(action="remove", path=<the worktree's absolute path>)`, with `repo` set to the
+   project worktree. On a proxy timeout, run the local `git worktree prune` in the project worktree
+   and report what remains.
 
 The branch stays, local and remote.
 
