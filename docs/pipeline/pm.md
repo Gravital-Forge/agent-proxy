@@ -12,16 +12,15 @@ Opus 5.5, the project model; `.dev/models.md`.
 
 ## In
 
-- `docs/roadmap.md` and `docs/design.md` in the project worktree, after a `git_pull` on the project
-  route. Read the design by section, where a check or a decision touches it.
+- `docs/roadmap.md` and `docs/design.md` in the project worktree, after a `git_pull` with `repo` set
+  to the project worktree. Read the design by section, where a check or a decision touches it.
 - The integration branch's first-parent log, read in the project worktree with shell git:
   `git log --first-parent --oneline task/poc`. `.dev/task-management.md` states when an item is
   done.
-- Every open pull request with its body and its comments: `gh_pr_list` on the project route, then
-  `gh_pr_view` and `gh_pr_fetch` on the route `.dev/version-control.md` sets for pull request reads.
+- Every open pull request with its body and its comments: `github_pr_list`, then `github_pr_view`
+  and `github_pr_fetch`.
 - The last merged item's Merge verdict, as step 3 names that item: the verdict comment on its pull
-  request, read with `gh_pr_fetch` on the project route, since its worktree is gone. Read no other
-  merged pull request.
+  request, read with `github_pr_fetch`. Read no other merged pull request.
 - The blocker the prompt names, when it carries one, read from the durable home the prompt gives.
 
 ## Does
@@ -59,18 +58,18 @@ When the operator answers, PM reports `running` and continues from the step it s
 
 ### Dropping an item
 
-1. When the item has an open pull request, close it with `gh_pr_close` on the item route, with a
-   comment carrying the reason.
+1. When the item has an open pull request, close it with `github_pr_close`, with a comment carrying
+   the reason.
 2. When the item has a worktree, remove it by the steps under Remove the worktree in `merge.md`.
 3. Edit `docs/roadmap.md`, and say why in the commit message.
 
 ## Out
 
 When PM changed the roadmap or the design: `docs/roadmap.md`, `docs/design.md`, or both, committed
-and pushed from the project worktree on `task/poc`, through the project route — `git_add` of the
-changed files, then `git_commit`, then `git_push`. That documents-only commit is the write
-`.dev/version-control.md` sanctions for PM. Its message carries every decision PM took. A change to
-a closed decision in `docs/design.md` waits for the operator, under Authority above.
+and pushed from the project worktree on `task/poc`, with `repo` set to the project worktree —
+`git_add` of the changed files, then `git_commit`, then `git_push`. That documents-only commit is
+the write `.dev/version-control.md` sanctions for PM. Its message carries every decision PM took. A
+change to a closed decision in `docs/design.md` waits for the operator, under Authority above.
 
 A resolved blocker's resolution written in its durable home.
 
