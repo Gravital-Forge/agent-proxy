@@ -1,6 +1,7 @@
 """What the git plugin's integration tests share with their fixtures."""
 
 import os
+import shlex
 import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -69,6 +70,19 @@ def host_git(repo: Path, *args: str) -> str:
         env={**os.environ, **_ISOLATED_GIT},
     )
     return completed.stdout
+
+
+def plant_hook(repo: Path, name: str, mark: Path) -> None:
+    """Plant an executable hook name in repo that creates mark when git runs it.
+
+    git init makes .git/hooks only from a template directory, so the function
+    creates it first.
+    """
+    hooks = repo / ".git" / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    hook = hooks / name
+    hook.write_text(f"#!/bin/sh\ntouch {shlex.quote(str(mark))}\n")
+    hook.chmod(0o755)
 
 
 def stdout_of(outcome: Outcome) -> str:

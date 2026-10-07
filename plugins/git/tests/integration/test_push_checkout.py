@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 from agent_proxy.runner import InputError, Outcome
-from harness import OtherUidRepo, RemotePair, RunAction, host_git, stdout_of
+from harness import OtherUidRepo, RemotePair, RunAction, host_git, plant_hook, stdout_of
 
 PREFIX_REFUSAL = (
     "git plugin refused: Branch '{}' does not match any allowed prefix: task/\n"
@@ -65,6 +65,20 @@ def test_push_sends_a_task_branch_to_origin(
     stdout_of(_push(run_action, remote_pair))
 
     assert host_git(remote_pair.remote, "rev-parse", "refs/heads/task/p") == pushed
+
+
+def test_push_runs_no_pre_push_hook(
+    run_action: RunAction, remote_pair: RemotePair
+) -> None:
+    """A push of task/h succeeds past a planted pre-push hook, which never runs."""
+    pushed = _commit_on_branch(remote_pair.work, "task/h")
+    mark = remote_pair.root / "hook-ran"
+    plant_hook(remote_pair.work, "pre-push", mark)
+
+    stdout_of(_push(run_action, remote_pair))
+
+    assert host_git(remote_pair.remote, "rev-parse", "refs/heads/task/h") == pushed
+    assert not mark.exists()
 
 
 @pytest.mark.parametrize(

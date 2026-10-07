@@ -275,6 +275,11 @@ One instance per agent user:
 -c credential.helper= -c 'credential.helper=!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
 ```
 
+- The git plugin passes `-c core.hooksPath=/dev/null` on every git run, so no hook runs in a cage. A
+  hook planted in a repository would run with the cage's credential and domains: the `push` cage
+  holds `GH_TOKEN` and reaches GitHub. A value on the command line outranks the repository's config,
+  so the repository cannot turn hooks back on.
+
 ## Repository layout
 
 A monorepo with no root `pyproject.toml`; every directory carrying a `pyproject.toml` is its own uv
@@ -355,8 +360,9 @@ The `S` checks need no counterpart on the agent's daemon: in a deployment, cages
 ## Known gaps
 
 - A bug in the instance's own code reaches that agent's tree and that instance's credentials.
-- Code planted in a repository and executed inside a cage can read that cage's credential; the
-  domain allowlist bounds where it can send it, not whether it can read it.
+- Hooks are off in every cage, but code planted in a repository still runs there through
+  `.git/config`, for example `core.fsmonitor` and filter drivers. Such code can read that cage's
+  credential; the domain allowlist bounds where it can send it, not whether it can read it.
 - Traverse on the agent's home lets `agentproxy-<agent>` open any world-readable file there by path.
 - A file created with an explicit restrictive mode (for example a mode-preserving copy of a `0644`
   file) is read-only to the other side; the ACL cannot widen it.

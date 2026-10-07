@@ -9,6 +9,7 @@ from harness import (
     OtherUidRepo,
     RunAction,
     host_git,
+    plant_hook,
     stdout_of,
 )
 
@@ -33,6 +34,20 @@ def test_add_then_commit_makes_a_commit_that_log_shows(
     )
 
     assert log.endswith(" add b\n")
+
+
+def test_commit_runs_no_pre_commit_hook(run_action: RunAction, host_repo: Path) -> None:
+    """A commit succeeds past a planted pre-commit hook, and the hook never runs."""
+    repo = str(host_repo)
+    roots = [host_repo.parent]
+    mark = host_repo.parent / "hook-ran"
+    plant_hook(host_repo, "pre-commit", mark)
+    (host_repo / "b.txt").write_text("new\n")
+
+    stdout_of(run_action("add", {"repo": repo, "files": ["b.txt"]}, roots))
+    stdout_of(run_action("commit", {"repo": repo, "message": "add b"}, roots))
+
+    assert not mark.exists()
 
 
 def test_add_then_commit_on_a_repository_another_uid_owns(

@@ -9,6 +9,7 @@ REFUSAL_EXIT = 2
 REFUSAL_PREFIX = "git plugin refused: "
 ROOTS_ENV_NAME = "AGENT_PROXY_ROOTS"
 REPO_FLAG = "--repo"
+HOOKS_OFF = ("-c", "core.hooksPath=/dev/null")
 CREDENTIAL_HELPER = (
     "-c",
     "credential.helper=",
@@ -68,17 +69,17 @@ def split_repo(args: Sequence[str]) -> tuple[str, list[str]]:
 
 
 def git_argv(repo: str, roots: Sequence[str], args: Sequence[str]) -> list[str]:
-    """Return git's argv: the repo, two safe.directory values per root, helper, args.
+    """Return git's argv: repo, safe.directory values, hooks off, helper, args.
 
-    A root's trailing slashes are dropped, so /x/ trusts /x and /x/*; the root
-    / stays /.
+    Each root gives two safe.directory values. A root's trailing slashes are
+    dropped, so /x/ trusts /x and /x/*; the root / stays /.
     """
     trusted = [
         item
         for root in map(_without_trailing_slashes, roots)
         for item in ("-c", f"safe.directory={root}", "-c", f"safe.directory={root}/*")
     ]
-    return ["git", "-C", repo, *trusted, *CREDENTIAL_HELPER, *args]
+    return ["git", "-C", repo, *trusted, *HOOKS_OFF, *CREDENTIAL_HELPER, *args]
 
 
 def _without_trailing_slashes(root: str) -> str:

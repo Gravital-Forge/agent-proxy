@@ -21,9 +21,9 @@ something to describe creates each one.
 
 ## What each document holds
 
-- `docs/design.md` holds the operator's closed decisions for the proof of concept. An item's pull
-  request edits only the `docs/design.md` sections its roadmap entry names. Every other change to it
-  is PM's, and a change to a closed decision needs the operator.
+- `docs/design.md` holds the operator's closed decisions. An item's pull request edits only the
+  `docs/design.md` sections the operator's ask names, and a change to a closed decision needs the
+  operator.
 - `docs/roadmap.md` is an ordered roster under the decision the project `CLAUDE.md` records.
 - `docs/architecture.md` describes what is built and cites the code by path.
 - `spike/FINDINGS.md` is a dated record: cite it by check ID, and never edit it.
