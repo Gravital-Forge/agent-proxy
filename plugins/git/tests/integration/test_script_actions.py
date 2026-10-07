@@ -14,6 +14,7 @@ from harness import (
 
 LFS_POINTER_HEADER = "version https://git-lfs.github.com/spec/v1"
 NOTHING_STAGED = "git plugin refused: nothing staged; stage changes with git add\n"
+NESTED = "worktree path '{}' is inside the repository it comes from"
 
 
 def test_add_then_commit_makes_a_commit_that_log_shows(
@@ -186,3 +187,39 @@ def test_add_of_a_dot_dot_file_is_refused_before_a_cage(
 
     with pytest.raises(InputError):
         run_action("add", arguments, [host_repo.parent])
+
+
+def test_worktree_add_attaches_an_existing_branch(
+    run_action: RunAction, host_repo: Path
+) -> None:
+    """The worktree add with create_branch false checks out the existing branch."""
+    worktree = host_repo.parent / "wt"
+    host_git(host_repo, "branch", "task/wt")
+    add = {
+        "repo": str(host_repo),
+        "action": "add",
+        "path": str(worktree),
+        "branch": "task/wt",
+        "create_branch": False,
+    }
+
+    stdout_of(run_action("worktree", add, [host_repo.parent]))
+
+    assert host_git(worktree, "rev-parse", "--abbrev-ref", "HEAD") == "task/wt\n"
+
+
+def test_worktree_add_of_a_nested_path_returns_the_refusal(
+    run_action: RunAction, host_repo: Path
+) -> None:
+    """The worktree add of a path inside the repository is refused, and adds none."""
+    path = str(host_repo / "wt")
+    add = {"repo": str(host_repo), "action": "add", "path": path, "branch": "task/wt"}
+
+    outcome = run_action("worktree", add, [host_repo.parent])
+
+    assert outcome.content == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": f"git plugin refused: {NESTED.format(path)}\n",
+    }
+    assert not (host_repo / "wt").exists()

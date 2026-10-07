@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -86,6 +87,7 @@ def test_actions_holds_each_script_action() -> None:
         "lfs_untrack",
         "push",
         "checkout",
+        "worktree",
     }
 
 
@@ -754,3 +756,158 @@ def test_run_script_returns_a_missing_prefixes_refusal_as_its_result(
     result = scripts.run_script("checkout", stdin, environ)
 
     assert result == {"exit_code": 2, "stdout": "", "stderr": NO_PREFIXES_STDERR}
+
+
+def _nested_refusal(path: str) -> str:
+    """Return the pattern of the refusal for a worktree path inside the repository."""
+    return (
+        rf"^worktree path '{re.escape(path)}' is inside the repository it comes from$"
+    )
+
+
+def _worktree_list(repo: Path) -> str:
+    """Return the host git's porcelain worktree list for repo."""
+    return _git(repo, "worktree", "list", "--porcelain")
+
+
+def test_worktree_add_creates_the_branch(repo: Path, roots: list[str]) -> None:
+    """The add action with branch makes it at HEAD and checks it out in the new tree."""
+    path = repo.parent / "wt"
+    arguments = {
+        "repo": str(repo),
+        "action": "add",
+        "path": str(path),
+        "branch": "task/wt",
+    }
+
+    result = scripts.worktree(arguments, roots)
+
+    assert result["exit_code"] == 0, result
+    assert _head(path) == "task/wt\n"
+
+
+def test_worktree_add_attaches_an_existing_branch(repo: Path, roots: list[str]) -> None:
+    """The add action with create_branch false checks out the branch that exists."""
+    _git(repo, "branch", "task/wt")
+    path = repo.parent / "wt"
+    arguments = {
+        "repo": str(repo),
+        "action": "add",
+        "path": str(path),
+        "branch": "task/wt",
+        "create_branch": False,
+    }
+
+    result = scripts.worktree(arguments, roots)
+
+    assert result["exit_code"] == 0, result
+    assert _head(path) == "task/wt\n"
+
+
+def test_worktree_add_looks_up_a_dash_branch_as_a_name(
+    repo: Path, roots: list[str]
+) -> None:
+    """A branch --detach, with create_branch false, fails rather than detaching."""
+    path = repo.parent / "wt"
+    arguments = {
+        "repo": str(repo),
+        "action": "add",
+        "path": str(path),
+        "branch": "--detach",
+        "create_branch": False,
+    }
+
+    result = scripts.worktree(arguments, roots)
+
+    assert result["exit_code"] != 0
+    assert "--detach" in result["stderr"]
+    assert str(path) not in _worktree_list(repo)
+
+
+def test_worktree_add_without_a_branch_lets_git_name_one(
+    repo: Path, roots: list[str]
+) -> None:
+    """The add action with no branch makes a branch named after the path's last part."""
+    path = repo.parent / "wt"
+
+    result = scripts.worktree(
+        {"repo": str(repo), "action": "add", "path": str(path)}, roots
+    )
+
+    assert result["exit_code"] == 0, result
+    assert _head(path) == "wt\n"
+
+
+def test_worktree_add_without_a_path_returns_gits_error(
+    repo: Path, roots: list[str]
+) -> None:
+    """The add action with no path runs git worktree add, whose usage error returns."""
+    result = scripts.worktree({"repo": str(repo), "action": "add"}, roots)
+
+    assert result["exit_code"] != 0
+    assert "usage: git worktree add" in result["stderr"]
+
+
+@pytest.mark.parametrize("relative", ["repo", "repo/wt", "other/../repo/wt", "link/wt"])
+def test_worktree_add_refuses_a_path_inside_the_repository(
+    repo: Path, roots: list[str], relative: str
+) -> None:
+    """A path that is the repository, or resolves beneath it, is refused before git."""
+    (repo.parent / "link").symlink_to(repo)
+    path = f"{repo.parent}/{relative}"
+    arguments = {
+        "repo": str(repo),
+        "action": "add",
+        "path": path,
+        "branch": "task/wt",
+    }
+
+    with pytest.raises(RefusalError, match=_nested_refusal(path)):
+        scripts.worktree(arguments, roots)
+
+    assert _git(repo, "branch", "--list", "task/wt") == ""
+
+
+def test_worktree_list_names_each_worktree(repo: Path, roots: list[str]) -> None:
+    """The list action shows the repository and every linked worktree."""
+    path = repo.parent / "wt"
+    _git(repo, "worktree", "add", "-q", "-b", "task/wt", str(path))
+
+    result = scripts.worktree({"repo": str(repo), "action": "list"}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert f"{path} " in result["stdout"]
+
+
+def test_worktree_remove_deletes_the_worktree(repo: Path, roots: list[str]) -> None:
+    """The remove action with path deletes that worktree and its directory."""
+    path = repo.parent / "wt"
+    _git(repo, "worktree", "add", "-q", "-b", "task/wt", str(path))
+
+    result = scripts.worktree(
+        {"repo": str(repo), "action": "remove", "path": str(path)}, roots
+    )
+
+    assert result["exit_code"] == 0, result
+    assert not path.exists()
+    assert str(path) not in _worktree_list(repo)
+
+
+def test_run_script_returns_a_nested_worktree_refusal_as_its_result(
+    repo: Path, roots: list[str]
+) -> None:
+    """A worktree add inside the repository comes back as exit code 2."""
+    path = f"{repo}/wt"
+    stdin = json.dumps({"repo": str(repo), "action": "add", "path": path}).encode()
+    environ = {"AGENT_PROXY_ROOTS": json.dumps(roots)}
+
+    result = scripts.run_script("worktree", stdin, environ)
+
+    assert result == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": (
+            f"git plugin refused: worktree path '{path}' "
+            "is inside the repository it comes from\n"
+        ),
+    }

@@ -307,28 +307,32 @@
       "passthrough_args": false
     },
     "worktree": {
-      "kind": "command",
+      "kind": "script",
       "input_schema": {
         "type": "object",
         "properties": {
           "repo": {"type": "string", "pattern": "^/"},
           "action": {"type": "string", "minLength": 1, "enum": ["add", "list", "remove"]},
-          "path": {"type": "string", "minLength": 1},
-          "branch": {"type": "string", "minLength": 1}
+          "path": {"type": "string", "minLength": 1, "pattern": "^/"},
+          "branch": {"type": "string", "minLength": 1, "pattern": "^[^-]"},
+          "create_branch": {"type": "boolean", "default": true}
         },
         "required": ["repo", "action"],
         "additionalProperties": false
       },
       "credentials": [],
       "timeout": "60s",
-      "argv": ["git-cage", "worktree"],
-      "parameters": [
-        {"name": "repo", "as": "flag", "flag": "--repo"},
-        {"name": "action", "as": "positional"},
-        {"name": "path", "as": "positional"},
-        {"name": "branch", "as": "flag", "flag": "-b"}
-      ],
-      "passthrough_args": false
+      "executable": "/plugin/bin/worktree",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
     },
     "stash": {
       "kind": "command",

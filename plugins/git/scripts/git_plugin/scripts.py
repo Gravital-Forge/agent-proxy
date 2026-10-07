@@ -4,7 +4,8 @@ import json
 import os
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
-from typing import NotRequired, TypedDict
+from pathlib import Path
+from typing import Literal, NotRequired, TypedDict
 
 from git_plugin import cage, rules
 
@@ -54,6 +55,14 @@ class CheckoutInput(TypedDict):
     repo: str
     target: str
     create: NotRequired[bool]
+
+
+class WorktreeInput(TypedDict):
+    repo: str
+    action: Literal["add", "list", "remove"]
+    path: NotRequired[str]
+    branch: NotRequired[str]
+    create_branch: NotRequired[bool]
 
 
 class _GitFailedError(Exception):
@@ -263,6 +272,56 @@ def checkout(arguments: CheckoutInput, roots: Sequence[str]) -> ScriptResult:
     return run_git(arguments["repo"], roots, ["checkout", *create, target])
 
 
+def worktree(arguments: WorktreeInput, roots: Sequence[str]) -> ScriptResult:
+    """Add, list, or remove a linked worktree of repo.
+
+    add with branch creates that branch, or with create_branch false attaches
+    the existing branch of that name; add without branch lets git name a new
+    branch after the path's last component. add or remove without path runs
+    git without one, and git's error is the result.
+
+    Raises:
+        RefusalError: add names a path that resolves to repo or beneath it.
+    """
+    repo = arguments["repo"]
+    action = arguments["action"]
+    path = arguments.get("path")
+    args = ["worktree", action]
+    if action == "add" and path is not None:
+        _check_outside_repo(repo, path)
+        args += _worktree_add_args(
+            path, arguments.get("branch"), arguments.get("create_branch", True)
+        )
+    elif action == "remove" and path is not None:
+        args.append(path)
+    return run_git(repo, roots, args)
+
+
+def _check_outside_repo(repo: str, path: str) -> None:
+    """Return if path, its symlinks followed, lies outside repo.
+
+    Raises:
+        RefusalError: path resolves to repo or beneath it.
+    """
+    if Path(os.path.realpath(path)).is_relative_to(os.path.realpath(repo)):
+        raise cage.RefusalError(
+            f"worktree path '{path}' is inside the repository it comes from"
+        )
+
+
+def _worktree_add_args(path: str, branch: str | None, create_branch: bool) -> list[str]:
+    """Return the arguments that follow git worktree add.
+
+    With create_branch false, '--' makes git look branch up as a name even
+    when it reads like an option, so '--detach' fails instead of detaching.
+    """
+    if branch is None:
+        return [path]
+    if create_branch:
+        return ["-b", branch, path]
+    return ["--", path, branch]
+
+
 # Each takes its own input type, which the core validated against the action's
 # input_schema before the cage started.
 ACTIONS: Mapping[str, Callable[..., ScriptResult]] = {
@@ -275,6 +334,7 @@ ACTIONS: Mapping[str, Callable[..., ScriptResult]] = {
     "lfs_untrack": lfs_untrack,
     "push": push,
     "checkout": checkout,
+    "worktree": worktree,
 }
 
 
