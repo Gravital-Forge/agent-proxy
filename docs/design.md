@@ -360,7 +360,7 @@ The `S` checks need no counterpart on the agent's daemon: in a deployment, cages
 ## Known gaps
 
 - A bug in the instance's own code reaches that agent's tree and that instance's credentials.
-- Hooks are off in every cage, but repository-controlled code still runs there through
+- Hooks are off in every cage, but code planted in a repository still runs there through
   `.git/config`, for example `core.fsmonitor` and filter drivers. Such code can read that cage's
   credential; the domain allowlist bounds where it can send it, not whether it can read it.
 - Traverse on the agent's home lets `agentproxy-<agent>` open any world-readable file there by path.
