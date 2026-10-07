@@ -1,7 +1,10 @@
 """The script actions: each reads its input as JSON and returns git's result."""
 
+import contextlib
+import errno
 import json
 import os
+import stat
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -11,12 +14,36 @@ from git_plugin import cage, rules
 
 CONFIG_UNSET_EXIT = 1
 DIFF_CHANGED_EXIT = 1
+WRITE_FAILED_EXIT = 1
+OUTPUT_DIR_NAME = ".agent-proxy"
+# Ignores everything in the directory, this file included, so git reports
+# nothing there and no repository needs an ignore entry of its own.
+OUTPUT_DIR_IGNORE = b"*\n"
+# What open() itself requests, so the umask governs the written file's mode.
+OUTPUT_FILE_MODE = 0o666
+# git elides the middle of a long path in a stat to fit 80 columns; these
+# widths keep a path of up to 900 characters whole.
+STAT_FORMAT = "--stat=1000,900"
+DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+# O_NONBLOCK keeps a planted fifo from blocking the open. No O_TRUNC: the file
+# is emptied only after its descriptor passes the checks in _write_file.
+FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
 
 
 class ScriptResult(TypedDict):
     exit_code: int
     stdout: str
     stderr: str
+
+
+class DiffFileResult(TypedDict):
+    exit_code: int
+    stderr: str
+    path: str
+    stat: str
+
+
+type ActionResult = ScriptResult | DiffFileResult
 
 
 class FilesInput(TypedDict):
@@ -35,6 +62,7 @@ class DiffInput(TypedDict):
     staged: NotRequired[bool]
     ref: NotRequired[str]
     files: NotRequired[list[str]]
+    output: NotRequired[str]
 
 
 class CommitInput(TypedDict):
@@ -84,12 +112,25 @@ def run_git(
     env is laid over the process environment for this run. Each stream is
     decoded as UTF-8, a byte that is not UTF-8 becoming U+FFFD.
     """
-    completed = subprocess.run(  # noqa: S603 - git_argv puts every input after git's own options
+    return _script_result(_completed_git(repo, roots, args, env))
+
+
+def _completed_git(
+    repo: str,
+    roots: Sequence[str],
+    args: Sequence[str],
+    env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[bytes]:
+    """Run git on repo with the roots trusted, env over the process environment."""
+    return subprocess.run(  # noqa: S603 - git_argv puts every input after git's own options
         cage.git_argv(repo, roots, args),
         capture_output=True,
         check=False,
         env={**os.environ, **(env or {})},
     )
+
+
+def _script_result(completed: subprocess.CompletedProcess[bytes]) -> ScriptResult:
     return {
         "exit_code": completed.returncode,
         "stdout": completed.stdout.decode("utf-8", errors="replace"),
@@ -115,16 +156,154 @@ def restore(arguments: RestoreInput, roots: Sequence[str]) -> ScriptResult:
     )
 
 
-def diff(arguments: DiffInput, roots: Sequence[str]) -> ScriptResult:
-    """Show the working tree's changes, or with staged the index's, against ref."""
-    args = ["diff"]
+def diff(arguments: DiffInput, roots: Sequence[str]) -> ActionResult:
+    """Show the working tree's changes, or with staged the index's, against ref.
+
+    With output, the diff goes undecoded into that file beneath the
+    repository's .agent-proxy directory instead of into the result.
+
+    Raises:
+        RefusalError: output, its symlinks followed, does not lie strictly
+            beneath the .agent-proxy directory.
+    """
+    selection = _diff_selection(arguments)
+    if "output" in arguments:
+        return _diff_to_file(arguments["repo"], roots, selection, arguments["output"])
+    return run_git(arguments["repo"], roots, ["diff", *selection])
+
+
+def _diff_selection(arguments: DiffInput) -> list[str]:
+    """Return the arguments after git diff that choose what it compares."""
+    selection: list[str] = []
     if arguments.get("staged"):
-        args.append("--cached")
+        selection.append("--cached")
     if "ref" in arguments:
-        args.append(arguments["ref"])
+        selection.append(arguments["ref"])
     if "files" in arguments:
-        args += ["--", *arguments["files"]]
-    return run_git(arguments["repo"], roots, args)
+        selection += ["--", *arguments["files"]]
+    return selection
+
+
+def _diff_to_file(
+    repo: str, roots: Sequence[str], selection: Sequence[str], output: str
+) -> ActionResult:
+    """Write the diff of selection to output, and return its path and stat.
+
+    The stat comes from a second git call on the same selection. A git
+    failure in either call is returned as the result, and nothing is
+    written; a failed write is exit code 1 with the reason on stderr.
+
+    Raises:
+        RefusalError: output does not resolve strictly beneath the
+            .agent-proxy directory.
+    """
+    base, target = _output_target(repo, output)
+    body = _completed_git(repo, roots, ["diff", *selection])
+    if body.returncode != 0:
+        return _script_result(body)
+    summary = run_git(repo, roots, ["diff", STAT_FORMAT, *selection])
+    if summary["exit_code"] != 0:
+        return summary
+    try:
+        _write_output(base, target, body.stdout)
+    except OSError as error:
+        return {
+            "exit_code": WRITE_FAILED_EXIT,
+            "stdout": "",
+            "stderr": f"diff could not be written to {target}: {error}\n",
+        }
+    return {
+        "exit_code": body.returncode,
+        "stderr": body.stderr.decode("utf-8", errors="replace"),
+        "path": str(target),
+        "stat": summary["stdout"],
+    }
+
+
+def _output_target(repo: str, output: str) -> tuple[Path, Path]:
+    """Return repo's .agent-proxy directory, and output resolved beneath it.
+
+    output is resolved with symlinks followed, so a symlink that leads out of
+    the directory, or the directory itself as a symlink, is refused.
+
+    Raises:
+        RefusalError: output does not resolve strictly beneath the
+            directory, or holds a NUL.
+    """
+    base = Path(os.path.realpath(repo)) / OUTPUT_DIR_NAME
+    refusal = cage.RefusalError(f"output '{output}' resolves outside {base}")
+    try:
+        target = Path(os.path.realpath(base / output))
+    except ValueError as error:
+        raise refusal from error
+    if base not in target.parents:
+        raise refusal
+    return base, target
+
+
+def _write_output(base: Path, target: Path, body: bytes) -> None:
+    """Write body to target, beneath base, through no symlink.
+
+    Every step is taken relative to an open directory descriptor, each
+    component opened with O_NOFOLLOW, so a name swapped for a symlink after
+    _output_target's check fails the write instead of redirecting it. base is
+    made on first use, with a .gitignore of its own; an existing base is left
+    as found.
+
+    Raises:
+        OSError: a component is a symlink, the target is not a regular file
+            or has other hard links, or a step fails.
+    """
+    *directories, name = target.relative_to(base).parts
+    try:
+        base.mkdir()
+        created = True
+    except FileExistsError:
+        created = False
+    dir_fd = os.open(base, DIRECTORY_FLAGS)
+    try:
+        if created:
+            _write_file(dir_fd, ".gitignore", OUTPUT_DIR_IGNORE)
+        for directory in directories:
+            child_fd = _open_child_dir(dir_fd, directory)
+            os.close(dir_fd)
+            dir_fd = child_fd
+        _write_file(dir_fd, name, body)
+    finally:
+        os.close(dir_fd)
+
+
+def _open_child_dir(dir_fd: int, name: str) -> int:
+    """Return a descriptor of the directory name beneath dir_fd, made if missing.
+
+    Raises:
+        OSError: name is a symlink, or cannot be made or opened.
+    """
+    with contextlib.suppress(FileExistsError):
+        os.mkdir(name, dir_fd=dir_fd)
+    return os.open(name, DIRECTORY_FLAGS, dir_fd=dir_fd)
+
+
+def _write_file(dir_fd: int, name: str, body: bytes) -> None:
+    """Make name beneath dir_fd hold body alone, creating it when missing.
+
+    The file is emptied only once its descriptor shows a regular file with no
+    other hard link, so a name that aliases a file elsewhere is never
+    truncated.
+
+    Raises:
+        OSError: name is a symlink, is not a regular file, has other hard
+            links, or cannot be written.
+    """
+    fd = os.open(name, FILE_FLAGS, OUTPUT_FILE_MODE, dir_fd=dir_fd)
+    with os.fdopen(fd, "wb") as handle:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError(errno.EINVAL, "not a regular file", name)
+        if info.st_nlink > 1:
+            raise OSError(errno.EMLINK, "the file has other hard links", name)
+        os.ftruncate(fd, 0)
+        handle.write(body)
 
 
 def lfs_track(arguments: PatternsInput, roots: Sequence[str]) -> ScriptResult:
@@ -324,7 +503,7 @@ def _worktree_add_args(path: str, branch: str | None, create_branch: bool) -> li
 
 # Each takes its own input type, which the core validated against the action's
 # input_schema before the cage started.
-ACTIONS: Mapping[str, Callable[..., ScriptResult]] = {
+ACTIONS: Mapping[str, Callable[..., ActionResult]] = {
     "add": add,
     "rm": rm,
     "restore": restore,
@@ -338,7 +517,7 @@ ACTIONS: Mapping[str, Callable[..., ScriptResult]] = {
 }
 
 
-def run_script(name: str, stdin: bytes, environ: Mapping[str, str]) -> ScriptResult:
+def run_script(name: str, stdin: bytes, environ: Mapping[str, str]) -> ActionResult:
     """Run the script action name on the JSON input stdin holds.
 
     A refusal is returned as the result: exit code 2, no stdout, and the

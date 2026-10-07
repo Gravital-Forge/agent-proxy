@@ -22,6 +22,7 @@ from harness import (
     GrantedCredentials,
     OtherUidRepo,
     RemotePair,
+    RootMode,
     RunAction,
     host_git,
 )
@@ -155,6 +156,7 @@ def run_action(
         roots: Sequence[Path],
         credentials: GrantedCredentials | None = None,
         env: Mapping[str, str] | None = None,
+        mode: RootMode = "rw",
     ) -> Outcome:
         mounts: dict[str, EnvMount | FileMount] = {}
         for credential_name, (mount, value) in (credentials or {}).items():
@@ -162,7 +164,7 @@ def run_action(
             mounts[credential_name] = mount
         grant = Grant.model_validate(
             {
-                "roots": [Root(path=str(root), mode="rw") for root in roots],
+                "roots": [Root(path=str(root), mode=mode) for root in roots],
                 "domains": [],
                 "credentials": mounts,
                 "env": dict(env or {}),

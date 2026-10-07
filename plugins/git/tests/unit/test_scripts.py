@@ -260,6 +260,232 @@ def test_diff_with_a_ref_and_files_compares_those_files(
     assert "-one\n+two\n" in result["stdout"]
 
 
+B_STAT = " b.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n"
+
+
+def _output_dir(repo: Path) -> Path:
+    """Return the directory diff writes its output beneath, symlinks resolved."""
+    return Path(os.path.realpath(repo)) / ".agent-proxy"
+
+
+def _output_refusal(output: str, repo: Path) -> str:
+    """Return the pattern of the refusal for an output outside the directory."""
+    return (
+        rf"^output '{re.escape(output)}' resolves outside "
+        rf"{re.escape(str(_output_dir(repo)))}$"
+    )
+
+
+def _write_failure(path: Path) -> str:
+    """Return the start of the stderr of a diff that could not be written."""
+    return f"diff could not be written to {path}: "
+
+
+def test_diff_with_output_writes_the_diff_to_the_file(
+    repo: Path, roots: list[str]
+) -> None:
+    """The diff goes into the file; the result holds its path and the stat."""
+    (repo / "a.txt").write_text("two\n")
+    expected_body = _git(repo, "diff")
+    expected_stat = _git(repo, "diff", "--stat=1000,900")
+
+    result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    target = _output_dir(repo) / "a.diff"
+    assert result == {
+        "exit_code": 0,
+        "stderr": "",
+        "path": str(target),
+        "stat": expected_stat,
+    }
+    assert target.read_text() == expected_body
+
+
+def test_diff_with_output_takes_the_stat_of_the_same_selection(
+    repo: Path, roots: list[str]
+) -> None:
+    """With files, both the file and the stat cover only those files."""
+    (repo / "b.txt").write_text("b\n")
+    _git(repo, "add", "b.txt")
+    _git(repo, "commit", "-q", "-m", "b")
+    (repo / "a.txt").write_text("two\n")
+    (repo / "b.txt").write_text("bb\n")
+    arguments = {"repo": str(repo), "files": ["b.txt"], "output": "b.diff"}
+
+    result = scripts.diff(arguments, roots)
+
+    body = (_output_dir(repo) / "b.diff").read_text()
+    assert result["stat"] == B_STAT
+    assert "b.txt" in body
+    assert "a.txt" not in body
+
+
+def test_diff_with_output_ignores_the_directory_it_creates(
+    repo: Path, roots: list[str]
+) -> None:
+    """A first write leaves a .gitignore of '*', so git status stays empty."""
+    result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert (_output_dir(repo) / ".gitignore").read_bytes() == b"*\n"
+    assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_diff_with_output_leaves_an_existing_directory_as_found(
+    repo: Path, roots: list[str]
+) -> None:
+    """A directory that exists before the call gains no .gitignore."""
+    _output_dir(repo).mkdir()
+
+    result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert (_output_dir(repo) / "a.diff").exists()
+    assert not (_output_dir(repo) / ".gitignore").exists()
+
+
+def test_diff_with_output_overwrites_an_existing_file(
+    repo: Path, roots: list[str]
+) -> None:
+    """A longer file already at the path holds only the new diff afterwards."""
+    _output_dir(repo).mkdir()
+    target = _output_dir(repo) / "a.diff"
+    target.write_text("an older and longer diff\n" * 40)
+    (repo / "a.txt").write_text("two\n")
+    expected_body = _git(repo, "diff")
+
+    scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert target.read_text() == expected_body
+
+
+def test_diff_with_output_of_no_change_writes_an_empty_file(
+    repo: Path, roots: list[str]
+) -> None:
+    """A selection with no change empties a file that held an older diff."""
+    _output_dir(repo).mkdir()
+    target = _output_dir(repo) / "a.diff"
+    target.write_text("old\n")
+
+    result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert target.read_bytes() == b""
+
+
+def test_diff_with_a_nested_output_makes_its_directories(
+    repo: Path, roots: list[str]
+) -> None:
+    """A nested output creates each missing directory beneath .agent-proxy."""
+    (repo / "a.txt").write_text("two\n")
+
+    result = scripts.diff({"repo": str(repo), "output": "d/e/a.diff"}, roots)
+
+    target = _output_dir(repo) / "d" / "e" / "a.diff"
+    assert result["path"] == str(target)
+    assert "-one\n+two\n" in target.read_text()
+
+
+def test_diff_with_output_writes_bytes_that_are_not_utf8_unchanged(
+    repo: Path, roots: list[str]
+) -> None:
+    """The stdout of git reaches the file undecoded."""
+    (repo / "a.txt").write_bytes(b"\xff\n")
+
+    scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert b"+\xff\n" in (_output_dir(repo) / "a.diff").read_bytes()
+
+
+@pytest.mark.parametrize("output", ["link/a.diff", "file-link"])
+def test_diff_with_output_refuses_a_symlink_out_of_the_directory(
+    repo: Path, roots: list[str], output: str
+) -> None:
+    """A symlink inside .agent-proxy that leads out of it is refused."""
+    outside = repo.parent / "outside"
+    outside.mkdir()
+    _output_dir(repo).mkdir()
+    (_output_dir(repo) / "link").symlink_to(outside)
+    (_output_dir(repo) / "file-link").symlink_to(outside / "victim")
+    (repo / "a.txt").write_text("two\n")
+
+    with pytest.raises(RefusalError, match=_output_refusal(output, repo)):
+        scripts.diff({"repo": str(repo), "output": output}, roots)
+
+    assert list(outside.iterdir()) == []
+
+
+def test_diff_with_output_refuses_a_symlinked_directory(
+    repo: Path, roots: list[str]
+) -> None:
+    """A .agent-proxy that is itself a symlink is refused."""
+    elsewhere = repo.parent / "elsewhere"
+    elsewhere.mkdir()
+    (repo / ".agent-proxy").symlink_to(elsewhere)
+
+    with pytest.raises(RefusalError, match=_output_refusal("a.diff", repo)):
+        scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert list(elsewhere.iterdir()) == []
+
+
+@pytest.mark.parametrize("output", [".", "..", "../a.diff", "a\x00b"])
+def test_diff_with_output_refuses_an_output_outside_the_directory(
+    repo: Path, roots: list[str], output: str
+) -> None:
+    """The directory itself, a '..' out of it, or a NUL is refused."""
+    with pytest.raises(RefusalError, match=_output_refusal(output, repo)):
+        scripts.diff({"repo": str(repo), "output": output}, roots)
+
+    assert not _output_dir(repo).exists()
+
+
+def test_diff_with_output_to_a_hard_linked_file_fails_the_write(
+    repo: Path, roots: list[str]
+) -> None:
+    """A target with another hard link is not emptied, and the write fails."""
+    victim = repo.parent / "victim"
+    victim.write_bytes(b"keep\n")
+    _output_dir(repo).mkdir()
+    target = _output_dir(repo) / "a.diff"
+    target.hardlink_to(victim)
+    (repo / "a.txt").write_text("two\n")
+
+    result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert (result["exit_code"], result["stdout"]) == (1, "")
+    assert result["stderr"].startswith(_write_failure(target))
+    assert victim.read_bytes() == b"keep\n"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes past a read-only mode")
+def test_diff_with_output_into_a_read_only_directory_fails_the_write(
+    repo: Path, roots: list[str]
+) -> None:
+    """A .agent-proxy the call cannot write to returns exit code 1 and the reason."""
+    _output_dir(repo).mkdir()
+    _output_dir(repo).chmod(0o555)
+
+    result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert (result["exit_code"], result["stdout"]) == (1, "")
+    assert result["stderr"].startswith(_write_failure(_output_dir(repo) / "a.diff"))
+    assert result["stderr"].endswith("\n")
+
+
+def test_diff_with_output_and_a_bad_ref_returns_gits_error(
+    repo: Path, roots: list[str]
+) -> None:
+    """A failing git diff is the result, and nothing is written."""
+    arguments = {"repo": str(repo), "ref": "missing", "output": "a.diff"}
+
+    result = scripts.diff(arguments, roots)
+
+    assert result["exit_code"] == 128
+    assert result["stderr"].startswith("fatal: ")
+    assert not _output_dir(repo).exists()
+
+
 def test_lfs_track_writes_the_pattern_to_gitattributes(
     repo: Path, roots: list[str]
 ) -> None:

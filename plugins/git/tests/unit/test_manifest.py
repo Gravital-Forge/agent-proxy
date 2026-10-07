@@ -13,6 +13,7 @@ from agent_proxy.plugins import (
 )
 from agent_proxy.runner import InputError, form_argv, validate_input
 from git_plugin import scripts
+from jsonschema import Draft202012Validator
 
 MANIFEST_PATH = Path(__file__).parents[2] / "manifest.json"
 DOCKERFILE_PATH = Path(__file__).parents[2] / "Dockerfile"
@@ -133,6 +134,21 @@ SCRIPT_OUTPUT_SCHEMA = {
     "required": ["exit_code", "stdout", "stderr"],
     "additionalProperties": False,
 }
+DIFF_FILE_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "exit_code": {"type": "integer"},
+        "stderr": {"type": "string"},
+        "path": {"type": "string"},
+        "stat": {"type": "string"},
+    },
+    "required": ["exit_code", "stderr", "path", "stat"],
+    "additionalProperties": False,
+}
+DIFF_OUTPUT_SCHEMA = {
+    "type": "object",
+    "oneOf": [SCRIPT_OUTPUT_SCHEMA, DIFF_FILE_OUTPUT_SCHEMA],
+}
 PATH_LIST_PROPERTY = {
     "type": "array",
     "minItems": 1,
@@ -141,6 +157,11 @@ PATH_LIST_PROPERTY = {
         "minLength": 1,
         "pattern": r"^(?!([\s\S]*/)?\.\.(/|$))",
     },
+}
+OUTPUT_PROPERTY = {
+    "type": "string",
+    "minLength": 1,
+    "pattern": r"^(?!/)(?!([\s\S]*/)?\.\.(/|$))",
 }
 STAGED_PROPERTY = {"type": "boolean"}
 # Each script action's input properties, and the properties it requires.
@@ -171,6 +192,7 @@ SCRIPT_ACTIONS: dict[str, tuple[dict[str, dict[str, object]], set[str]]] = {
             "staged": STAGED_PROPERTY,
             "ref": {"type": "string", "minLength": 1, "pattern": "^[^-]"},
             "files": PATH_LIST_PROPERTY,
+            "output": OUTPUT_PROPERTY,
         },
         {"repo"},
     ),
@@ -442,9 +464,9 @@ def test_stash_places_its_index_after_its_action(manifest: Manifest) -> None:
     assert argv == ("git-cage", "stash", "--repo", "/repo", "show", "0")
 
 
-@pytest.mark.parametrize("name", sorted(SCRIPT_ACTIONS))
+@pytest.mark.parametrize("name", sorted(SCRIPT_ACTIONS.keys() - {"diff"}))
 def test_script_action_runs_its_executable(manifest: Manifest, name: str) -> None:
-    """Each script action runs /plugin/bin/<name> with its credentials and timeout."""
+    """Each script action but diff runs /plugin/bin/<name> with the plain result."""
     credentials, timeout = SCRIPT_LIMITS.get(name, ((), MINUTE))
     action = manifest.actions[name]
 
@@ -455,6 +477,58 @@ def test_script_action_runs_its_executable(manifest: Manifest, name: str) -> Non
         action.timeout,
         action.output_schema,
     ) == (f"/plugin/bin/{name}", credentials, timeout, SCRIPT_OUTPUT_SCHEMA)
+
+
+def test_diff_runs_its_executable_with_two_result_shapes(manifest: Manifest) -> None:
+    """The diff output_schema is the plain result or the four-member file result."""
+    action = manifest.actions["diff"]
+
+    assert isinstance(action, ScriptAction)
+    assert (
+        action.executable,
+        action.credentials,
+        action.timeout,
+        action.output_schema,
+    ) == ("/plugin/bin/diff", (), MINUTE, DIFF_OUTPUT_SCHEMA)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"exit_code": 0, "stdout": "diff --git a/a b/a\n", "stderr": ""},
+        {
+            "exit_code": 0,
+            "stderr": "",
+            "path": "/repo/.agent-proxy/a.diff",
+            "stat": " a | 2 +-\n",
+        },
+    ],
+)
+def test_diff_output_schema_accepts_each_result_shape(
+    manifest: Manifest, result: dict[str, object]
+) -> None:
+    """A result of either shape the diff script returns validates."""
+    action = manifest.actions["diff"]
+
+    assert isinstance(action, ScriptAction)
+    assert Draft202012Validator(action.output_schema).is_valid(result)
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"exit_code": 0, "stdout": "", "stderr": "", "path": "/x", "stat": ""},
+        {"exit_code": 0, "stderr": "", "path": "/x"},
+    ],
+)
+def test_diff_output_schema_refuses_a_mixed_or_partial_result(
+    manifest: Manifest, result: dict[str, object]
+) -> None:
+    """A result with stdout beside path, or with no stat, matches neither shape."""
+    action = manifest.actions["diff"]
+
+    assert isinstance(action, ScriptAction)
+    assert not Draft202012Validator(action.output_schema).is_valid(result)
 
 
 @pytest.mark.parametrize("name", sorted(SCRIPT_ACTIONS))
@@ -477,6 +551,10 @@ def test_script_action_states_its_input(manifest: Manifest, name: str) -> None:
         ("restore", {"files": ["a.txt"], "staged": "yes"}),
         ("diff", {"files": ["x\n/../y"]}),
         ("diff", {"ref": "--output=/tmp/x"}),
+        ("diff", {"output": ""}),
+        ("diff", {"output": "/x"}),
+        ("diff", {"output": ".."}),
+        ("diff", {"output": "a/../b"}),
         ("lfs_track", {"patterns": [".."]}),
         ("lfs_untrack", {"patterns": []}),
         ("commit", {}),
@@ -508,6 +586,8 @@ def test_script_action_refuses_an_input_outside_its_schema(
         ("add", {"files": ["a..b", "-v.txt", "dir/a.txt"]}),
         ("diff", {}),
         ("diff", {"staged": True, "ref": "HEAD~1", "files": ["a.txt"]}),
+        ("diff", {"output": "a.diff"}),
+        ("diff", {"output": "d/a.diff"}),
         ("lfs_track", {"patterns": ["*.bin"]}),
         ("commit", {"message": "m"}),
         ("push", {}),

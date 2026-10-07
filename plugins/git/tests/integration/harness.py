@@ -5,7 +5,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from agent_proxy.config import EnvMount, FileMount
 from agent_proxy.runner import Outcome
@@ -17,6 +17,7 @@ AGENT_EMAIL = "agent-01@example.com"
 _ISOLATED_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 
 type GrantedCredentials = Mapping[str, tuple[EnvMount | FileMount, bytes]]
+type RootMode = Literal["ro", "rw"]
 
 
 class RunAction(Protocol):
@@ -27,8 +28,9 @@ class RunAction(Protocol):
         roots: Sequence[Path],
         credentials: GrantedCredentials | None = None,
         env: Mapping[str, str] | None = None,
+        mode: RootMode = "rw",
     ) -> Outcome:
-        """Run the named action in a cage whose grant has roots read-write and env."""
+        """Run the named action in a cage whose grant has the roots in mode, and env."""
 
 
 @dataclass(frozen=True)
