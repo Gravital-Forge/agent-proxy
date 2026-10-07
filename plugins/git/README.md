@@ -128,8 +128,11 @@ all four makes merge commits as that identity.
 
 ### Hooks
 
-git runs the repository's hooks, `git lfs` hooks included. The plugin sets no `core.hooksPath`.
-`docs/design.md` gives what planted code in a cage can reach under "Known gaps".
+`git_argv` passes `-c core.hooksPath=/dev/null` on every git run, so git runs no hook of the
+repository's, `git lfs` hooks included. A value on the command line outranks the repository's
+config, so the repository cannot turn hooks back on. `push` uploads LFS objects with its own
+`git lfs push`, so it needs no LFS `pre-push` hook. `docs/design.md` gives what planted code in a
+cage can still reach under "Known gaps".
 
 ## A grant
 

@@ -1,6 +1,9 @@
+from itertools import pairwise
+
 import pytest
 from git_plugin import cage
 
+HOOKS_OFF = ("-c", "core.hooksPath=/dev/null")
 HELPER = (
     "-c",
     "credential.helper=",
@@ -11,8 +14,8 @@ HELPER = (
 SHAPE_REFUSAL = "AGENT_PROXY_ROOTS must be a JSON array of absolute paths, got {!r}"
 
 
-def test_git_argv_orders_repo_roots_helper_then_args() -> None:
-    """git_argv gives -C and the repo, two values per root, the helper, the args."""
+def test_git_argv_orders_repo_roots_hooks_helper_then_args() -> None:
+    """git_argv gives -C, the repo, two values per root, hooks off, helper, args."""
     argv = cage.git_argv("/work/repo", ["/work", "/other"], ["log", "--oneline"])
 
     assert argv == [
@@ -27,6 +30,7 @@ def test_git_argv_orders_repo_roots_helper_then_args() -> None:
         "safe.directory=/other",
         "-c",
         "safe.directory=/other/*",
+        *HOOKS_OFF,
         *HELPER,
         "log",
         "--oneline",
@@ -37,7 +41,7 @@ def test_git_argv_with_no_roots_trusts_no_directory() -> None:
     """With no roots, git_argv passes no safe.directory value."""
     argv = cage.git_argv("/repo", [], ["status"])
 
-    assert argv == ["git", "-C", "/repo", *HELPER, "status"]
+    assert argv == ["git", "-C", "/repo", *HOOKS_OFF, *HELPER, "status"]
 
 
 @pytest.mark.parametrize("root", ["/work/", "/work//"])
@@ -53,6 +57,7 @@ def test_git_argv_drops_a_roots_trailing_slashes(root: str) -> None:
         "safe.directory=/work",
         "-c",
         "safe.directory=/work/*",
+        *HOOKS_OFF,
         *HELPER,
         "status",
     ]
@@ -63,6 +68,13 @@ def test_git_argv_keeps_the_filesystem_root_as_a_slash() -> None:
     argv = cage.git_argv("/repo", ["/"], ["status"])
 
     assert argv[3:7] == ["-c", "safe.directory=/", "-c", "safe.directory=//*"]
+
+
+def test_git_argv_turns_hooks_off() -> None:
+    """git_argv passes -c core.hooksPath=/dev/null, as one pair, before the args."""
+    argv = cage.git_argv("/repo", ["/work"], ["commit", "-m", "x"])
+
+    assert HOOKS_OFF in pairwise(argv[: argv.index("commit")])
 
 
 def test_split_repo_takes_out_the_flag_and_its_value() -> None:
