@@ -215,7 +215,7 @@ scopes:
   answer to its next request. `run_view` with `log_failed` writes its log cache under the image's
   `XDG_CACHE_HOME` while the root filesystem is read-only. `job_log_url` returns the fake's
   `Location` without following it, and the fake's 404 for a job the fake does not know. `pr_edit`
-  gets past gh's pull-request lookup, which no longer asks for the classic-Projects field GitHub
+  gets past gh's pull-request lookup, which does not ask for the classic-Projects field GitHub
   refuses, and applies the edit.
 
 ## Build and test
