@@ -48,12 +48,14 @@ def test_pr_create_passes_every_field_to_gh(run_action: RunAction) -> None:
 
 
 def test_pr_edit_passes_the_given_field(run_action: RunAction) -> None:
-    """The pr_edit action calls gh pr edit with only the title it was given."""
+    """The pr_edit action PATCHes the pull request with only the title it was given."""
     arguments = {"repo": "o/n", "pr_number": 3, "title": "t"}
 
     outcome = run_action("pr_edit", arguments)
 
-    assert outcome.content == echoed("pr", "edit", "3", "--repo", "o/n", "--title=t")
+    assert outcome.content == echoed(
+        "api", "-X", "PATCH", "repos/o/n/pulls/3", "-f", "title=t", "--jq", ".html_url"
+    )
 
 
 def test_pr_view_asks_for_the_default_fields(run_action: RunAction) -> None:

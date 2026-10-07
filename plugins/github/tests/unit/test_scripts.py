@@ -201,13 +201,24 @@ def test_pr_create_passes_each_text_as_one_flag_item() -> None:
 
 
 def test_pr_edit_passes_each_field_given() -> None:
-    """Title, body, and base each become a --flag=value item after the number."""
+    """Title, body, and base each become one -f name=value item of a PATCH."""
     result = scripts.pr_edit(
         {"repo": "o/n", "pr_number": 5, "title": "t", "body": "b", "base": "main"}
     )
 
     assert result == _echo(
-        "pr", "edit", "5", "--repo", "o/n", "--title=t", "--body=b", "--base=main"
+        "api",
+        "-X",
+        "PATCH",
+        "repos/o/n/pulls/5",
+        "-f",
+        "title=t",
+        "-f",
+        "body=b",
+        "-f",
+        "base=main",
+        "--jq",
+        ".html_url",
     )
 
 
@@ -215,21 +226,47 @@ def test_pr_edit_leaves_out_each_field_absent() -> None:
     """A field absent from the input adds nothing to the argv."""
     result = scripts.pr_edit({"repo": "o/n", "pr_number": 5, "title": "t"})
 
-    assert result == _echo("pr", "edit", "5", "--repo", "o/n", "--title=t")
+    assert result == _echo(
+        "api", "-X", "PATCH", "repos/o/n/pulls/5", "-f", "title=t", "--jq", ".html_url"
+    )
 
 
 def test_pr_edit_passes_an_empty_field_through() -> None:
-    """An empty body is still passed, so gh clears the body."""
+    """An empty body is still passed, so GitHub clears the body."""
     result = scripts.pr_edit({"repo": "o/n", "pr_number": 5, "body": ""})
 
-    assert result == _echo("pr", "edit", "5", "--repo", "o/n", "--body=")
+    assert result == _echo(
+        "api", "-X", "PATCH", "repos/o/n/pulls/5", "-f", "body=", "--jq", ".html_url"
+    )
+
+
+def test_pr_edit_keeps_each_text_inside_one_field_item() -> None:
+    """A title that begins with '-' and a body that begins with '@' stay values."""
+    result = scripts.pr_edit(
+        {"repo": "o/n", "pr_number": 5, "title": "-t", "body": "@b"}
+    )
+
+    assert result == _echo(
+        "api",
+        "-X",
+        "PATCH",
+        "repos/o/n/pulls/5",
+        "-f",
+        "title=-t",
+        "-f",
+        "body=@b",
+        "--jq",
+        ".html_url",
+    )
 
 
 def test_a_number_is_written_as_decimal_digits() -> None:
     """A whole float, which the schema accepts as an integer, becomes digits."""
     result = scripts.pr_edit({"repo": "o/n", "pr_number": 5.0, "title": "t"})
 
-    assert result == _echo("pr", "edit", "5", "--repo", "o/n", "--title=t")
+    assert result == _echo(
+        "api", "-X", "PATCH", "repos/o/n/pulls/5", "-f", "title=t", "--jq", ".html_url"
+    )
 
 
 def test_pr_view_asks_for_the_fields_given() -> None:

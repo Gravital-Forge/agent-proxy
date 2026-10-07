@@ -23,8 +23,9 @@ that:
 - It applies a default that a command action cannot state, as `pr_view` does with its field list.
 - It takes free text, such as a title, a body, or a comment, that may begin with `-`. The core
   refuses such a value for a command action, and a Markdown body that opens with a list item begins
-  with `-`. `pr_create`, `pr_edit`, `pr_reply`, and `pr_close` pass each text value as one argv
-  item, `--flag=value` or gh api's `-f body=<text>`, so gh never reads it as an option.
+  with `-`. `pr_create` and `pr_close` pass each text value as one `--flag=value` argv item, and
+  `pr_edit` and `pr_reply` pass each as one gh api `-f name=value` item, so gh never reads it as an
+  option.
 
 A value that a script places alone in argv cannot begin with `-` either: `pr_view`'s `pr` must not,
 and each number is an integer from 1 up.
@@ -34,13 +35,15 @@ that begins with `-`.
 
 ### The `repo` input
 
-Every action takes a required `repo`, the GitHub repository as `owner/name`, and passes it to gh as
-`--repo`. gh needs no checkout for that. So every grant of the plugin has `roots: []`: a cage with
-no roots reaches less than one that mounts the agent's tree.
+Every action takes a required `repo`, the GitHub repository as `owner/name`. Most actions pass it to
+gh as `--repo`. `pr_edit`, `pr_fetch`, and `pr_reply` build a `gh api` path from it instead, and
+`job_log_url` and the log lookup of `pr_checks` build an API path that urllib requests, with no gh.
+None of these needs a checkout. So every grant of the plugin has `roots: []`: a cage with no roots
+reaches less than one that mounts the agent's tree.
 
 The input schema takes an owner of letters, digits, and `-` that begins with a letter or a digit,
 then one slash, then a name of letters, digits, `_`, `.`, and `-` that is not only dots. A script
-builds each `gh api` path from `repo`, so the path stays under `repos/<owner>/<name>/`.
+builds each API path from `repo`, so the path stays under `repos/<owner>/<name>/`.
 
 `pr_create` takes a required `head`, the branch the pull request comes from. git-sidecar takes that
 branch from the checkout, and the cage has no checkout.
@@ -58,6 +61,17 @@ reviews, and its conversation comments. Each call fetches one page, as gh api do
 `--paginate`. The script stops at the first call that fails, and returns that call's result. When
 all three succeed, `exit_code` is 0, `stderr` is empty, and `stdout` is one compact JSON object:
 `{"inline_comments": [...], "reviews": [...], "conversation": [...]}`.
+
+`pr_edit` runs `gh api -X PATCH repos/<repo>/pulls/<n>` with one `-f name=value` item for each of
+`title`, `body`, and `base` that the input holds, an empty string included, and `--jq .html_url`.
+`-f` sends each value as a JSON string, so a value that begins with `@` stays text. On success,
+`stdout` is the pull request's URL and a newline. On an HTTP error, `exit_code` is 1, `stderr` is
+`gh: <GitHub's message> (HTTP <status>)`, and `stdout` holds GitHub's error JSON, because gh skips
+`--jq` on an error answer.
+
+`pr_edit` does not run `gh pr edit`. That command looks the pull request up over GraphQL before it
+edits, and the gh this image pins asks that lookup for the pull request's Projects (classic) cards,
+a field GitHub now rejects. The PATCH asks for nothing but the edit.
 
 `pr_checks` runs `gh pr checks`. When that call fails with an empty stdout, its result is the
 action's result. Otherwise the script reads its stdout line by line. A line that holds `fail`, in
@@ -206,15 +220,17 @@ scopes:
 - `tests/integration/` builds the plugin image and the core's verifier image, and runs actions in a
   real cage through the core's `CageRunner`. `tests/fake-api/` builds a fake `api.github.com`, which
   runs on an internal network. It answers a known job's log request with a redirect to a host the
-  network cannot resolve, so a client that follows the redirect fails. `test_actions.py` runs every
-  action in an image that puts the stub gh ahead of the real one, built from
-  `tests/stub/Dockerfile`. Its `pr_checks` test joins the fake's network and gets the fake's log
-  URLs. `test_pinned_gh.py` runs the plugin image against the fake, and checks claims this plugin
-  rests on. `pr_create` with `head` and no checkout gets past the steps that need the current branch
-  and git, and fails at the fake's answer to its next request. `run_view` with `log_failed` writes
-  its log cache under the image's `XDG_CACHE_HOME` while the root filesystem is read-only.
-  `job_log_url` returns the fake's `Location` without following it, and the fake's 404 for a job the
-  fake does not know.
+  network cannot resolve, so a client that follows the redirect fails. It answers one expected
+  `PATCH` of pull request 1 with the pull request's URL, and any other `PATCH` with 422 and the body
+  it received. `test_actions.py` runs every action in an image that puts the stub gh ahead of the
+  real one, built from `tests/stub/Dockerfile`. Its `pr_checks` test joins the fake's network and
+  gets the fake's log URLs. `test_pinned_gh.py` runs the plugin image against the fake, and checks
+  claims this plugin rests on. `pr_create` with `head` and no checkout gets past the steps that need
+  the current branch and git, and fails at the fake's answer to its next request. `run_view` with
+  `log_failed` writes its log cache under the image's `XDG_CACHE_HOME` while the root filesystem is
+  read-only. `job_log_url` returns the fake's `Location` without following it, and the fake's 404
+  for a job the fake does not know. `pr_edit` sends its fields as one `PATCH` with no GraphQL lookup
+  and returns the pull request's URL, and returns gh's error for a `PATCH` the fake rejects.
 
 ## Build and test
 

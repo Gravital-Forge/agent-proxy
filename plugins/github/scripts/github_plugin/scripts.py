@@ -121,19 +121,20 @@ def pr_create(arguments: CreateInput) -> ScriptResult:
 
 
 def pr_edit(arguments: EditInput) -> ScriptResult:
-    """Change a pull request's title, body, or base.
+    """Change a pull request's title, body, or base through one REST PATCH.
 
-    Each of the three in the input is passed, an empty string included.
+    Each of the three in the input is passed as a string field, an empty
+    string included, and stdout is the pull request's URL.
     """
     number = _decimal(arguments["pr_number"])
-    args = ["pr", "edit", number, "--repo", arguments["repo"]]
+    args = ["api", "-X", "PATCH", f"repos/{arguments['repo']}/pulls/{number}"]
     if "title" in arguments:
-        args.append(f"--title={arguments['title']}")
+        args += ["-f", f"title={arguments['title']}"]
     if "body" in arguments:
-        args.append(f"--body={arguments['body']}")
+        args += ["-f", f"body={arguments['body']}"]
     if "base" in arguments:
-        args.append(f"--base={arguments['base']}")
-    return run_gh(args)
+        args += ["-f", f"base={arguments['base']}"]
+    return run_gh([*args, "--jq", ".html_url"])
 
 
 def pr_view(arguments: ViewInput) -> ScriptResult:

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from agent_proxy.config import Root
@@ -134,3 +135,68 @@ def test_job_log_url_names_the_404_for_a_job_the_api_does_not_know(
         "stderr": "GET /repos/o/n/actions/jobs/2/logs answered 404: "
         '{"message": "Not Found"}\n',
     }
+
+
+def test_pr_edit_patches_the_pull_request_with_no_graphql_lookup(
+    run_action: RunAction,
+    plugin_image: str,
+    fake_api_network: str,
+    fake_api_ca: Path,
+) -> None:
+    """The pinned gh sends pr_edit's fields as one PATCH, and prints the URL.
+
+    The fake accepts only the PATCH whose JSON body holds each field as a
+    string, the empty body included. It answers every GraphQL query but the
+    repository query with 404, so a lookup before the edit would fail the call.
+    """
+    arguments = {
+        "repo": "o/n",
+        "pr_number": 1,
+        "title": "-t",
+        "body": "",
+        "base": "main",
+    }
+    network = CageNetwork(
+        name=fake_api_network, environment={"SSL_CERT_FILE": str(fake_api_ca)}
+    )
+
+    outcome = run_action(
+        "pr_edit",
+        arguments,
+        image=plugin_image,
+        roots=[Root(path=str(fake_api_ca.parent), mode="ro")],
+        network=network,
+    )
+
+    assert outcome.content == {
+        "exit_code": 0,
+        "stdout": "https://github.com/o/n/pull/1\n",
+        "stderr": "",
+    }
+
+
+def test_pr_edit_returns_ghs_error_for_a_rejected_patch(
+    run_action: RunAction,
+    plugin_image: str,
+    fake_api_network: str,
+    fake_api_ca: Path,
+) -> None:
+    """A PATCH the fake rejects returns exit code 1, gh's message, and the error JSON.
+
+    gh skips --jq on an error answer, so stdout holds the fake's 422 body.
+    """
+    network = CageNetwork(
+        name=fake_api_network, environment={"SSL_CERT_FILE": str(fake_api_ca)}
+    )
+
+    outcome = run_action(
+        "pr_edit",
+        {"repo": "o/n", "pr_number": 2, "title": "t"},
+        image=plugin_image,
+        roots=[Root(path=str(fake_api_ca.parent), mode="ro")],
+        network=network,
+    )
+
+    assert outcome.content["exit_code"] == 1
+    assert outcome.content["stderr"] == "gh: unexpected PATCH (HTTP 422)\n"
+    assert json.loads(outcome.content["stdout"])["received"] == {"title": "t"}

@@ -3,8 +3,10 @@
 It runs in a container on the test's internal network, under the network alias
 api.github.com, and serves TLS with a certificate the image's test CA signs. It
 answers two jobs' log requests with a redirect to a host the test network
-cannot reach, so a client that follows it fails. It prints serving once its
-socket is bound.
+cannot reach, so a client that follows it fails. It answers the PATCH of pull
+request 1 that holds title -t, an empty body, and base main with the pull
+request's URL, and any other PATCH with 422 and the body it received. It prints
+serving once its socket is bound.
 """
 
 import io
@@ -58,6 +60,9 @@ REPOSITORY = {
     "rebaseMergeAllowed": True,
     "squashMergeAllowed": True,
 }
+EDIT_PATH = "/repos/o/n/pulls/1"
+EDIT_FIELDS = {"title": "-t", "body": "", "base": "main"}
+EDITED_PULL = {"number": 1, "html_url": "https://github.com/o/n/pull/1"}
 
 
 def logs_archive() -> bytes:
@@ -91,6 +96,24 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(200, {"data": {"repository": REPOSITORY}})
         else:
             self._send_json(404, NOT_FOUND)
+
+    def do_PATCH(self) -> None:
+        """Answer the expected edit of pull request 1, and any other PATCH with 422."""
+        raw = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
+        path = self.path.split("?", 1)[0]
+        try:
+            received: object = json.loads(raw)
+        except ValueError:
+            received = raw
+        if path == EDIT_PATH and received == EDIT_FIELDS:
+            self._send_json(200, EDITED_PULL)
+        else:
+            unexpected = {
+                "message": "unexpected PATCH",
+                "path": path,
+                "received": received,
+            }
+            self._send_json(422, unexpected)
 
     def _send_json(self, status: int, document: object) -> None:
         self._send(status, "application/json", json.dumps(document).encode())
