@@ -7,6 +7,7 @@ from harness import RunAction
 FAILED_STEP_LOG = (
     "build\ttest\t2026-01-01T00:00:00.0000000Z FAILED: expected 1, got 2\n"
 )
+LOG_URL_1 = "https://results-receiver.invalid/job/1?sig=s"
 
 
 def test_pr_create_with_a_head_and_no_checkout_gets_past_the_branch_and_git_steps(
@@ -76,4 +77,53 @@ def test_run_view_log_failed_caches_its_log_on_a_read_only_root(
         "exit_code": 0,
         "stdout": FAILED_STEP_LOG,
         "stderr": "",
+    }
+
+
+def test_job_log_url_returns_the_redirects_location_unfollowed(
+    run_action: RunAction,
+    plugin_image: str,
+    fake_api_network: str,
+    fake_api_ca: Path,
+) -> None:
+    """job_log_url for job 1 returns the fake's Location, a host no cage reaches."""
+    network = CageNetwork(
+        name=fake_api_network, environment={"SSL_CERT_FILE": str(fake_api_ca)}
+    )
+
+    outcome = run_action(
+        "job_log_url",
+        {"repo": "o/n", "job_id": 1},
+        image=plugin_image,
+        roots=[Root(path=str(fake_api_ca.parent), mode="ro")],
+        network=network,
+    )
+
+    assert outcome.content == {"exit_code": 0, "stdout": f"{LOG_URL_1}\n", "stderr": ""}
+
+
+def test_job_log_url_returns_an_unknown_jobs_404_as_a_failure(
+    run_action: RunAction,
+    plugin_image: str,
+    fake_api_network: str,
+    fake_api_ca: Path,
+) -> None:
+    """job_log_url for job 2, which the fake does not know, fails naming the 404."""
+    network = CageNetwork(
+        name=fake_api_network, environment={"SSL_CERT_FILE": str(fake_api_ca)}
+    )
+
+    outcome = run_action(
+        "job_log_url",
+        {"repo": "o/n", "job_id": 2},
+        image=plugin_image,
+        roots=[Root(path=str(fake_api_ca.parent), mode="ro")],
+        network=network,
+    )
+
+    assert outcome.content == {
+        "exit_code": 1,
+        "stdout": "",
+        "stderr": "GET /repos/o/n/actions/jobs/2/logs answered 404: "
+        '{"message": "Not Found"}\n',
     }

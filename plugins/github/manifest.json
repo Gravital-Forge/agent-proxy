@@ -180,6 +180,31 @@
         "additionalProperties": false
       }
     },
+    "job_log_url": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "repo": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*$"},
+          "job_id": {"type": "integer", "minimum": 1}
+        },
+        "required": ["repo", "job_id"],
+        "additionalProperties": false
+      },
+      "credentials": [{"env": "GH_TOKEN"}],
+      "timeout": "60s",
+      "executable": "/plugin/bin/job_log_url",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
     "pr_close": {
       "kind": "script",
       "input_schema": {
