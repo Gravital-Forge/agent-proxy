@@ -519,7 +519,8 @@
             "type": "array",
             "minItems": 1,
             "items": {"type": "string", "minLength": 1, "pattern": "^(?!([\\s\\S]*/)?\\.\\.(/|$))"}
-          }
+          },
+          "output": {"type": "string", "minLength": 1, "pattern": "^(?!/)(?!([\\s\\S]*/)?\\.\\.(/|$))"}
         },
         "required": ["repo"],
         "additionalProperties": false
@@ -529,13 +530,29 @@
       "executable": "/plugin/bin/diff",
       "output_schema": {
         "type": "object",
-        "properties": {
-          "exit_code": {"type": "integer"},
-          "stdout": {"type": "string"},
-          "stderr": {"type": "string"}
-        },
-        "required": ["exit_code", "stdout", "stderr"],
-        "additionalProperties": false
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "exit_code": {"type": "integer"},
+              "stdout": {"type": "string"},
+              "stderr": {"type": "string"}
+            },
+            "required": ["exit_code", "stdout", "stderr"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "exit_code": {"type": "integer"},
+              "stderr": {"type": "string"},
+              "path": {"type": "string"},
+              "stat": {"type": "string"}
+            },
+            "required": ["exit_code", "stderr", "path", "stat"],
+            "additionalProperties": false
+          }
+        ]
       }
     },
     "lfs_track": {

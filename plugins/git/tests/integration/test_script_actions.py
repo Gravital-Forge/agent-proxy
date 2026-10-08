@@ -193,6 +193,44 @@ def test_diff_past_the_cap_returns_the_command_shape_with_a_file(
     assert (outcome.content["exit_code"], outcome.content["truncated"]) == (0, True)
 
 
+def test_diff_with_output_writes_the_file_under_a_read_write_root(
+    run_action: RunAction, host_repo: Path
+) -> None:
+    """The diff goes to .agent-proxy/a.diff, ignored there, with path and stat back."""
+    (host_repo / "a.txt").write_text("three\n")
+    arguments = {"repo": str(host_repo), "output": "a.diff"}
+    target = host_repo / ".agent-proxy" / "a.diff"
+
+    outcome = run_action("diff", arguments, [host_repo.parent])
+
+    assert outcome.content == {
+        "exit_code": 0,
+        "stderr": "",
+        "path": str(target),
+        "stat": host_git(host_repo, "diff", "--stat=1000,900"),
+    }
+    assert target.read_text() == host_git(host_repo, "diff")
+    assert (host_repo / ".agent-proxy" / ".gitignore").read_text() == "*\n"
+
+
+def test_diff_with_output_under_a_read_only_root_returns_the_write_failure(
+    run_action: RunAction, host_repo: Path
+) -> None:
+    """Under an ro root the write fails, and the result says so plainly."""
+    (host_repo / "a.txt").write_text("three\n")
+    arguments = {"repo": str(host_repo), "output": "a.diff"}
+    target = host_repo / ".agent-proxy" / "a.diff"
+
+    outcome = run_action("diff", arguments, [host_repo.parent], mode="ro")
+
+    stderr = outcome.content["stderr"]
+    assert (outcome.content["exit_code"], outcome.content["stdout"]) == (1, "")
+    assert isinstance(stderr, str)
+    assert stderr.startswith(f"diff could not be written to {target}: ")
+    assert "Read-only file system" in stderr
+    assert not (host_repo / ".agent-proxy").exists()
+
+
 def test_add_of_a_dot_dot_file_is_refused_before_a_cage(
     run_action: RunAction, host_repo: Path
 ) -> None:

@@ -247,6 +247,210 @@ def test_diff_with_a_ref_and_files_compares_those_files(
     assert "-one\n+two\n" in result["stdout"]
 
 
+OUTPUT_DIR = ".agent-proxy"
+
+
+def _output_refusal(output: str, repo: Path) -> str:
+    """Return the pattern of the refusal for an output outside .agent-proxy."""
+    base = repo.resolve() / OUTPUT_DIR
+    return rf"^output '{re.escape(output)}' resolves outside {re.escape(str(base))}$"
+
+
+def _write_failure(target: Path) -> str:
+    """Return the start of the stderr of a diff that could not be written."""
+    return f"diff could not be written to {target}: "
+
+
+def test_diff_with_output_writes_the_diff_to_the_file(
+    repo: Path, roots: list[str]
+) -> None:
+    """The diff goes to the file; the result holds its path and the stat."""
+    (repo / "a.txt").write_text("two\n")
+    target = repo.resolve() / OUTPUT_DIR / "a.diff"
+
+    result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert result == {
+        "exit_code": 0,
+        "stderr": "",
+        "path": str(target),
+        "stat": _git(repo, "diff", "--stat=1000,900"),
+    }
+    assert target.read_text() == _git(repo, "diff")
+
+
+def test_diff_with_output_ignores_its_new_directory(
+    repo: Path, roots: list[str]
+) -> None:
+    """A first write makes .agent-proxy with a .gitignore of '*'; git sees nothing."""
+    result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert (repo / OUTPUT_DIR / ".gitignore").read_text() == "*\n"
+    assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_diff_with_output_leaves_an_existing_directory_as_found(
+    repo: Path, roots: list[str]
+) -> None:
+    """An .agent-proxy that exists gains the file and no .gitignore."""
+    (repo / OUTPUT_DIR).mkdir()
+
+    result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert [path.name for path in (repo / OUTPUT_DIR).iterdir()] == ["a.diff"]
+
+
+def test_diff_with_output_overwrites_an_existing_file(
+    repo: Path, roots: list[str]
+) -> None:
+    """A longer file at the path holds only the new diff afterwards."""
+    directory = repo / OUTPUT_DIR
+    directory.mkdir()
+    (directory / "a.diff").write_text("old\n" * 1000)
+    (repo / "a.txt").write_text("two\n")
+
+    scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert (directory / "a.diff").read_text() == _git(repo, "diff")
+
+
+def test_diff_with_output_writes_an_empty_file_for_no_change(
+    repo: Path, roots: list[str]
+) -> None:
+    """A selection with no change writes an empty file and an empty stat."""
+    result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert (result["exit_code"], result["stat"]) == (0, "")
+    assert (repo / OUTPUT_DIR / "a.diff").read_bytes() == b""
+
+
+def test_diff_with_output_makes_the_nested_directories(
+    repo: Path, roots: list[str]
+) -> None:
+    """An output beneath missing directories creates each of them."""
+    (repo / "a.txt").write_text("two\n")
+    target = repo.resolve() / OUTPUT_DIR / "d" / "e" / "a.diff"
+
+    result = scripts.diff({"repo": str(repo), "output": "d/e/a.diff"}, roots)
+
+    assert result["path"] == str(target)
+    assert "-one\n+two\n" in target.read_text()
+
+
+def test_diff_with_output_keeps_bytes_that_are_not_utf8(
+    repo: Path, roots: list[str]
+) -> None:
+    """The file holds git's bytes undecoded."""
+    (repo / "a.txt").write_bytes(b"\xff\n")
+
+    scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert b"+\xff\n" in (repo / OUTPUT_DIR / "a.diff").read_bytes()
+
+
+def test_diff_with_output_refuses_a_symlink_out_of_its_directory(
+    repo: Path, roots: list[str]
+) -> None:
+    """An output through a symlink in .agent-proxy to a directory outside is refused."""
+    outside = repo.parent / "outside"
+    outside.mkdir()
+    (repo / OUTPUT_DIR).mkdir()
+    (repo / OUTPUT_DIR / "link").symlink_to(outside)
+    (repo / "a.txt").write_text("two\n")
+
+    with pytest.raises(RefusalError, match=_output_refusal("link/a.diff", repo)):
+        scripts.diff({"repo": str(repo), "output": "link/a.diff"}, roots)
+
+    assert list(outside.iterdir()) == []
+
+
+def test_diff_with_output_refuses_a_symlinked_directory(
+    repo: Path, roots: list[str]
+) -> None:
+    """An .agent-proxy that is itself a symlink to a directory outside is refused."""
+    outside = repo.parent / "outside"
+    outside.mkdir()
+    (repo / OUTPUT_DIR).symlink_to(outside)
+
+    with pytest.raises(RefusalError, match=_output_refusal("a.diff", repo)):
+        scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("output", [".", "./", "d/..", "a\x00b"])
+def test_diff_with_output_refuses_a_path_that_is_not_beneath_its_directory(
+    repo: Path, roots: list[str], output: str
+) -> None:
+    """The directory itself, and a value realpath cannot read, are refused."""
+    with pytest.raises(RefusalError, match=_output_refusal(output, repo)):
+        scripts.diff({"repo": str(repo), "output": output}, roots)
+
+
+def test_diff_with_output_spares_a_hard_linked_file(
+    repo: Path, roots: list[str]
+) -> None:
+    """A target with another hard link fails the write and keeps its bytes."""
+    directory = repo / OUTPUT_DIR
+    directory.mkdir()
+    other = repo.parent / "other"
+    other.write_bytes(b"keep\n")
+    (directory / "a.diff").hardlink_to(other)
+    (repo / "a.txt").write_text("two\n")
+
+    result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert (result["exit_code"], result["stdout"]) == (1, "")
+    assert result["stderr"].startswith(_write_failure(directory.resolve() / "a.diff"))
+    assert result["stderr"].endswith("\n")
+    assert other.read_bytes() == b"keep\n"
+
+
+def test_diff_with_output_fails_on_a_fifo_without_waiting(
+    repo: Path, roots: list[str]
+) -> None:
+    """A FIFO at the path fails the write rather than block on a reader."""
+    directory = repo / OUTPUT_DIR
+    directory.mkdir()
+    os.mkfifo(directory / "a.diff")
+
+    result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+
+    assert (result["exit_code"], result["stdout"]) == (1, "")
+    assert result["stderr"].startswith(_write_failure(directory.resolve() / "a.diff"))
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes past a read-only mode")
+def test_diff_with_output_returns_a_failed_write(repo: Path, roots: list[str]) -> None:
+    """A directory the write cannot enter gives exit code 1 and the reason."""
+    directory = repo / OUTPUT_DIR
+    directory.mkdir()
+    directory.chmod(0o555)
+    try:
+        result = scripts.diff({"repo": str(repo), "output": "a.diff"}, roots)
+    finally:
+        directory.chmod(0o755)
+
+    assert (result["exit_code"], result["stdout"]) == (1, "")
+    assert result["stderr"].startswith(_write_failure(directory.resolve() / "a.diff"))
+    assert not (directory / "a.diff").exists()
+
+
+def test_diff_with_output_returns_a_git_failure_and_writes_nothing(
+    repo: Path, roots: list[str]
+) -> None:
+    """A bad ref returns git's own result, and no directory is made."""
+    result = scripts.diff(
+        {"repo": str(repo), "ref": "missing", "output": "a.diff"}, roots
+    )
+
+    assert set(result) == {"exit_code", "stdout", "stderr"}
+    assert result["exit_code"] == 128
+    assert not (repo / OUTPUT_DIR).exists()
+
+
 def test_lfs_track_writes_the_pattern_to_gitattributes(
     repo: Path, roots: list[str]
 ) -> None:
@@ -438,6 +642,28 @@ def test_run_script_refuses_without_roots(repo: Path) -> None:
         "exit_code": 2,
         "stdout": "",
         "stderr": "git plugin refused: AGENT_PROXY_ROOTS is not set\n",
+    }
+
+
+def test_run_script_returns_a_diff_output_refusal_as_its_result(
+    repo: Path, roots: list[str]
+) -> None:
+    """An output outside .agent-proxy comes back as exit code 2."""
+    outside = repo.parent / "outside"
+    outside.mkdir()
+    (repo / ".agent-proxy").symlink_to(outside)
+    stdin = json.dumps({"repo": str(repo), "output": "a.diff"}).encode()
+    environ = {"AGENT_PROXY_ROOTS": json.dumps(roots)}
+
+    result = scripts.run_script("diff", stdin, environ)
+
+    assert result == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": (
+            f"git plugin refused: output 'a.diff' resolves outside "
+            f"{repo.resolve() / '.agent-proxy'}\n"
+        ),
     }
 
 

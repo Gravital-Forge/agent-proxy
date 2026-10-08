@@ -6,7 +6,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from agent_proxy.config import EnvMount, FileMount
 from agent_proxy.runner import Outcome
@@ -28,8 +28,9 @@ class RunAction(Protocol):
         roots: Sequence[Path],
         credentials: GrantedCredentials | None = None,
         env: Mapping[str, str] | None = None,
+        mode: Literal["ro", "rw"] = "rw",
     ) -> Outcome:
-        """Run the named action in a cage whose grant has roots read-write and env."""
+        """Run the named action in a cage whose grant has roots in mode, and env."""
 
 
 @dataclass(frozen=True)
