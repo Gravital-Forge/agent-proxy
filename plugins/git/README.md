@@ -15,7 +15,7 @@ schema, its credentials, and its timeout.
 An action is a command action when its git argv is a fixed prefix plus typed parameters. It is a
 script action when it does more than that:
 
-- It carries a rule, as `push` and `checkout` do.
+- It carries a rule, as `push`, `checkout`, and `worktree` do.
 - It runs more than one git command, as `commit` and `push` do.
 - It takes a list, as each action with a `files` or `patterns` input does.
 
@@ -30,13 +30,15 @@ cage, so git fails with its own error. A command action passes `repo` to the wra
 `--repo`, and the wrapper takes the flag and its value out before git runs.
 
 A file or pattern input with a `..` segment fails the input schema, so the core refuses the call
-before a cage starts.
+before a cage starts. So does a `diff` `output` that is empty, begins with `/`, or holds a `..`
+segment.
 
 ### What an action returns
 
 A command action returns `{exit_code, stdout, stderr}`, as `docs/design.md` gives under "Results". A
-script action prints the same three members, and its `output_schema` states them. The script exits 0
-whenever it runs to its end, and git's exit code goes in `exit_code`.
+script action prints the same three members, and its `output_schema` states them. `diff` with
+`output` is the one exception: "`diff` with `output`" gives its result. The script exits 0 whenever
+it runs to its end, and git's exit code goes in `exit_code`.
 
 When a git step inside a script fails for a reason other than the outcome that step checks, the
 script stops and returns that step's git result. For example, `push` returns git's own result when
@@ -51,17 +53,60 @@ gives the reason. The wrapper refuses as its own exit; a script refuses through 
 
 - `AGENT_PROXY_ROOTS` is missing, or is not a JSON array of absolute paths.
 - `--repo` is missing, repeated, or has no value.
+- `push` or `checkout` finds `GIT_BRANCH_PREFIXES` unset, or naming no prefix. The reason names the
+  variable.
 - A call breaks a branch rule.
 - `commit` finds no identity, or nothing staged.
+- `diff`'s `output` resolves to the `.agent-proxy/` directory itself, or to a path outside it.
+- `worktree` `add` names a `path` that is `repo` or lies inside it.
 - The image's executable runs under a name that is neither `git-cage` nor a script action's.
 
-The refusal text of `push` and `checkout` uses git-sidecar's wording.
+The refusal of a branch that breaks a branch rule uses git-sidecar's wording.
 
 ### Output past the cap
 
-A large `diff` is the usual call whose output passes the core's cap. `docs/writing-a-plugin.md`
-gives what happens to a script whose output passes the cap, and `docs/design.md` gives the cap and
-the result forms under "Results".
+A large `diff` is the usual call whose output passes the core's cap. Call `diff` with `output` to
+keep the diff out of the result: the result then holds the file's path and a `--stat`, not the diff.
+`docs/writing-a-plugin.md` gives what happens to a script whose output passes the cap, and
+`docs/design.md` gives the cap and the result forms under "Results".
+
+### `diff` with `output`
+
+`output` is a path relative to the `.agent-proxy/` directory at the top of `repo`. With `output`,
+`diff` writes the diff to that file, and the diff never enters the result.
+
+- The file holds git's diff bytes as git prints them. A file that exists at the path is overwritten,
+  and a selection with no change writes an empty file.
+- The first call makes `.agent-proxy/`, with a `.gitignore` that holds `*`, so git ignores the
+  directory and all it holds. A directory that exists stays as it is. A missing directory below it
+  on the path is made.
+- The result is `{exit_code, stderr, path, stat}`: git's exit code and stderr, the absolute path of
+  the file with every symlink resolved, and `git diff --stat=1000,900` of the same selection. The
+  width keeps a long path whole, as git-sidecar does. The result has no `stdout`, and the action's
+  `output_schema` states both result forms.
+- When git fails on the diff or on the stat, the result is that git run's
+  `{exit_code, stdout, stderr}`, and the script writes no file.
+- The write follows no symlink. It refuses a file that is not a regular file or has another hard
+  link, and it empties the file only after both checks. A failed write returns `exit_code` 1, an
+  empty `stdout`, and a `stderr` that begins `diff could not be written to <path>: `.
+
+The grant must give the repository an `rw` root. Under an `ro` root, the write fails with the
+read-only filesystem error, in the form the last item gives.
+
+### `worktree`
+
+`worktree` takes an `action` of `add`, `list`, or `remove`. `path` must be absolute, because git
+resolves a relative path against `repo`, which surprises the caller.
+
+- `list` runs `git worktree list`, and `remove` runs `git worktree remove <path>`.
+- `add` with `branch` makes that branch for the new worktree, as
+  `git worktree add -b <branch> <path>`. With `create_branch` false, `add` attaches the branch that
+  exists instead, as `git worktree add -- <path> <branch>`. `create_branch` is true when the input
+  leaves it out.
+- `add` without `branch` lets git make a new branch named after the last component of `path`.
+- `add` refuses a `path` that is `repo` or lies inside it. The check resolves every symlink in both.
+
+git's own error answers `add` or `remove` without `path`.
 
 ### `stash`
 
@@ -91,16 +136,22 @@ grant of such an action a credential as `GH_TOKEN`.
 ### Branch rules
 
 `scripts/git_plugin/rules.py` holds git-sidecar's rules. The protected branches are `main` and
-`master`, and the one branch prefix is `task/`. Neither is configurable.
+`master`, and no grant changes them. The allowed branch prefixes come from the cage's environment
+variable `GIT_BRANCH_PREFIXES`, which the grant's `env` sets. Its value is a comma-separated list.
+The plugin strips the whitespace from each entry and ignores an empty entry, so
+`"task/, dependabot/"` allows `task/` and `dependabot/`.
 
+- `push` and `checkout` read the prefixes before any other step. When the variable is unset or names
+  no prefix, each refuses the call, a checkout of `main` included.
 - `push` takes only `repo`, and pushes the current branch. It refuses a protected branch, a branch
-  without the prefix, and a detached HEAD.
+  that begins with no allowed prefix, and a detached HEAD.
 - `push` names both sides of its refspec and uses no `+`, so no push refspec in the repository's
   config can force the update. A `force` input fails the input schema.
 - When the repository tracks LFS files, `push` uploads them with `git lfs push` before the ref push.
-- `checkout` lets a protected target through. Any other target needs the prefix, with or without
-  `create`.
-- `worktree`, `merge`, and `commit` check no branch.
+- `checkout` lets a protected target through. Any other target needs an allowed prefix, with or
+  without `create`.
+- `merge` and `commit` check no branch. Nor does `worktree`: `add` makes or attaches any branch its
+  input schema accepts, so it can make a branch that `push` refuses. Its one rule is on `path`.
 
 ### Commit identity
 
@@ -150,7 +201,11 @@ scopes:
         roots: [{path: /home/agent-01/Projects/example-repo, mode: rw}]
         domains: [github.com]
         credentials: {github-token: {env: GH_TOKEN}}
+        env: {GIT_BRANCH_PREFIXES: "task/"}
 ```
+
+Each `git.push` and `git.checkout` grant sets `GIT_BRANCH_PREFIXES` in its `env`, as "Branch rules"
+gives. A `git.diff` grant gives an `rw` root when callers use `output`.
 
 A grant's `domains` name each host its remote reaches. For a repository that tracks LFS files, they
 also name each host the LFS server sends objects to, which can differ from the remote's host.
