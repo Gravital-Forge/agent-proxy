@@ -3,6 +3,9 @@
 It runs in a container on the test's internal network, under the network alias
 api.github.com, and serves TLS with a certificate the image's test CA signs. It
 prints serving once its socket is bound.
+
+It answers a known job's log path with a 302 to a signed URL on a host no test
+network reaches, so a client that follows the redirect fails.
 """
 
 import io
@@ -17,6 +20,10 @@ KEY_PATH = "/pki/server.key"
 LOGS_PATH = "/repos/o/n/actions/runs/1/logs"
 STEP_LOG_NAME = "build/1_test.txt"
 STEP_LOG = "2026-01-01T00:00:00.0000000Z FAILED: expected 1, got 2\n"
+JOB_LOG_LOCATIONS = {
+    "/repos/o/n/actions/jobs/1/logs": "https://results-receiver.invalid/job/1?sig=s",
+    "/repos/o/n/actions/jobs/3/logs": "https://results-receiver.invalid/job/3?sig=s",
+}
 JSON_ANSWERS: dict[str, object] = {
     "/repos/o/n/actions/runs/1": {
         "id": 1,
@@ -68,6 +75,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == LOGS_PATH:
             self._send(200, "application/zip", logs_archive())
+        elif path in JOB_LOG_LOCATIONS:
+            self._send_redirect(JOB_LOG_LOCATIONS[path])
         elif path in JSON_ANSWERS:
             self._send_json(200, JSON_ANSWERS[path])
         else:
@@ -84,6 +93,12 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_json(self, status: int, document: object) -> None:
         self._send(status, "application/json", json.dumps(document).encode())
+
+    def _send_redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _send(self, status: int, content_type: str, body: bytes) -> None:
         self.send_response(status)

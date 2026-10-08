@@ -1,5 +1,8 @@
 import json
+from pathlib import Path
 
+from agent_proxy.config import Root
+from agent_proxy.egress import CageNetwork
 from harness import RunAction
 
 STUB_TOKEN = "stub-token"
@@ -8,6 +11,8 @@ CHECKS_7 = (
     "lint\tpass\t10s\thttps://github.com/o/n/actions/runs/102/job/2\t\n"
     "test\tfail\t2m\thttps://github.com/o/n/actions/runs/101/job/3\t\n"
 )
+LOG_URL_1 = "https://results-receiver.invalid/job/1?sig=s"
+LOG_URL_3 = "https://results-receiver.invalid/job/3?sig=s"
 
 
 def echoed(*argv: str) -> dict[str, object]:
@@ -124,13 +129,25 @@ def test_pr_reply_posts_a_reply_to_a_comment(run_action: RunAction) -> None:
     )
 
 
-def test_pr_checks_appends_the_failed_run_log_once(run_action: RunAction) -> None:
-    """The pr_checks action on 7 appends run 101's failed log once."""
-    outcome = run_action("pr_checks", {"repo": "o/n", "pr_number": 7})
+def test_pr_checks_appends_each_failed_jobs_log_url(
+    run_action: RunAction, fake_api_network: str, fake_api_ca: Path
+) -> None:
+    """The pr_checks action on 7 appends the fake's unfollowed URLs for jobs 1 and 3."""
+    network = CageNetwork(
+        name=fake_api_network, environment={"SSL_CERT_FILE": str(fake_api_ca)}
+    )
+
+    outcome = run_action(
+        "pr_checks",
+        {"repo": "o/n", "pr_number": 7},
+        roots=[Root(path=str(fake_api_ca.parent), mode="ro")],
+        network=network,
+    )
 
     assert outcome.content == {
         "exit_code": 1,
-        "stdout": CHECKS_7 + "\n--- Failed logs for run 101 ---\nlog of 101\n",
+        "stdout": f"{CHECKS_7}Failed job 1 log: {LOG_URL_1}\n"
+        f"Failed job 3 log: {LOG_URL_3}\n",
         "stderr": "",
     }
 

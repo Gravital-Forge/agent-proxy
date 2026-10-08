@@ -13,7 +13,6 @@ CHECKS_7 = (
 )
 ANSWERS: dict[tuple[str, ...], tuple[int, str, str]] = {
     ("pr", "checks", "7", "--repo", "o/n"): (1, CHECKS_7, ""),
-    ("run", "view", "101", "--log-failed", "--repo", "o/n"): (0, "log of 101\n", ""),
     ("pr", "checks", "8", "--repo", "o/n"): (1, "", "no checks reported\n"),
     ("api", "repos/o/n/pulls/5/comments"): (0, '[{"id":1}]', ""),
     ("api", "repos/o/n/pulls/5/reviews"): (0, '[{"id":2}]', ""),
