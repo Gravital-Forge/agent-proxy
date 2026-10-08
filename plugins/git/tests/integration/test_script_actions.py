@@ -201,3 +201,47 @@ def test_add_of_a_dot_dot_file_is_refused_before_a_cage(
 
     with pytest.raises(InputError):
         run_action("add", arguments, [host_repo.parent])
+
+
+def test_worktree_add_attaches_an_existing_branch(
+    run_action: RunAction, host_repo: Path
+) -> None:
+    """The add action with create_branch false checks out task/e in the new worktree."""
+    host_git(host_repo, "branch", "task/e")
+    worktree = host_repo.parent / "wt"
+    arguments = {
+        "repo": str(host_repo),
+        "action": "add",
+        "path": str(worktree),
+        "branch": "task/e",
+        "create_branch": False,
+    }
+
+    stdout_of(run_action("worktree", arguments, [host_repo.parent]))
+
+    assert host_git(worktree, "rev-parse", "--abbrev-ref", "HEAD") == "task/e\n"
+
+
+def test_worktree_add_inside_the_repository_returns_the_refusal(
+    run_action: RunAction, host_repo: Path
+) -> None:
+    """The add action with a path beneath the repository is refused in the cage."""
+    worktree = host_repo / "wt"
+    arguments = {
+        "repo": str(host_repo),
+        "action": "add",
+        "path": str(worktree),
+        "branch": "task/wt",
+    }
+
+    outcome = run_action("worktree", arguments, [host_repo.parent])
+
+    assert outcome.content == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": (
+            f"git plugin refused: worktree path '{worktree}' "
+            "is inside the repository it comes from\n"
+        ),
+    }
+    assert not worktree.exists()

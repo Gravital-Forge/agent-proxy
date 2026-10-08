@@ -4,7 +4,8 @@ import json
 import os
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
-from typing import NotRequired, TypedDict
+from pathlib import Path
+from typing import Literal, NotRequired, TypedDict
 
 from git_plugin import cage, rules
 
@@ -54,6 +55,14 @@ class CheckoutInput(TypedDict):
     repo: str
     target: str
     create: NotRequired[bool]
+
+
+class WorktreeInput(TypedDict):
+    repo: str
+    action: Literal["add", "list", "remove"]
+    path: NotRequired[str]
+    branch: NotRequired[str]
+    create_branch: NotRequired[bool]
 
 
 class _GitFailedError(Exception):
@@ -266,6 +275,45 @@ def checkout(arguments: CheckoutInput, roots: Sequence[str]) -> ScriptResult:
     return run_git(arguments["repo"], roots, ["checkout", *create, target])
 
 
+def worktree(arguments: WorktreeInput, roots: Sequence[str]) -> ScriptResult:
+    """Add, list, or remove a linked worktree of repo.
+
+    add with a branch makes that branch, or with create_branch false checks
+    out the branch that exists; add with no branch lets git name a new branch
+    after the path's last component. A missing path is left to git to refuse.
+
+    Raises:
+        RefusalError: add names a path that is repo or lies beneath it.
+    """
+    repo = arguments["repo"]
+    path = [arguments["path"]] if "path" in arguments else []
+    if arguments["action"] == "list":
+        return run_git(repo, roots, ["worktree", "list"])
+    if arguments["action"] == "remove":
+        return run_git(repo, roots, ["worktree", "remove", *path])
+    return run_git(repo, roots, ["worktree", "add", *_worktree_add_args(arguments)])
+
+
+def _worktree_add_args(arguments: WorktreeInput) -> list[str]:
+    """Return git worktree add's arguments after add, in git-sidecar's order.
+
+    Raises:
+        RefusalError: path is repo or lies beneath it, symlinks resolved.
+    """
+    if "path" not in arguments:
+        return []
+    path = arguments["path"]
+    if Path(os.path.realpath(path)).is_relative_to(os.path.realpath(arguments["repo"])):
+        raise cage.RefusalError(
+            f"worktree path '{path}' is inside the repository it comes from"
+        )
+    if "branch" not in arguments:
+        return [path]
+    if arguments.get("create_branch", True):
+        return ["-b", arguments["branch"], path]
+    return ["--", path, arguments["branch"]]
+
+
 # Each takes its own input type, which the core validated against the action's
 # input_schema before the cage started.
 ACTIONS: Mapping[str, Callable[..., ScriptResult]] = {
@@ -278,6 +326,7 @@ ACTIONS: Mapping[str, Callable[..., ScriptResult]] = {
     "lfs_untrack": lfs_untrack,
     "push": push,
     "checkout": checkout,
+    "worktree": worktree,
 }
 
 

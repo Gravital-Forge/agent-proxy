@@ -1,6 +1,7 @@
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -73,6 +74,7 @@ def test_actions_holds_each_script_action() -> None:
         "lfs_untrack",
         "push",
         "checkout",
+        "worktree",
     }
 
 
@@ -776,4 +778,174 @@ def test_run_script_returns_a_missing_prefixes_refusal_as_its_result(
         "exit_code": 2,
         "stdout": "",
         "stderr": f"git plugin refused: {NO_PREFIXES}\n",
+    }
+
+
+def _worktree_refusal(path: str) -> str:
+    """Return the pattern of the refusal for a worktree path inside the repository."""
+    return (
+        rf"^worktree path '{re.escape(path)}' "
+        "is inside the repository it comes from$"
+    )
+
+
+def test_worktree_add_makes_a_branch_at_the_path(repo: Path, roots: list[str]) -> None:
+    """The add action with a branch makes it and checks it out in a new worktree."""
+    path = repo.parent / "wt"
+    arguments = {
+        "repo": str(repo),
+        "action": "add",
+        "path": str(path),
+        "branch": "task/wt",
+    }
+
+    result = scripts.worktree(arguments, roots)
+
+    assert result["exit_code"] == 0, result
+    assert _head(path) == "task/wt\n"
+
+
+def test_worktree_add_attaches_an_existing_branch(repo: Path, roots: list[str]) -> None:
+    """The add action with create_branch false checks out the branch that exists."""
+    _git(repo, "branch", "task/e")
+    path = repo.parent / "wt"
+    arguments = {
+        "repo": str(repo),
+        "action": "add",
+        "path": str(path),
+        "branch": "task/e",
+        "create_branch": False,
+    }
+
+    result = scripts.worktree(arguments, roots)
+
+    assert result["exit_code"] == 0, result
+    assert _head(path) == "task/e\n"
+
+
+def test_worktree_add_reads_a_dashed_branch_as_a_branch(
+    repo: Path, roots: list[str]
+) -> None:
+    """A branch named --detach, with create_branch false, is looked up, not obeyed."""
+    path = repo.parent / "wt"
+    arguments = {
+        "repo": str(repo),
+        "action": "add",
+        "path": str(path),
+        "branch": "--detach",
+        "create_branch": False,
+    }
+
+    result = scripts.worktree(arguments, roots)
+
+    assert result["exit_code"] == 128
+    assert "invalid reference: --detach" in result["stderr"]
+    assert not path.exists()
+
+
+def test_worktree_add_without_a_branch_names_one_after_the_path(
+    repo: Path, roots: list[str]
+) -> None:
+    """The add action with no branch lets git name a new branch after the path."""
+    path = repo.parent / "wt"
+
+    result = scripts.worktree(
+        {"repo": str(repo), "action": "add", "path": str(path)}, roots
+    )
+
+    assert result["exit_code"] == 0, result
+    assert _head(path) == "wt\n"
+
+
+def test_worktree_add_without_a_path_returns_gits_error(
+    repo: Path, roots: list[str]
+) -> None:
+    """The add action with no path returns git's usage error."""
+    result = scripts.worktree({"repo": str(repo), "action": "add"}, roots)
+
+    assert result["exit_code"] == 129
+    assert "usage: git worktree add" in result["stderr"]
+
+
+@pytest.mark.parametrize("inner", ["", "/wt", "/../repo/wt"])
+def test_worktree_add_refuses_a_path_inside_the_repository(
+    repo: Path, roots: list[str], inner: str
+) -> None:
+    """A path that is the repository or beneath it, through '..' too, is refused."""
+    path = f"{repo}{inner}"
+    arguments = {"repo": str(repo), "action": "add", "path": path, "branch": "task/wt"}
+
+    with pytest.raises(RefusalError, match=_worktree_refusal(path)):
+        scripts.worktree(arguments, roots)
+
+    assert not (repo / "wt").exists()
+    assert _git(repo, "branch", "--list", "task/wt") == ""
+
+
+def test_worktree_add_refuses_a_path_inside_the_repository_through_a_symlink(
+    repo: Path, roots: list[str]
+) -> None:
+    """A path beneath a symlink to the repository is refused."""
+    link = repo.parent / "link"
+    link.symlink_to(repo)
+    path = str(link / "wt")
+    arguments = {"repo": str(repo), "action": "add", "path": path, "branch": "task/wt"}
+
+    with pytest.raises(RefusalError, match=_worktree_refusal(path)):
+        scripts.worktree(arguments, roots)
+
+    assert not (repo / "wt").exists()
+
+
+def test_worktree_list_names_each_worktree(repo: Path, roots: list[str]) -> None:
+    """The list action shows the repository and its linked worktree."""
+    path = repo.parent / "wt"
+    _git(repo, "worktree", "add", "-q", "-b", "task/wt", str(path))
+
+    result = scripts.worktree({"repo": str(repo), "action": "list"}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert f"{path} " in result["stdout"]
+
+
+def test_worktree_remove_deletes_the_worktree(repo: Path, roots: list[str]) -> None:
+    """The remove action with a path removes that linked worktree."""
+    path = repo.parent / "wt"
+    _git(repo, "worktree", "add", "-q", "-b", "task/wt", str(path))
+
+    result = scripts.worktree(
+        {"repo": str(repo), "action": "remove", "path": str(path)}, roots
+    )
+
+    assert result["exit_code"] == 0, result
+    assert not path.exists()
+
+
+def test_worktree_remove_without_a_path_returns_gits_error(
+    repo: Path, roots: list[str]
+) -> None:
+    """The remove action with no path returns git's usage error."""
+    result = scripts.worktree({"repo": str(repo), "action": "remove"}, roots)
+
+    assert result["exit_code"] == 129
+    assert "usage: git worktree" in result["stderr"]
+
+
+def test_run_script_returns_a_worktree_refusal_as_its_result(
+    repo: Path, roots: list[str]
+) -> None:
+    """A worktree add inside the repository comes back as exit code 2."""
+    path = str(repo / "wt")
+    stdin = json.dumps({"repo": str(repo), "action": "add", "path": path}).encode()
+    environ = {"AGENT_PROXY_ROOTS": json.dumps(roots)}
+
+    result = scripts.run_script("worktree", stdin, environ)
+
+    assert result == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": (
+            f"git plugin refused: worktree path '{path}' "
+            "is inside the repository it comes from\n"
+        ),
     }
