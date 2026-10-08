@@ -197,18 +197,22 @@ def _require_staged(repo: str, roots: Sequence[str]) -> None:
 def push(arguments: RepoInput, roots: Sequence[str]) -> ScriptResult:
     """Push the current branch to the same name on origin, its LFS objects first.
 
-    The refspec names both sides and carries no '+', so no push refspec or
-    mirror setting in the repository's config can force the update. A git
+    The allowed branch prefixes come from GIT_BRANCH_PREFIXES in the
+    environment, which the grant's env sets; they are read before any git
+    call. The refspec names both sides and carries no '+', so no push refspec
+    or mirror setting in the repository's config can force the update. A git
     failure before the ref push is returned as the result.
 
     Raises:
-        RefusalError: the current branch is protected or lacks the prefix, or
-            HEAD is detached.
+        RefusalError: GIT_BRANCH_PREFIXES names no prefix, the current branch
+            is protected or begins with no allowed prefix, or HEAD is
+            detached.
     """
     repo = arguments["repo"]
+    prefixes = rules.branch_prefixes(os.environ)
     try:
         branch = _current_branch(repo, roots)
-        rules.check_push_branch(branch)
+        rules.check_push_branch(branch, prefixes)
         _push_lfs_objects(repo, roots, branch)
     except _GitFailedError as failure:
         return failure.result
@@ -247,11 +251,17 @@ def _push_lfs_objects(repo: str, roots: Sequence[str], branch: str) -> None:
 def checkout(arguments: CheckoutInput, roots: Sequence[str]) -> ScriptResult:
     """Switch to target, or with create, make the branch target and switch to it.
 
+    The allowed branch prefixes come from GIT_BRANCH_PREFIXES in the
+    environment, which the grant's env sets; they are read before any check,
+    so a checkout of main is refused without them too.
+
     Raises:
-        RefusalError: target is not protected and lacks the prefix.
+        RefusalError: GIT_BRANCH_PREFIXES names no prefix, or target is not
+            protected and begins with no allowed prefix.
     """
+    prefixes = rules.branch_prefixes(os.environ)
     target = arguments["target"]
-    rules.check_checkout_target(target)
+    rules.check_checkout_target(target, prefixes)
     create = ["-b"] if arguments.get("create") else []
     return run_git(arguments["repo"], roots, ["checkout", *create, target])
 

@@ -43,6 +43,15 @@ def test_example_commit_grant_sets_the_agents_identity() -> None:
     }
 
 
+def test_example_push_grant_sets_the_branch_prefixes() -> None:
+    """The example's git.push grant allows task/ as the one branch prefix."""
+    config = load_config(EXAMPLE_CONFIG, CREDENTIAL_NAMES)
+
+    assert config.scopes["dev-agent"].grants["git.push"].env == {
+        "GIT_BRANCH_PREFIXES": "task/"
+    }
+
+
 def test_example_config_needs_the_github_token_credential() -> None:
     """With an empty credential store, the example is refused for github-token."""
     with pytest.raises(

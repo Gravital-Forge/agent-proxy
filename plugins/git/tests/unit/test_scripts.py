@@ -23,10 +23,10 @@ NO_EMAIL = (
 
 @pytest.fixture(autouse=True)
 def _isolate_git(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the host's git config and identity variables away from every git run."""
+    """Keep the host's git config and the grant-env variables away from every run."""
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    for variable in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"):
+    for variable in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_BRANCH_PREFIXES"):
         monkeypatch.delenv(variable, raising=False)
 
 
@@ -440,6 +440,9 @@ def test_run_script_refuses_without_roots(repo: Path) -> None:
 
 
 PROTECTED_MAIN = "Cannot push to protected branch: main"
+NO_PREFIXES = (
+    "GIT_BRANCH_PREFIXES is not set or names no prefix; the grant's env sets it"
+)
 
 
 def _prefix_refusal(branch: str) -> str:
@@ -454,6 +457,12 @@ def origin(repo: Path) -> Path:
     _git(repo.parent, "init", "-q", "--bare", "-b", "main", str(origin))
     _git(repo, "remote", "add", "origin", str(origin))
     return origin
+
+
+@pytest.fixture
+def _task_prefix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Allow task/ as the one branch prefix, as the grant's env sets it."""
+    monkeypatch.setenv("GIT_BRANCH_PREFIXES", "task/")
 
 
 def _commit_on_branch(repo: Path, branch: str) -> str:
@@ -486,6 +495,7 @@ def _head(repo: Path) -> str:
     return _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
 
 
+@pytest.mark.usefixtures("_task_prefix")
 def test_push_sends_a_task_branch_to_origin(
     repo: Path, roots: list[str], origin: Path
 ) -> None:
@@ -498,6 +508,7 @@ def test_push_sends_a_task_branch_to_origin(
     assert _git(origin, "rev-parse", "refs/heads/task/p") == pushed
 
 
+@pytest.mark.usefixtures("_task_prefix")
 def test_push_sets_the_branchs_upstream(
     repo: Path, roots: list[str], origin: Path
 ) -> None:
@@ -509,6 +520,7 @@ def test_push_sets_the_branchs_upstream(
     assert _git(repo, "rev-parse", "--abbrev-ref", "@{upstream}") == "origin/task/p\n"
 
 
+@pytest.mark.usefixtures("_task_prefix")
 @pytest.mark.parametrize("branch", ["main", "master"])
 def test_push_refuses_a_protected_branch(
     repo: Path, roots: list[str], origin: Path, branch: str
@@ -524,6 +536,7 @@ def test_push_refuses_a_protected_branch(
     assert _git(origin, "for-each-ref") == ""
 
 
+@pytest.mark.usefixtures("_task_prefix")
 def test_push_refuses_a_branch_without_the_prefix(
     repo: Path, roots: list[str], origin: Path
 ) -> None:
@@ -536,6 +549,7 @@ def test_push_refuses_a_branch_without_the_prefix(
     assert _git(origin, "for-each-ref") == ""
 
 
+@pytest.mark.usefixtures("_task_prefix")
 def test_push_refuses_a_detached_head(
     repo: Path, roots: list[str], origin: Path
 ) -> None:
@@ -549,6 +563,7 @@ def test_push_refuses_a_detached_head(
     assert _git(origin, "for-each-ref") == ""
 
 
+@pytest.mark.usefixtures("_task_prefix")
 def test_push_does_not_force_through_a_planted_push_refspec(
     repo: Path, roots: list[str], origin: Path
 ) -> None:
@@ -565,6 +580,7 @@ def test_push_does_not_force_through_a_planted_push_refspec(
     assert _git(origin, "rev-parse", "refs/heads/task/p") == pushed
 
 
+@pytest.mark.usefixtures("_task_prefix")
 def test_push_uploads_lfs_objects_without_the_pre_push_hook(
     repo: Path, roots: list[str], origin: Path
 ) -> None:
@@ -579,6 +595,7 @@ def test_push_uploads_lfs_objects_without_the_pre_push_hook(
     assert stored.read_bytes() == content
 
 
+@pytest.mark.usefixtures("_task_prefix")
 def test_push_returns_a_failed_lfs_push_and_pushes_no_branch(
     repo: Path, roots: list[str], origin: Path
 ) -> None:
@@ -595,6 +612,7 @@ def test_push_returns_a_failed_lfs_push_and_pushes_no_branch(
     assert _git(origin, "for-each-ref") == ""
 
 
+@pytest.mark.usefixtures("_task_prefix")
 def test_push_in_a_missing_directory_returns_gits_error(
     tmp_path: Path, roots: list[str]
 ) -> None:
@@ -607,6 +625,42 @@ def test_push_in_a_missing_directory_returns_gits_error(
     assert result["stderr"].startswith("fatal: ")
 
 
+def test_push_sends_a_branch_under_a_second_prefix(
+    repo: Path, roots: list[str], origin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With task/ and dependabot/ allowed, a push of dependabot/x reaches origin."""
+    monkeypatch.setenv("GIT_BRANCH_PREFIXES", "task/,dependabot/")
+    pushed = _commit_on_branch(repo, "dependabot/x")
+
+    result = scripts.push({"repo": str(repo)}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert _git(origin, "rev-parse", "refs/heads/dependabot/x") == pushed
+
+
+def test_push_refuses_without_branch_prefixes(
+    repo: Path, roots: list[str], origin: Path
+) -> None:
+    """With GIT_BRANCH_PREFIXES unset, a push of task/p is refused."""
+    _commit_on_branch(repo, "task/p")
+
+    with pytest.raises(RefusalError, match=f"^{NO_PREFIXES}$"):
+        scripts.push({"repo": str(repo)}, roots)
+
+    assert _git(origin, "for-each-ref") == ""
+
+
+def test_push_refuses_without_branch_prefixes_before_git_runs(
+    tmp_path: Path, roots: list[str]
+) -> None:
+    """With GIT_BRANCH_PREFIXES unset, the refusal comes before git reads HEAD."""
+    missing = tmp_path / "root" / "missing"
+
+    with pytest.raises(RefusalError, match=f"^{NO_PREFIXES}$"):
+        scripts.push({"repo": str(missing)}, roots)
+
+
+@pytest.mark.usefixtures("_task_prefix")
 def test_checkout_switches_to_a_protected_branch(repo: Path, roots: list[str]) -> None:
     """Checking out main from a task branch leaves the repository on main."""
     _git(repo, "checkout", "-q", "-b", "task/x")
@@ -617,6 +671,7 @@ def test_checkout_switches_to_a_protected_branch(repo: Path, roots: list[str]) -
     assert _head(repo) == "main\n"
 
 
+@pytest.mark.usefixtures("_task_prefix")
 def test_checkout_switches_to_a_task_branch(repo: Path, roots: list[str]) -> None:
     """Checking out an existing task/x leaves the repository on it."""
     _git(repo, "branch", "task/x")
@@ -627,6 +682,7 @@ def test_checkout_switches_to_a_task_branch(repo: Path, roots: list[str]) -> Non
     assert _head(repo) == "task/x\n"
 
 
+@pytest.mark.usefixtures("_task_prefix")
 def test_checkout_with_create_makes_a_task_branch(repo: Path, roots: list[str]) -> None:
     """The checkout action with create makes task/c at HEAD and switches to it."""
     arguments = {"repo": str(repo), "target": "task/c", "create": True}
@@ -637,6 +693,7 @@ def test_checkout_with_create_makes_a_task_branch(repo: Path, roots: list[str]) 
     assert _head(repo) == "task/c\n"
 
 
+@pytest.mark.usefixtures("_task_prefix")
 @pytest.mark.parametrize("create", [False, True])
 def test_checkout_refuses_a_target_without_the_prefix(
     repo: Path, roots: list[str], create: bool
@@ -651,6 +708,7 @@ def test_checkout_refuses_a_target_without_the_prefix(
     assert _head(repo) == "main\n"
 
 
+@pytest.mark.usefixtures("_task_prefix")
 def test_checkout_of_a_missing_branch_returns_gits_error(
     repo: Path, roots: list[str]
 ) -> None:
@@ -661,6 +719,34 @@ def test_checkout_of_a_missing_branch_returns_gits_error(
     assert "task/none" in result["stderr"]
 
 
+def test_checkout_with_create_makes_a_branch_under_a_second_prefix(
+    repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With task/ and dependabot/ allowed, create makes dependabot/x and switches."""
+    monkeypatch.setenv("GIT_BRANCH_PREFIXES", "task/, dependabot/")
+    arguments = {"repo": str(repo), "target": "dependabot/x", "create": True}
+
+    result = scripts.checkout(arguments, roots)
+
+    assert result["exit_code"] == 0, result
+    assert _head(repo) == "dependabot/x\n"
+
+
+@pytest.mark.parametrize("target", ["main", "task/x"])
+def test_checkout_refuses_without_branch_prefixes(
+    repo: Path, roots: list[str], target: str
+) -> None:
+    """With GIT_BRANCH_PREFIXES unset, checking out any target, main too, is refused."""
+    _git(repo, "branch", "task/x")
+    _git(repo, "checkout", "-q", "-b", "task/y")
+
+    with pytest.raises(RefusalError, match=f"^{NO_PREFIXES}$"):
+        scripts.checkout({"repo": str(repo), "target": target}, roots)
+
+    assert _head(repo) == "task/y\n"
+
+
+@pytest.mark.usefixtures("_task_prefix")
 def test_run_script_returns_a_push_refusal_as_its_result(
     repo: Path, roots: list[str]
 ) -> None:
@@ -674,4 +760,20 @@ def test_run_script_returns_a_push_refusal_as_its_result(
         "exit_code": 2,
         "stdout": "",
         "stderr": f"git plugin refused: {PROTECTED_MAIN}\n",
+    }
+
+
+def test_run_script_returns_a_missing_prefixes_refusal_as_its_result(
+    repo: Path, roots: list[str]
+) -> None:
+    """A checkout of main with GIT_BRANCH_PREFIXES unset comes back as exit code 2."""
+    stdin = json.dumps({"repo": str(repo), "target": "main"}).encode()
+    environ = {"AGENT_PROXY_ROOTS": json.dumps(roots)}
+
+    result = scripts.run_script("checkout", stdin, environ)
+
+    assert result == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": f"git plugin refused: {NO_PREFIXES}\n",
     }
