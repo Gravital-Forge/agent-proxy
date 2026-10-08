@@ -1,8 +1,8 @@
 # The github plugin
 
 The github plugin runs gh, the GitHub CLI, in a cage. It offers one action for each GitHub tool that
-git-sidecar offers, and `job_log_url`, which returns a failed job's log URL.
-`docs/writing-a-plugin.md` gives the plugin model this follows.
+git-sidecar offers, and `job_log_url`, which returns a job's log URL. `docs/writing-a-plugin.md`
+gives the plugin model this follows.
 
 ## The actions
 

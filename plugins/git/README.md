@@ -86,7 +86,7 @@ keep the diff out of the result: the result then holds the file's path and a `--
   `output_schema` states both result forms.
 - When git fails on the diff or on the stat, the result is that git run's
   `{exit_code, stdout, stderr}`, and the script writes no file.
-- The write follows no symlink. It refuses a file that is not a regular file or has another hard
+- The write follows no symlink. It fails on a file that is not a regular file or has another hard
   link, and it empties the file only after both checks. A failed write returns `exit_code` 1, an
   empty `stdout`, and a `stderr` that begins `diff could not be written to <path>: `.
 
@@ -103,7 +103,8 @@ resolves a relative path against `repo`, which surprises the caller.
   `git worktree add -b <branch> <path>`. With `create_branch` false, `add` attaches the branch that
   exists instead, as `git worktree add -- <path> <branch>`. `create_branch` is true when the input
   leaves it out.
-- `add` without `branch` lets git make a new branch named after the last component of `path`.
+- `add` without `branch` lets git name the branch after the last component of `path`. git makes that
+  branch when it is missing, and attaches it when it exists.
 - `add` refuses a `path` that is `repo` or lies inside it. The check resolves every symlink in both.
 
 git's own error answers `add` or `remove` without `path`.
@@ -205,7 +206,7 @@ scopes:
 ```
 
 Each `git.push` and `git.checkout` grant sets `GIT_BRANCH_PREFIXES` in its `env`, as "Branch rules"
-gives. A `git.diff` grant gives an `rw` root when callers use `output`.
+gives. "`diff` with `output`" gives the root a `git.diff` grant needs for `output`.
 
 A grant's `domains` name each host its remote reaches. For a repository that tracks LFS files, they
 also name each host the LFS server sends objects to, which can differ from the remote's host.
