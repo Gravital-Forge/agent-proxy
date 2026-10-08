@@ -6,12 +6,12 @@ gives the plugin model this follows.
 
 ## The actions
 
-Each action is named as its git-sidecar tool, without the `gh_` prefix: `gh_pr_create` becomes
-`pr_create`, and `gh_run_view` becomes `run_view`. The name a config pins the image as sets the MCP
-tool names, which `docs/design.md` gives as `<plugin>_<action>`. A config that pins the image as
-`github`, as "A grant" does, serves `github_pr_create` and the rest. A config that pins it as `gh`
-instead serves the names that git-sidecar serves. `manifest.json` declares every action, its input
-schema, its credentials, and its timeout.
+Each action that matches a git-sidecar tool is named as that tool, without the `gh_` prefix:
+`gh_pr_create` becomes `pr_create`, and `gh_run_view` becomes `run_view`. The name a config pins the
+image as sets the MCP tool names, which `docs/design.md` gives as `<plugin>_<action>`. A config that
+pins the image as `github`, as "A grant" does, serves `github_pr_create` and the rest. A config that
+pins it as `gh` instead serves the names that git-sidecar serves. `manifest.json` declares every
+action, its input schema, its credentials, and its timeout.
 
 An action is a command action when its gh argv is a fixed prefix plus typed parameters, as for
 `pr_list`, `run_view`, and `run_list`. The others are script actions, because each does more than
