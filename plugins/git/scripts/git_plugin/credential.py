@@ -86,8 +86,6 @@ def _repository_of(path: str) -> tuple[str, str]:
     segments = path.split("/")
     if len(segments) >= 2 and DOT_SEGMENTS.isdisjoint(segments):
         owner, name = segments[0], segments[1].removesuffix(GIT_SUFFIX)
-        if rules.OWNER_PATTERN.fullmatch(owner) and rules.NAME_PATTERN.fullmatch(
-            name
-        ):
+        if rules.OWNER_PATTERN.fullmatch(owner) and rules.NAME_PATTERN.fullmatch(name):
             return owner, name
     raise cage.RefusalError(f"credential path '{path}' names no owner/name")
