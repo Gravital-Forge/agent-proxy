@@ -165,8 +165,8 @@ helper.
 Before git runs, the wrapper and each script action check the cage's environment. In a cage that
 holds `GH_TOKEN`, they refuse the call when `GITHUB_REPOS` is unset, names no entry, or holds a
 malformed entry, whether or not git would ask the helper. So a grant that lacks the list fails on
-its first call, a fetch from a public repository or a local path included. A cage without `GH_TOKEN`
-reads no list.
+its first call, a fetch from a public repository or a local path included. In a cage without
+`GH_TOKEN`, this check reads no list.
 
 Each action that reaches a remote declares `{"env": "GH_TOKEN"}` in its `credentials` in
 `manifest.json`. The core does not compare a grant's credentials with that declaration, so the check

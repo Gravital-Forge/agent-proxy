@@ -271,9 +271,10 @@ says why they run here and never in the project. Every `docker` command below ru
    result holds the run's log.
 8. **The repository list with a real credential.** With a real `github-token` stored, take two
    GitHub repositories the token can push to, `<listed>` and `<unlisted>`, each as `owner/name`.
-   Give the agent a checkout of each below the tree, whose `origin` is that repository. Give
-   `git.push` and `github.pr_view` grants shaped like those in `examples/instance.yaml`, with
-   `GITHUB_REPOS: "<listed>"`, and put the config in force as "The first start" does.
+   Give the agent a checkout of each below the tree, whose `origin` is that repository, and open a
+   pull request on `<listed>`. Give `git.push` and `github.pr_view` grants shaped like those in
+   `examples/instance.yaml`, with `GITHUB_REPOS: "<listed>"`. The `git.push` grant's `roots` name
+   both checkouts with mode `rw`. Put the config in force as "The first start" does.
    1. As the agent, create a branch under the grant's prefix in each checkout and commit one change
       on it, for example with `git -C <checkout> checkout -b task/list-check`.
    2. Through the agent's MCP client, call `git_push` with `repo` set to the `<listed>` checkout.
@@ -281,8 +282,8 @@ says why they run here and never in the project. Every `docker` command below ru
    3. Call `git_push` with `repo` set to the `<unlisted>` checkout. The result's `exit_code` is not
       0, and its `stderr` holds
       `git plugin refused: repository '<unlisted>' is not in GITHUB_REPOS`.
-   4. Call `github_pr_view` with `repo` set to `<listed>` and `pr` set to the number of a pull
-      request there. The result's `exit_code` is 0.
+   4. Call `github_pr_view` with `repo` set to `<listed>` and `pr` set to the number of that pull
+      request. The result's `exit_code` is 0.
    5. Call `github_pr_view` with `repo` set to `<unlisted>` and `pr` set to any number. The result's
       `exit_code` is 2, and its `stderr` holds
       `github plugin refused: repository '<unlisted>' is not in GITHUB_REPOS`.

@@ -56,6 +56,10 @@ A script action checks `repo` before the action runs. A command action runs `gh-
 that finds the one `--repo` in its argv and checks the value after it. On a match, `gh-cage`
 replaces itself with gh on the same argv, `--repo` kept.
 
+Two points differ from the git plugin. This plugin refuses an unset, empty, or malformed list in
+every cage, whether or not it holds `GH_TOKEN`. It judges a repository by the `repo` the call gives,
+never by the name GitHub redirects to.
+
 `pr_create` checks `repo` alone, never `head`. `head` may name a branch on another owner's fork,
 which the pull request only reads.
 
