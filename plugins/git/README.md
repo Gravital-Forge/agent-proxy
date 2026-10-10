@@ -217,13 +217,15 @@ also name each host the LFS server sends objects to, which can differ from the r
 `git.push` and `git.checkout` grants set `GIT_BRANCH_PREFIXES` in their `env`, as "Branch rules"
 gives.
 
-Grant a root of mode `rw` to each action that reads working-tree files, such as `status`, `blame`,
-and `lfs_status`, even though it only reads. When git cannot trust a file's cached stat data, it
-hashes the file again. For an LFS-tracked file, the LFS clean filter does that hashing, and it
-writes a temporary file under the repository's `lfs` directory. Under a root of mode `ro`, the
-action fails with a read-only file system error. A new worktree triggers this: git writes its files
-and its index in the same second, so git cannot trust any of their stat data. `status` also saves
-the refreshed index, which clears that state.
+Grant a root of mode `rw` to each action that can run the LFS clean filter on a working-tree file:
+`status`, `blame`, and `lfs_status`. The filter writes a temporary file under the `lfs` directory of
+the repository's git directory. For a linked worktree, that is the main repository's git directory.
+Under a root of mode `ro`, the action fails with a read-only file system error.
+
+- `blame` runs the file it names through the filter on every call.
+- `status` and `lfs_status` run a file through the filter when git cannot trust the file's cached
+  stat data. A new worktree triggers this: git cannot trust the stat data of a file written in the
+  same second as the index.
 
 ## Layout
 
