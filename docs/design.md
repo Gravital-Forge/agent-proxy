@@ -267,14 +267,14 @@ One instance per agent user:
   beneath it, linked worktrees included. The check this turns off guards against configuration a
   repository plants; inside the cage that risk is the known gap about planted code, and the cage
   bounds it.
-- `gh` reads `GH_TOKEN` as it is. git does not, so the git plugin supplies `GH_TOKEN` through a
-  credential helper in the form `E12` used, which clears every inherited helper before it adds its
-  own:
-
-```text
--c credential.helper= -c 'credential.helper=!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
-```
-
+- `gh` reads `GH_TOKEN` as it is. git does not, so the git plugin supplies `GH_TOKEN` through its
+  own credential helper. Every git run clears every inherited helper, then names the plugin's, with
+  `credential.useHttpPath=true`, so each request carries the path of the URL git connects to. The
+  helper answers with `GH_TOKEN` only when that path names a repository the grant's `GITHUB_REPOS`
+  lists, and otherwise answers `quit=1`, so git stops. The helper checks that path, and not the
+  remote a repository's config names, because git builds the URL after `url.<base>.insteadOf` and
+  `remote.<name>.pushurl` rewrite it: a rewritten remote cannot carry the token to an unlisted
+  repository. `plugins/git/README.md` gives the helper's rule and its refusals.
 - The git plugin passes `-c core.hooksPath=/dev/null` on every git run, so no hook runs in a cage. A
   hook planted in a repository would run with the cage's credential and domains: the `push` cage
   holds `GH_TOKEN` and reaches GitHub. A value on the command line outranks the repository's config,
@@ -341,6 +341,9 @@ are the design's, and `docs/runbooks/per-agent-instance.md` carries them as step
   private repository.
 - With a real credential, the github plugin's `run_view` with `log_failed` returns a failed run's
   log under a grant that names the storage host GitHub redirects the fetch to.
+- With a real credential and grants whose `GITHUB_REPOS` names one repository, the git plugin's
+  `push` and the github plugin's `pr_view` succeed on that repository, and each is refused on a
+  repository the token reaches that the list does not name.
 
 The `S` checks need no counterpart on the agent's daemon: in a deployment, cages never run there.
 
@@ -362,7 +365,10 @@ The `S` checks need no counterpart on the agent's daemon: in a deployment, cages
 - A bug in the instance's own code reaches that agent's tree and that instance's credentials.
 - Hooks are off in every cage, but code planted in a repository still runs there through
   `.git/config`, for example `core.fsmonitor` and filter drivers. Such code can read that cage's
-  credential; the domain allowlist bounds where it can send it, not whether it can read it.
+  credential. A credentialed git cage mounts the repository read-write, so the code can also write
+  the credential to a file the agent reads, and the domain allowlist does not bound that. Such code
+  gets past the repository list the same way: it can use the token on any repository the token
+  reaches.
 - Traverse on the agent's home lets `agentproxy-<agent>` open any world-readable file there by path.
 - A file created with an explicit restrictive mode (for example a mode-preserving copy of a `0644`
   file) is read-only to the other side; the ACL cannot widen it.

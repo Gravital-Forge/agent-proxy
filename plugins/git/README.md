@@ -54,12 +54,20 @@ gives the reason. The wrapper refuses as its own exit; a script refuses through 
 - `--repo` is missing, repeated, or has no value.
 - A call breaks a branch rule.
 - `push` or `checkout` runs while `GIT_BRANCH_PREFIXES` is unset or names no prefix.
+- A call runs in a cage that holds `GH_TOKEN` while `GITHUB_REPOS` is unset, names no entry, or
+  holds an entry that is neither `owner/name` nor `owner/*`.
+- The credential helper is asked for a repository that `GITHUB_REPOS` does not name.
+- The credential helper gets a request whose path does not name `owner/name`, or runs while
+  `GH_TOKEN` is unset or empty.
 - `diff`'s `output` does not resolve strictly beneath the repository's `.agent-proxy` directory.
 - `worktree` with `add` names a `path` inside the repository it comes from.
 - `commit` finds no identity, or nothing staged.
-- The image's executable runs under a name that is neither `git-cage` nor a script action's.
+- The image's executable runs under a name that is not `git-cage`, `git-credential-agent-proxy`, or
+  a script action's.
 
-The refusal text of a broken branch rule uses git-sidecar's wording.
+The refusal text of a broken branch rule uses git-sidecar's wording. The credential helper refuses
+in its own way: it writes the refusal to stderr and answers git `quit=1`, so git fails with its own
+exit code, and the action's `stderr` holds the refusal.
 
 ### Output past the cap
 
@@ -135,13 +143,46 @@ root first, so `/x/` gives `/x` and `/x/*`.
 
 ### The credential helper
 
-Every git run passes the credential helper that `docs/design.md` gives under "The git plugin's
-constraints". It clears every inherited helper, then answers with `x-access-token` and the value of
-`GH_TOKEN`.
+Every git run clears every inherited credential helper, then names the plugin's own helper,
+`/plugin/bin/git-credential-agent-proxy`, and sets `credential.useHttpPath=true`.
+`scripts/git_plugin/credential.py` holds the helper. With `useHttpPath` set, git hands the helper
+the path of the URL it connects to, after `url.<base>.insteadOf` and `remote.<name>.pushurl` rewrite
+that URL. `docs/design.md` gives why the helper checks this path under "The git plugin's
+constraints".
+
+On git's `get`, the helper reads the path's first two segments as `owner/name`, with one trailing
+`.git` dropped from the name, and checks that repository against `GITHUB_REPOS`, as "The repository
+list" gives. When the list names it, the helper answers with `x-access-token` and the value of
+`GH_TOKEN`. Otherwise the helper refuses: it writes the reason to stderr and answers `quit=1`, so
+git stops and fails. The helper refuses the same way when `GH_TOKEN` is unset or empty, or when the
+path does not name `owner/name`:
+
+- The request has no path, or a path of fewer than two segments.
+- A segment anywhere in the path is `.` or `..`.
+- The first segment is not an owner, or the second, its `.git` dropped, is not a name, by the
+  patterns "The repository list" gives.
+
+git decodes percent escapes in the path it hands the helper, but sends the request still encoded. A
+`%2F..` in a URL therefore reaches the helper as a `..` segment that the request never resolves, so
+the helper refuses every `.` and `..` segment.
+
+The helper answers `store` and `erase` with nothing. It reads the path and never the host, because
+the grant's `domains` bound the host.
+
+GitHub serves a public repository without a credential, so git fetches an unlisted public repository
+without asking the helper. The list bounds where the token goes. Every push to GitHub asks the
+helper.
+
+Before git runs, the wrapper and each script action check the cage's environment. In a cage that
+holds `GH_TOKEN`, they refuse the call when `GITHUB_REPOS` is unset, names no entry, or holds a
+malformed entry, whether or not git would ask the helper. So a grant that lacks the list fails on
+its first call, a fetch from a public repository or a local path included. In a cage without
+`GH_TOKEN`, this check reads no list.
 
 Each action that reaches a remote declares `{"env": "GH_TOKEN"}` in its `credentials` in
-`manifest.json`. The core does not compare a grant's credentials with that declaration. Give each
-grant of such an action a credential as `GH_TOKEN`.
+`manifest.json`. The core does not compare a grant's credentials with that declaration, so the check
+keys on `GH_TOKEN` and not on the action. Give each grant of such an action a credential as
+`GH_TOKEN`, and set `GITHUB_REPOS` in its `env`.
 
 ### Branch rules
 
@@ -160,6 +201,32 @@ When it is unset or names no prefix, they refuse the call, even for `main`.
 - `checkout` lets a protected target through. Any other target must begin with an allowed prefix,
   with or without `create`.
 - `worktree`, `merge`, and `commit` check no branch.
+
+### The repository list
+
+`GITHUB_REPOS` in the cage's environment names the GitHub repositories the plugin hands the token
+for. The grant's `env` sets it. Its value is split as `GIT_BRANCH_PREFIXES` is: a comma-separated
+list, each entry stripped of whitespace, and an empty entry ignored. An entry takes one of two
+forms:
+
+- `owner/name` names one repository.
+- `owner/*` names every repository of one user or organization.
+
+An owner is letters, digits, and `-`, and begins with a letter or a digit. A name is letters,
+digits, `_`, `.`, and `-`, and is not only dots. These are the two halves of the github plugin's
+`repo` pattern. Any other entry is malformed: a bare `owner`, `*`, `*/name`, or a partial glob such
+as `owner/api-*`.
+
+A repository matches an entry when the owners are equal and the names are equal, or the entry's name
+is `*`. Each comparison ignores case, as GitHub's does. A renamed or transferred repository is
+judged by the name in the URL git connects to, never by the name GitHub redirects to.
+
+The list fails closed. In a cage that holds `GH_TOKEN`, an unset list, a list with no entry, and a
+list with a malformed entry each refuse the call. `rules.py` holds the rule. The github plugin
+applies the same rule with its own copy.
+
+The list guards against an agent's mistake. It is not a boundary: `docs/design.md` gives under
+"Known gaps" how code planted in a repository gets past it.
 
 ### Commit identity
 
@@ -209,13 +276,14 @@ scopes:
         roots: [{path: /home/agent-01/Projects/example-repo, mode: rw}]
         domains: [github.com]
         credentials: {github-token: {env: GH_TOKEN}}
-        env: {GIT_BRANCH_PREFIXES: "task/"}
+        env: {GIT_BRANCH_PREFIXES: "task/", GITHUB_REPOS: "example-org/*"}
 ```
 
 A grant's `domains` name each host its remote reaches. For a repository that tracks LFS files, they
 also name each host the LFS server sends objects to, which can differ from the remote's host. The
 `git.push` and `git.checkout` grants set `GIT_BRANCH_PREFIXES` in their `env`, as "Branch rules"
-gives.
+gives. Every grant whose `credentials` give `GH_TOKEN`, such as `git.push`, sets `GITHUB_REPOS` in
+its `env`, as "The repository list" gives.
 
 Grant a root of mode `rw` to each action that can run the LFS clean filter on a working-tree file:
 `status`, `blame`, and `lfs_status`. The filter writes a temporary file under the `lfs` directory of
@@ -230,20 +298,21 @@ Under a root of mode `ro`, the action fails with a read-only file system error.
 ## Layout
 
 - `scripts/git_plugin/` is the module. `cage.py` holds the wrapper and `git_argv`, `scripts.py`
-  holds the script actions, and `rules.py` holds the branch rules.
+  holds the script actions, `rules.py` holds the branch rules and the repository list, and
+  `credential.py` holds the credential helper.
 - `scripts/entry` is the one executable every action runs. `entry.py` acts by the name the
-  executable runs under: `git-cage` runs the wrapper, and the name of a script action runs that
-  action.
+  executable runs under: `git-cage` runs the wrapper, `git-credential-agent-proxy` runs the
+  credential helper, and the name of a script action runs that action.
 - `Dockerfile` builds the image on the Alpine base the core's test plugin pins, with git, git LFS,
-  and Python 3 from apk. It links `git-cage` on the `PATH`, and each script action's `executable`
-  under `/plugin/bin/`, to `/plugin/entry`.
+  and Python 3 from apk. It links `git-cage` on the `PATH`, and `git-credential-agent-proxy` and
+  each script action's `executable` under `/plugin/bin/`, to `/plugin/entry`.
 - `describe` prints `manifest.json`.
 - `tests/unit/` runs the module with the host's git and git LFS, and checks the manifest. It needs
   no Docker.
 - `tests/integration/` builds the plugin image and the core's verifier image, and runs each action
   in a real cage through the core's `CageRunner`. `conftest.py` there builds the fixture
   repositories, one of them owned by uid 1000 from the image in `tests/fixture-image/`.
-  `auth_server.py` there serves the credential helper's test.
+  `auth_server.py` there serves the credential helper's tests.
 
 ## Build and test
 

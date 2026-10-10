@@ -11,6 +11,8 @@ from collections.abc import Callable, Mapping, Sequence
 from email.message import Message
 from typing import IO, NotRequired, TypedDict
 
+from github_plugin import repos
+
 REFUSAL_EXIT = 2
 REFUSAL_PREFIX = "github plugin refused: "
 DEFAULT_VIEW_FIELDS = "number,title,url,headRefName,state,statusCheckRollup"
@@ -363,11 +365,14 @@ ACTIONS: Mapping[str, Callable[..., ScriptResult]] = {
 def run_script(name: str, stdin: bytes) -> ScriptResult:
     """Run the script action name on the JSON input stdin holds.
 
-    A refusal is returned as the result: exit code 2, no stdout, and the
+    The input's repo must be in the process environment's GITHUB_REPOS. A
+    refusal is returned as the result: exit code 2, no stdout, and the
     refusal's reason on stderr.
     """
+    arguments = json.loads(stdin)
     try:
-        return ACTIONS[name](json.loads(stdin))
+        repos.check_repo(arguments["repo"], repos.allowed_repos(os.environ))
+        return ACTIONS[name](arguments)
     except RefusalError as refusal:
         return {
             "exit_code": REFUSAL_EXIT,

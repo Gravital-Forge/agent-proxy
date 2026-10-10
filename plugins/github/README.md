@@ -13,9 +13,9 @@ pins the image as `github`, as "A grant" does, serves `github_pr_create` and the
 pins it as `gh` instead serves the names that git-sidecar serves, and `gh_job_log_url`.
 `manifest.json` declares every action, its input schema, its credentials, and its timeout.
 
-An action is a command action when its gh argv is a fixed prefix plus typed parameters, as for
-`pr_list`, `run_view`, and `run_list`. The others are script actions, because each does more than
-that:
+An action is a command action when its argv is `gh-cage`, a fixed gh prefix, and typed parameters,
+as for `pr_list`, `run_view`, and `run_list`. "The repository list" gives what `gh-cage` does. The
+others are script actions, because each does more than that:
 
 - It runs more than one gh command, as `pr_fetch` does.
 - It reads a job's log URL from GitHub's API itself, as `pr_checks` and `job_log_url` do. "Job log
@@ -44,6 +44,26 @@ builds each `gh api` path from `repo`, so the path stays under `repos/<owner>/<n
 
 `pr_create` takes a required `head`, the branch the pull request comes from. git-sidecar takes that
 branch from the checkout, and the cage has no checkout.
+
+### The repository list
+
+Every action checks its `repo` against `GITHUB_REPOS` in the cage's environment before gh runs. The
+grant's `env` sets the variable. The rule is the git plugin's, and `repos.py` holds this plugin's
+own copy of it. `plugins/git/README.md` gives the entry forms, the match, and the refusals of an
+unset, empty, or malformed list under "The repository list".
+
+A script action checks `repo` before the action runs. A command action runs `gh-cage`, a wrapper
+that finds the one `--repo` in its argv and checks the value after it. On a match, `gh-cage`
+replaces itself with gh on the same argv, `--repo` kept.
+
+Two points differ from the git plugin. This plugin refuses an unset, empty, or malformed list in
+every cage, whether or not it holds `GH_TOKEN`. It judges a repository by the `repo` the call gives,
+where the git plugin judges it by the URL git connects to.
+
+`pr_create` checks `repo` alone, never `head`. `head` may name a branch on another owner's fork,
+which the pull request only reads.
+
+The cage mounts no repository, so nothing inside the plugin gets past the check.
 
 ### What an action returns
 
@@ -95,8 +115,12 @@ gives the reason. A script refuses through its printed `exit_code`, and the imag
 refuses as its own exit. The plugin refuses these:
 
 - A `pr_fetch` call exits 0 but prints what is not JSON. The reason names the call's path.
-- The image's executable runs under a name that is not a script action's.
+- The image's executable runs under a name that is neither `gh-cage` nor a script action's.
 - `job_log_url` runs, or `pr_checks` finds a failed job, while `GH_TOKEN` is unset or empty.
+- `GITHUB_REPOS` is unset, names no entry, or holds an entry that is neither `owner/name` nor
+  `owner/*`.
+- `repo` names a repository that `GITHUB_REPOS` does not list.
+- `gh-cage` finds `--repo` missing, repeated, or with no value after it.
 
 The core refuses a call before a cage starts when the input fails the action's input schema. These
 calls fail it:
@@ -176,26 +200,33 @@ scopes:
         roots: []
         domains: [api.github.com]
         credentials: {github-token: {env: GH_TOKEN}}
+        env: {GITHUB_REPOS: "example-org/*"}
       github.pr_checks:
         roots: []
         domains: [api.github.com]
         credentials: {github-token: {env: GH_TOKEN}}
+        env: {GITHUB_REPOS: "example-org/*"}
       github.job_log_url:
         roots: []
         domains: [api.github.com]
         credentials: {github-token: {env: GH_TOKEN}}
+        env: {GITHUB_REPOS: "example-org/*"}
 ```
+
+Every grant sets `GITHUB_REPOS` in its `env`, as "The repository list" gives.
 
 "Egress" gives the hosts a grant must add for `run_view` with `log_failed`.
 
 ## Layout
 
-- `scripts/github_plugin/` is the module. `scripts.py` holds the script actions, and `entry.py` runs
-  the script action that the executable's name names.
-- `scripts/entry` is the one executable every script action runs.
+- `scripts/github_plugin/` is the module. `scripts.py` holds the script actions, `repos.py` holds
+  the repository list, `cage.py` holds the `gh-cage` wrapper, and `entry.py` runs the wrapper or the
+  script action that the executable's name names.
+- `scripts/entry` is the one executable every action runs.
 - `Dockerfile` builds the image on the Alpine base the git plugin pins, with gh and Python 3 from
-  apk. It sets `XDG_CACHE_HOME`, and links each script action's `executable` under `/plugin/bin/` to
-  `/plugin/entry`. A command action runs the image's gh directly.
+  apk. It sets `XDG_CACHE_HOME`, and links `gh-cage` on the `PATH` and each script action's
+  `executable` under `/plugin/bin/` to `/plugin/entry`. A command action runs `gh-cage`, which runs
+  the image's gh.
 - `describe` prints `manifest.json`.
 - `tests/stub/gh` stands in for gh. It writes its argv to the file `GH_STUB_LOG` names, and answers
   from a table of canned results. It answers any other argv with that argv and the value of

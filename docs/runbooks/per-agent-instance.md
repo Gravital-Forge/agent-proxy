@@ -36,6 +36,8 @@ Start from `examples/instance.yaml`. `docs/design.md` gives the rules a config m
 - `overflow_dir` names a directory inside the tree, by a path with no symbolic link in it. Root
   creates and removes that directory, so both scripts refuse any other path.
 - Every root names a directory below the tree, never the tree itself.
+- Every grant that holds `github-token` sets `GITHUB_REPOS` in its `env`, or the plugin refuses each
+  call under that grant. `plugins/git/README.md` gives the list's form under "The repository list".
 
 ## Provisioning
 
@@ -258,11 +260,41 @@ says why they run here and never in the project. Every `docker` command below ru
    `rm -rf <service home>/agent-proxy`.
 6. **`E12` with a real credential.** Store a real `github-token`, as "The first start" does, and
    give a `git.fetch` grant shaped like the `git.push` grant in `examples/instance.yaml`. Through
-   the agent's MCP client, call `git_fetch` on a repository below the tree whose remote is private.
-   The check passes when the result's `exit_code` is 0.
+   the agent's MCP client, call `git_fetch` on a repository below the tree whose remote is a private
+   repository that the grant's `GITHUB_REPOS` names. The check passes when the result's `exit_code`
+   is 0.
 7. **A run's log with a real credential.** With a real `github-token` stored, give a
    `github.run_view` grant that names `api.github.com` and the storage host GitHub redirects the log
-   fetch to; `plugins/github/README.md` gives `api.github.com` and one example storage host under
-   "Egress", and says a grant must name each storage host one by one. Through the agent's MCP
-   client, call `github_run_view` with `log_failed` on a failed run. The check passes when the
+   fetch to, and that sets `GITHUB_REPOS` in its `env`; `plugins/github/README.md` gives
+   `api.github.com` and one example storage host under "Egress", and says a grant must name each
+   storage host one by one. Through the agent's MCP client, call `github_run_view` with `log_failed`
+   on a failed run of a repository that the grant's `GITHUB_REPOS` names. The check passes when the
    result holds the run's log.
+8. **The repository list with a real credential.** With a real `github-token` stored, take two
+   GitHub repositories the token can push to, `<listed>` and `<unlisted>`, each as `owner/name`.
+   Give the agent a checkout of each below the tree, whose `origin` is that repository, and open a
+   pull request on `<listed>`. Give `git.push` and `github.pr_view` grants shaped like those in
+   `examples/instance.yaml`, with `GITHUB_REPOS: "<listed>"`. The `git.push` grant's `roots` name
+   both checkouts with mode `rw`, and its `domains` also name each host GitHub's LFS server sends
+   objects to, as `plugins/git/README.md` gives under "A grant". Put the config in force as "The
+   first start" does.
+   1. As the agent, create a branch under the grant's prefix in each checkout and commit one change
+      on it, for example with `git -C <checkout> checkout -b task/list-check`.
+   2. Through the agent's MCP client, call `git_push` with `repo` set to the `<listed>` checkout.
+      The result's `exit_code` is 0.
+   3. As the agent, track one new file with LFS in the `<listed>` checkout and commit it, for
+      example with `git -C <checkout> lfs track '*.bin'`, then a commit of `.gitattributes` and a
+      new `.bin` file. Call `git_push` with `repo` set to the `<listed>` checkout. The result's
+      `exit_code` is 0. This shows that a real GitHub LFS upload and verify never ask the credential
+      helper about a path outside the list.
+   4. Call `git_push` with `repo` set to the `<unlisted>` checkout. The result's `exit_code` is not
+      0, and its `stderr` holds
+      `git plugin refused: repository '<unlisted>' is not in GITHUB_REPOS`.
+   5. Call `github_pr_view` with `repo` set to `<listed>` and `pr` set to the number of that pull
+      request. The result's `exit_code` is 0.
+   6. Call `github_pr_view` with `repo` set to `<unlisted>` and `pr` set to any number. The result's
+      `exit_code` is 2, and its `stderr` holds
+      `github plugin refused: repository '<unlisted>' is not in GITHUB_REPOS`.
+
+   The check passes when each result is as given. Afterwards, delete the branch `task/list-check`
+   from `<listed>` on GitHub.

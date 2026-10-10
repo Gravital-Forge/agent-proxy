@@ -16,9 +16,10 @@ CLOSE_INPUT = json.dumps({"repo": "o/n", "pr_number": 5})
 
 @pytest.fixture(autouse=True)
 def _stub_gh(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Put the stub gh first on PATH, with a token and no log."""
+    """Put the stub gh first on PATH, with a token, o/n listed, and no log."""
     monkeypatch.setenv("PATH", f"{STUB_DIR}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("GH_TOKEN", TOKEN)
+    monkeypatch.setenv("GITHUB_REPOS", "o/n")
     monkeypatch.delenv("GH_STUB_LOG", raising=False)
 
 
@@ -73,3 +74,31 @@ def test_a_script_link_prints_its_result_as_compact_json(tmp_path: Path) -> None
     )
 
     assert (completed.returncode, completed.stdout) == (0, _close_line())
+
+
+def test_main_checks_a_script_actions_repo_against_the_environment(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A script action on a repo the process's GITHUB_REPOS omits prints a refusal."""
+    monkeypatch.setenv("GITHUB_REPOS", "other/*")
+    stdin = io.TextIOWrapper(io.BytesIO(CLOSE_INPUT.encode()))
+    monkeypatch.setattr(sys, "stdin", stdin)
+
+    exit_code = entry.main(["/plugin/bin/pr_close"])
+
+    assert exit_code == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": "github plugin refused: repository 'o/n' is not in GITHUB_REPOS\n",
+    }
+
+
+def test_main_sends_gh_cage_to_the_wrapper(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The name gh-cage runs the wrapper, whatever its directory."""
+    exit_code = entry.main(["/usr/local/bin/gh-cage", "run", "list"])
+
+    assert exit_code == 2
+    assert capsys.readouterr().err == "github plugin refused: --repo is missing\n"
