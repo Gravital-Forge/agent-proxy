@@ -15,6 +15,7 @@ GET_OPERATION = "get"
 USERNAME = "x-access-token"
 PATH_KEY = "path"
 GIT_SUFFIX = ".git"
+DOT_SEGMENTS = frozenset({".", ".."})
 
 
 def helper(argv: Sequence[str], stdin: TextIO, environ: Mapping[str, str]) -> int:
@@ -51,26 +52,42 @@ def _requested_path(request: str) -> str | None:
 def _token_for(path: str | None, environ: Mapping[str, str]) -> str:
     """Return GH_TOKEN when path names a repository GITHUB_REPOS lists.
 
-    The repository is path's first two segments, with one trailing .git
-    dropped from the second; the segments after them, such as LFS's
-    info/lfs, play no part.
-
     Raises:
-        RefusalError: path is missing or has fewer than two segments, the
-            list refuses or does not name the repository, or GH_TOKEN is
-            unset or empty.
+        RefusalError: path is missing or names no owner/name, the list
+            refuses or does not name the repository, or GH_TOKEN is unset
+            or empty.
     """
     if path is None:
         raise cage.RefusalError(
             "credential request names no path; "
             "git sends one only under credential.useHttpPath"
         )
-    segments = path.split("/")
-    if len(segments) < 2:
-        raise cage.RefusalError(f"credential path '{path}' names no owner/name")
-    owner, name = segments[0], segments[1].removesuffix(GIT_SUFFIX)
+    owner, name = _repository_of(path)
     rules.check_repo(f"{owner}/{name}", rules.allowed_repos(environ))
     token = environ.get(rules.CREDENTIAL_ENV_NAME, "")
     if not token:
         raise cage.RefusalError(f"{rules.CREDENTIAL_ENV_NAME} is not set or empty")
     return token
+
+
+def _repository_of(path: str) -> tuple[str, str]:
+    """Return the owner and name that path's first two segments give.
+
+    One trailing .git is dropped from the name. The segments after the two,
+    such as LFS's info/lfs/objects/batch, play no part. git hands the helper
+    the path percent-decoded but sends the request still encoded, so an
+    encoded ../ reaches the helper as a dot segment the server may resolve
+    to another repository.
+
+    Raises:
+        RefusalError: path has fewer than two segments, a . or .. segment
+            anywhere, or a first or second segment that fails its pattern.
+    """
+    segments = path.split("/")
+    if len(segments) >= 2 and DOT_SEGMENTS.isdisjoint(segments):
+        owner, name = segments[0], segments[1].removesuffix(GIT_SUFFIX)
+        if rules.OWNER_PATTERN.fullmatch(owner) and rules.NAME_PATTERN.fullmatch(
+            name
+        ):
+            return owner, name
+    raise cage.RefusalError(f"credential path '{path}' names no owner/name")

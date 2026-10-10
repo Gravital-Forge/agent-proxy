@@ -58,7 +58,7 @@ replaces itself with gh on the same argv, `--repo` kept.
 
 Two points differ from the git plugin. This plugin refuses an unset, empty, or malformed list in
 every cage, whether or not it holds `GH_TOKEN`. It judges a repository by the `repo` the call gives,
-never by the name GitHub redirects to.
+where the git plugin judges it by the URL git connects to.
 
 `pr_create` checks `repo` alone, never `head`. `head` may name a branch on another owner's fork,
 which the pull request only reads.

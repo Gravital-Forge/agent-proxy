@@ -6,6 +6,7 @@ from git_plugin import credential
 HELPER = "/plugin/bin/git-credential-agent-proxy"
 TOKEN = "dummy-token"
 LISTED = {"GITHUB_REPOS": "octo/hello", "GH_TOKEN": TOKEN}
+OWNER_LISTED = {"GITHUB_REPOS": "octo/*", "GH_TOKEN": TOKEN}
 GRANTED = f"username=x-access-token\npassword={TOKEN}\n"
 QUIT = "quit=1\n"
 PREFIX = "git plugin refused: "
@@ -43,7 +44,13 @@ def _answer(
 
 @pytest.mark.parametrize(
     "path",
-    ["octo/hello.git", "octo/hello", "octo/hello.git/info/lfs", "Octo/HELLO.git"],
+    [
+        "octo/hello.git",
+        "octo/hello",
+        "octo/hello.git/info/lfs",
+        "Octo/HELLO.git",
+        "octo/hello.git/info/lfs/objects/batch",
+    ],
 )
 def test_get_answers_the_token_for_a_listed_path(
     capsys: pytest.CaptureFixture[str], path: str
@@ -86,6 +93,43 @@ def test_get_refuses_a_path_that_names_no_listed_repository(
     """The refusal goes to stderr, and quit=1 makes git stop asking."""
     answer = _answer(capsys, "get", _request(path), LISTED)
 
+    assert answer == (0, QUIT, f"{PREFIX}{reason}\n")
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "octo/hello/../../other/x.git",
+        "octo/hello.git/info/../lfs",
+        "octo/hello.git/./info/lfs",
+        "/octo/hello.git",
+        "-octo/hello.git",
+        "octo/...",
+        "octo/.git",
+        "octo/hel lo.git",
+    ],
+    ids=[
+        "dot-dot-after-the-name",
+        "dot-dot-in-the-sub-path",
+        "dot-in-the-sub-path",
+        "empty-owner",
+        "owner-fails-its-pattern",
+        "name-fails-its-pattern",
+        "name-only-git-suffix",
+        "name-with-a-space",
+    ],
+)
+def test_get_refuses_a_path_whose_segments_name_no_owner_name(
+    capsys: pytest.CaptureFixture[str], path: str
+) -> None:
+    """A dot segment anywhere, or a first or second segment its pattern fails.
+
+    git hands the helper the path percent-decoded, so an encoded ../ arrives
+    as a dot segment, though the owner's every repository is listed.
+    """
+    answer = _answer(capsys, "get", _request(path), OWNER_LISTED)
+
+    reason = f"credential path '{path}' names no owner/name"
     assert answer == (0, QUIT, f"{PREFIX}{reason}\n")
 
 
