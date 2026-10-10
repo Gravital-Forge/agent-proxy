@@ -27,6 +27,10 @@ NO_PREFIXES_STDERR = (
     "git plugin refused: "
     "GIT_BRANCH_PREFIXES is not set or names no prefix; the grant's env sets it\n"
 )
+NO_REPOS_STDERR = (
+    "git plugin refused: "
+    "GITHUB_REPOS is not set or names no repository; the grant's env sets it\n"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -678,6 +682,56 @@ def test_run_script_refuses_without_roots(repo: Path) -> None:
         "stdout": "",
         "stderr": "git plugin refused: AGENT_PROXY_ROOTS is not set\n",
     }
+
+
+def test_run_script_refuses_a_token_cage_without_a_repository_list(
+    repo: Path, roots: list[str]
+) -> None:
+    """With GH_TOKEN set, an unset GITHUB_REPOS refuses before the action runs."""
+    stdin = json.dumps({"repo": str(repo)}).encode()
+    environ = {"AGENT_PROXY_ROOTS": json.dumps(roots), "GH_TOKEN": "t"}
+
+    result = scripts.run_script("diff", stdin, environ)
+
+    assert result == {"exit_code": 2, "stdout": "", "stderr": NO_REPOS_STDERR}
+
+
+def test_run_script_refuses_a_token_cage_with_a_malformed_entry(
+    repo: Path, roots: list[str]
+) -> None:
+    """With GH_TOKEN set, a malformed GITHUB_REPOS entry refuses the action."""
+    stdin = json.dumps({"repo": str(repo)}).encode()
+    environ = {
+        "AGENT_PROXY_ROOTS": json.dumps(roots),
+        "GH_TOKEN": "t",
+        "GITHUB_REPOS": "*",
+    }
+
+    result = scripts.run_script("diff", stdin, environ)
+
+    assert result == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": "git plugin refused: "
+        "GITHUB_REPOS entry '*' is not owner/name or owner/*\n",
+    }
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [{"GH_TOKEN": "t", "GITHUB_REPOS": "octo/hello"}, {"GITHUB_REPOS": "*"}],
+    ids=["token-and-list", "no-token-malformed-list"],
+)
+def test_run_script_runs_the_action_when_the_list_parses_or_no_token_is_held(
+    repo: Path, roots: list[str], extra: dict[str, str]
+) -> None:
+    """A token cage whose list parses, or a cage with no GH_TOKEN, runs the action."""
+    stdin = json.dumps({"repo": str(repo)}).encode()
+    environ = {"AGENT_PROXY_ROOTS": json.dumps(roots), **extra}
+
+    result = scripts.run_script("diff", stdin, environ)
+
+    assert result == {"exit_code": 0, "stdout": "", "stderr": ""}
 
 
 PROTECTED_MAIN = "Cannot push to protected branch: main"

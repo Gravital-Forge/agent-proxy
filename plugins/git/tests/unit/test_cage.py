@@ -8,10 +8,29 @@ HELPER = (
     "-c",
     "credential.helper=",
     "-c",
-    "credential.helper=!f() { echo username=x-access-token; "
-    'echo "password=$GH_TOKEN"; }; f',
+    "credential.helper=/plugin/bin/git-credential-agent-proxy",
+    "-c",
+    "credential.useHttpPath=true",
 )
 SHAPE_REFUSAL = "AGENT_PROXY_ROOTS must be a JSON array of absolute paths, got {!r}"
+NO_REPOS_STDERR = (
+    "git plugin refused: "
+    "GITHUB_REPOS is not set or names no repository; the grant's env sets it\n"
+)
+
+
+class _ExecedError(Exception):
+    """Raised in place of os.execvp; its args are execvp's file and argv."""
+
+
+@pytest.fixture
+def _no_exec(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make os.execvp raise _ExecedError instead of replacing the test process."""
+
+    def fake_execvp(file: str, args: list[str]) -> None:
+        raise _ExecedError(file, args)
+
+    monkeypatch.setattr(cage.os, "execvp", fake_execvp)
 
 
 def test_git_argv_orders_repo_roots_hooks_helper_then_args() -> None:
@@ -186,3 +205,62 @@ def test_wrapper_refuses_a_missing_roots_variable(
         "",
         "git plugin refused: AGENT_PROXY_ROOTS is not set\n",
     )
+
+
+@pytest.mark.usefixtures("_no_exec")
+@pytest.mark.parametrize("token", ["t", ""], ids=["token", "empty-token"])
+def test_wrapper_refuses_a_token_cage_without_a_repository_list(
+    capsys: pytest.CaptureFixture[str], token: str
+) -> None:
+    """With GH_TOKEN set, to any value, an unset GITHUB_REPOS refuses before git."""
+    environ = {"AGENT_PROXY_ROOTS": "[]", "GH_TOKEN": token}
+
+    exit_code = cage.wrapper(["git-cage", "fetch", "--repo", "/repo"], environ)
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert (captured.out, captured.err) == ("", NO_REPOS_STDERR)
+
+
+@pytest.mark.usefixtures("_no_exec")
+def test_wrapper_refuses_a_token_cage_with_a_malformed_entry(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """With GH_TOKEN set, a malformed GITHUB_REPOS entry refuses before git."""
+    environ = {
+        "AGENT_PROXY_ROOTS": "[]",
+        "GH_TOKEN": "t",
+        "GITHUB_REPOS": "octo/api-*",
+    }
+
+    exit_code = cage.wrapper(["git-cage", "fetch", "--repo", "/repo"], environ)
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert (captured.out, captured.err) == (
+        "",
+        "git plugin refused: "
+        "GITHUB_REPOS entry 'octo/api-*' is not owner/name or owner/*\n",
+    )
+
+
+@pytest.mark.usefixtures("_no_exec")
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"GH_TOKEN": "t", "GITHUB_REPOS": "octo/hello"},
+        {},
+        {"GITHUB_REPOS": "octo/api-*"},
+    ],
+    ids=["token-and-list", "no-token", "no-token-malformed-list"],
+)
+def test_wrapper_runs_git_when_the_list_parses_or_no_token_is_held(
+    extra: dict[str, str],
+) -> None:
+    """A token cage whose list parses, or a cage with no GH_TOKEN, reaches git."""
+    environ = {"AGENT_PROXY_ROOTS": "[]", **extra}
+
+    with pytest.raises(_ExecedError) as execed:
+        cage.wrapper(["git-cage", "fetch", "--repo", "/repo"], environ)
+
+    assert execed.value.args == ("git", cage.git_argv("/repo", [], ["fetch"]))

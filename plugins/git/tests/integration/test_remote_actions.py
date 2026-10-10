@@ -1,7 +1,9 @@
 import hashlib
+from pathlib import Path
 
 import pytest
 from agent_proxy.config import EnvMount
+from agent_proxy.runner import Outcome
 from docker.models.containers import Container
 from harness import (
     AGENT_EMAIL,
@@ -14,7 +16,22 @@ from harness import (
     stdout_of,
 )
 
-AUTH_URL = "http://auth:8080/repo.git"
+LISTED_URL = "http://auth:8080/listed-org/repo.git"
+UNLISTED_URL = "http://auth:8080/other-org/repo.git"
+LISTED = {"GITHUB_REPOS": "listed-org/repo"}
+PUSH_ENV = {**LISTED, "GIT_BRANCH_PREFIXES": "task/"}
+TOKEN = {"gh-token": (EnvMount(env="GH_TOKEN"), b"dummy")}
+UNLISTED_REFUSAL = (
+    "git plugin refused: repository 'other-org/repo' is not in GITHUB_REPOS\n"
+)
+NO_PATH_REFUSAL = (
+    "git plugin refused: credential request names no path; "
+    "git sends one only under credential.useHttpPath\n"
+)
+NO_REPOS_REFUSAL = (
+    "git plugin refused: "
+    "GITHUB_REPOS is not set or names no repository; the grant's env sets it\n"
+)
 
 
 def _push_from_peer(pair: RemotePair) -> str:
@@ -24,6 +41,24 @@ def _push_from_peer(pair: RemotePair) -> str:
     host_git(pair.peer, "commit", "-q", "-m", "from peer")
     host_git(pair.peer, "push", "-q", "origin", "main")
     return host_git(pair.peer, "rev-parse", "HEAD")
+
+
+def _run_with_token(
+    run_action: RunAction,
+    name: str,
+    repo: Path,
+    root: Path,
+    env: dict[str, str] | None,
+) -> Outcome:
+    """Run the action name on repo with root granted, GH_TOKEN dummy, and env."""
+    return run_action(name, {"repo": str(repo)}, [root], TOKEN, env=env)
+
+
+def _refused(outcome: Outcome, reason: str, log: str) -> None:
+    """Fail unless the action failed with reason on stderr and no AUTH OK logged."""
+    assert outcome.content["exit_code"] != 0, outcome.content
+    assert reason in str(outcome.content["stderr"]), outcome.content
+    assert "AUTH OK" not in log
 
 
 def test_fetch_moves_origin_main(
@@ -178,17 +213,156 @@ def test_lfs_fetch_then_lfs_pull_fill_in_the_lfs_file(
 def test_credential_helper_answers_the_servers_challenge(
     run_action: RunAction, lfs_remote_pair: RemotePair, auth_server: Container
 ) -> None:
-    """Both git and git LFS send GH_TOKEN to a server that answers 401 without it."""
+    """Both git and git LFS send GH_TOKEN to a listed server that answers 401."""
     peer = lfs_remote_pair.peer
-    host_git(peer, "remote", "set-url", "origin", AUTH_URL)
-    credentials = {"gh-token": (EnvMount(env="GH_TOKEN"), b"dummy")}
+    host_git(peer, "remote", "set-url", "origin", LISTED_URL)
 
     for name in ("fetch", "lfs_fetch"):
-        outcome = run_action(
-            name, {"repo": str(peer)}, [lfs_remote_pair.root], credentials
-        )
+        outcome = _run_with_token(run_action, name, peer, lfs_remote_pair.root, LISTED)
         assert outcome.content["exit_code"] != 0, outcome.content
 
     log = auth_server.logs().decode()
-    assert "AUTH OK GET /repo.git/info/refs?service=git-upload-pack\n" in log
-    assert "AUTH OK POST /repo.git/info/lfs/objects/batch\n" in log
+    assert "AUTH OK GET /listed-org/repo.git/info/refs?service=git-upload-pack\n" in log
+    assert "AUTH OK POST /listed-org/repo.git/info/lfs/objects/batch\n" in log
+
+
+def test_push_hands_the_helper_the_listed_path(
+    run_action: RunAction, remote_pair: RemotePair, auth_server: Container
+) -> None:
+    """A push to a listed remote sends GH_TOKEN for the receive-pack request."""
+    work = remote_pair.work
+    host_git(work, "checkout", "-q", "-b", "task/p")
+    host_git(work, "remote", "set-url", "origin", LISTED_URL)
+
+    outcome = _run_with_token(run_action, "push", work, remote_pair.root, PUSH_ENV)
+
+    assert outcome.content["exit_code"] != 0, outcome.content
+    log = auth_server.logs().decode()
+    assert (
+        "AUTH OK GET /listed-org/repo.git/info/refs?service=git-receive-pack\n" in log
+    )
+
+
+def test_pull_sends_the_token_to_a_listed_remote(
+    run_action: RunAction, remote_pair: RemotePair, auth_server: Container
+) -> None:
+    """A pull from a listed remote sends GH_TOKEN for the upload-pack request."""
+    work = remote_pair.work
+    host_git(work, "remote", "set-url", "origin", LISTED_URL)
+
+    outcome = _run_with_token(run_action, "pull", work, remote_pair.root, LISTED)
+
+    assert outcome.content["exit_code"] != 0, outcome.content
+    log = auth_server.logs().decode()
+    assert "AUTH OK GET /listed-org/repo.git/info/refs?service=git-upload-pack\n" in log
+
+
+def test_lfs_pull_sends_the_token_to_a_listed_remote(
+    run_action: RunAction, lfs_remote_pair: RemotePair, auth_server: Container
+) -> None:
+    """An LFS pull from a listed remote sends GH_TOKEN for the batch request."""
+    peer = lfs_remote_pair.peer
+    host_git(peer, "remote", "set-url", "origin", LISTED_URL)
+
+    outcome = _run_with_token(
+        run_action, "lfs_pull", peer, lfs_remote_pair.root, LISTED
+    )
+
+    assert outcome.content["exit_code"] != 0, outcome.content
+    log = auth_server.logs().decode()
+    assert "AUTH OK POST /listed-org/repo.git/info/lfs/objects/batch\n" in log
+
+
+@pytest.mark.parametrize("name", ["fetch", "pull", "push"])
+def test_a_git_action_refuses_an_unlisted_remote(
+    run_action: RunAction,
+    remote_pair: RemotePair,
+    auth_server: Container,
+    name: str,
+) -> None:
+    """An origin outside GITHUB_REPOS gets no token, and the refusal names it."""
+    work = remote_pair.work
+    host_git(work, "checkout", "-q", "-b", "task/p")
+    host_git(work, "remote", "set-url", "origin", UNLISTED_URL)
+
+    outcome = _run_with_token(run_action, name, work, remote_pair.root, PUSH_ENV)
+
+    _refused(outcome, UNLISTED_REFUSAL, auth_server.logs().decode())
+
+
+@pytest.mark.parametrize("name", ["lfs_fetch", "lfs_pull"])
+def test_an_lfs_action_refuses_an_unlisted_remote(
+    run_action: RunAction,
+    lfs_remote_pair: RemotePair,
+    auth_server: Container,
+    name: str,
+) -> None:
+    """An LFS origin outside GITHUB_REPOS gets no token, and the refusal names it."""
+    peer = lfs_remote_pair.peer
+    host_git(peer, "remote", "set-url", "origin", UNLISTED_URL)
+
+    outcome = _run_with_token(run_action, name, peer, lfs_remote_pair.root, LISTED)
+
+    _refused(outcome, UNLISTED_REFUSAL, auth_server.logs().decode())
+
+
+def test_push_refuses_a_pushurl_to_an_unlisted_repository(
+    run_action: RunAction, remote_pair: RemotePair, auth_server: Container
+) -> None:
+    """A listed origin whose pushurl names an unlisted repository gets no token."""
+    work = remote_pair.work
+    host_git(work, "checkout", "-q", "-b", "task/p")
+    host_git(work, "remote", "set-url", "origin", LISTED_URL)
+    host_git(work, "config", "remote.origin.pushurl", UNLISTED_URL)
+
+    outcome = _run_with_token(run_action, "push", work, remote_pair.root, PUSH_ENV)
+
+    _refused(outcome, UNLISTED_REFUSAL, auth_server.logs().decode())
+
+
+def test_fetch_refuses_an_insteadof_to_an_unlisted_repository(
+    run_action: RunAction, remote_pair: RemotePair, auth_server: Container
+) -> None:
+    """A listed origin rewritten by insteadOf to an unlisted one gets no token."""
+    work = remote_pair.work
+    host_git(work, "remote", "set-url", "origin", LISTED_URL)
+    host_git(work, "config", f"url.{UNLISTED_URL}.insteadOf", LISTED_URL)
+
+    outcome = _run_with_token(run_action, "fetch", work, remote_pair.root, LISTED)
+
+    _refused(outcome, UNLISTED_REFUSAL, auth_server.logs().decode())
+
+
+def test_lfs_fetch_refuses_a_request_with_no_path(
+    run_action: RunAction, lfs_remote_pair: RemotePair, auth_server: Container
+) -> None:
+    """A repository's useHttpPath=false withholds the path, and LFS gets no token."""
+    peer = lfs_remote_pair.peer
+    host_git(peer, "remote", "set-url", "origin", LISTED_URL)
+    host_git(peer, "config", "credential.http://auth:8080.useHttpPath", "false")
+
+    outcome = _run_with_token(
+        run_action, "lfs_fetch", peer, lfs_remote_pair.root, LISTED
+    )
+
+    assert outcome.content["exit_code"] != 0, outcome.content
+    assert NO_PATH_REFUSAL in str(outcome.content["stderr"]), outcome.content
+    assert "/info/lfs/objects/batch" not in auth_server.logs().decode()
+
+
+def test_fetch_with_a_token_refuses_without_a_repository_list(
+    run_action: RunAction, remote_pair: RemotePair
+) -> None:
+    """A fetch granted GH_TOKEN but no GITHUB_REPOS is refused before git runs."""
+    work = remote_pair.work
+    before = host_git(work, "rev-parse", "origin/main")
+    _push_from_peer(remote_pair)
+
+    outcome = _run_with_token(run_action, "fetch", work, remote_pair.root, None)
+
+    assert outcome.content == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": NO_REPOS_REFUSAL,
+    }
+    assert host_git(work, "rev-parse", "origin/main") == before

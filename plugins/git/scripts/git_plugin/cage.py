@@ -5,17 +5,21 @@ import os
 import sys
 from collections.abc import Mapping, Sequence
 
+from git_plugin import rules
+
 REFUSAL_EXIT = 2
 REFUSAL_PREFIX = "git plugin refused: "
 ROOTS_ENV_NAME = "AGENT_PROXY_ROOTS"
 REPO_FLAG = "--repo"
 HOOKS_OFF = ("-c", "core.hooksPath=/dev/null")
+CREDENTIAL_HELPER_PATH = "/plugin/bin/git-credential-agent-proxy"
 CREDENTIAL_HELPER = (
     "-c",
     "credential.helper=",
     "-c",
-    "credential.helper=!f() { echo username=x-access-token; "
-    'echo "password=$GH_TOKEN"; }; f',
+    f"credential.helper={CREDENTIAL_HELPER_PATH}",
+    "-c",
+    "credential.useHttpPath=true",
 )
 
 
@@ -89,12 +93,14 @@ def _without_trailing_slashes(root: str) -> str:
 def wrapper(argv: Sequence[str], environ: Mapping[str, str]) -> int:
     """Replace this process with git on the repository argv names, or refuse.
 
-    argv is the wrapper's own argv, its name first. The function returns only
+    argv is the wrapper's own argv, its name first. A cage that holds
+    GH_TOKEN is refused unless GITHUB_REPOS parses. The function returns only
     on a refusal: it writes the reason to stderr and returns REFUSAL_EXIT.
     """
     try:
         roots = roots_from_env(environ)
         repo, args = split_repo(argv[1:])
+        rules.check_token_cage(environ)
     except RefusalError as refusal:
         print(f"{REFUSAL_PREFIX}{refusal}", file=sys.stderr)
         return REFUSAL_EXIT

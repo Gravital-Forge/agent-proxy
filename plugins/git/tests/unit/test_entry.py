@@ -11,7 +11,9 @@ from git_plugin import entry
 
 ENTRY = Path(__file__).parents[2] / "scripts" / "entry"
 ISOLATED_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
-HELPER_VALUE = '!f() { echo username=x-access-token; echo "password=$GH_TOKEN"; }; f'
+HELPER_VALUE = "/plugin/bin/git-credential-agent-proxy"
+REQUEST = "protocol=https\nhost=github.com\npath=octo/hello.git\n"
+GRANTED = "username=x-access-token\npassword=dummy\n"
 
 
 @pytest.fixture
@@ -88,7 +90,7 @@ def test_git_cage_trusts_each_root_and_what_lies_beneath(
 def test_git_cage_clears_inherited_helpers_then_sets_its_own(
     git_cage: Path, repo: Path
 ) -> None:
-    """Git sees an empty helper, which clears any other, then the GH_TOKEN helper."""
+    """Git sees an empty helper, which clears any other, then the plugin's helper."""
     completed = _run(
         git_cage,
         _roots(repo.parent),
@@ -100,6 +102,21 @@ def test_git_cage_clears_inherited_helpers_then_sets_its_own(
     )
 
     assert completed.stdout == f"\n{HELPER_VALUE}\n"
+
+
+def test_git_cage_hands_the_helper_the_url_path(git_cage: Path, repo: Path) -> None:
+    """Git sees credential.useHttpPath true, so the helper gets the URL's path."""
+    completed = _run(
+        git_cage,
+        _roots(repo.parent),
+        "config",
+        "--get",
+        "--repo",
+        str(repo),
+        "credential.useHttpPath",
+    )
+
+    assert completed.stdout == "true\n"
 
 
 def test_git_cage_exits_with_gits_code(git_cage: Path, repo: Path) -> None:
@@ -149,6 +166,36 @@ def test_main_refuses_a_name_with_no_action(
 
     assert exit_code == 2
     assert capsys.readouterr().err == "git plugin refused: no action is named 'clone'\n"
+
+
+def test_a_helper_link_answers_gits_get(tmp_path: Path) -> None:
+    """A link named git-credential-agent-proxy answers get with the token."""
+    link = tmp_path / "bin" / "git-credential-agent-proxy"
+    link.parent.mkdir()
+    link.symlink_to(ENTRY)
+    environment = {"GITHUB_REPOS": "octo/hello", "GH_TOKEN": "dummy"}
+
+    completed = _run(link, environment, "get", stdin=REQUEST)
+
+    assert (completed.returncode, completed.stdout, completed.stderr) == (
+        0,
+        GRANTED,
+        "",
+    )
+
+
+def test_main_sends_the_helper_name_to_the_credential_helper(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The name git-credential-agent-proxy runs the helper on the request on stdin."""
+    monkeypatch.setenv("GITHUB_REPOS", "octo/hello")
+    monkeypatch.setenv("GH_TOKEN", "dummy")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(REQUEST))
+
+    exit_code = entry.main(["/plugin/bin/git-credential-agent-proxy", "get"])
+
+    assert exit_code == 0
+    assert capsys.readouterr().out == GRANTED
 
 
 def test_a_script_link_prints_its_result_as_compact_json(

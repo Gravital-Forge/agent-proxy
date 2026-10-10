@@ -520,11 +520,13 @@ ACTIONS: Mapping[str, Callable[..., ActionResult]] = {
 def run_script(name: str, stdin: bytes, environ: Mapping[str, str]) -> ActionResult:
     """Run the script action name on the JSON input stdin holds.
 
-    A refusal is returned as the result: exit code 2, no stdout, and the
-    refusal's reason on stderr.
+    A cage that holds GH_TOKEN is refused before the action runs unless
+    GITHUB_REPOS parses. A refusal is returned as the result: exit code 2, no
+    stdout, and the refusal's reason on stderr.
     """
     try:
         roots = cage.roots_from_env(environ)
+        rules.check_token_cage(environ)
         return ACTIONS[name](json.loads(stdin), roots)
     except cage.RefusalError as refusal:
         return {
