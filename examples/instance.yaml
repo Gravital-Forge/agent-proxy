@@ -37,16 +37,20 @@ scopes:
         roots: [{path: /home/agent-01/Projects/example-repo, mode: rw}]
         domains: [github.com]
         credentials: {github-token: {env: GH_TOKEN}}
-        env: {GIT_BRANCH_PREFIXES: "task/"}
+        # Every grant that holds github-token sets GITHUB_REPOS, or its calls are refused.
+        env: {GIT_BRANCH_PREFIXES: "task/", GITHUB_REPOS: &repos "example-org/*"}
       github.pr_view:
         roots: []
         domains: [api.github.com]
         credentials: {github-token: {env: GH_TOKEN}}
+        env: {GITHUB_REPOS: *repos}
       github.pr_create:
         roots: []
         domains: [api.github.com]
         credentials: {github-token: {env: GH_TOKEN}}
+        env: {GITHUB_REPOS: *repos}
       github.pr_checks:
         roots: []
         domains: [api.github.com]
         credentials: {github-token: {env: GH_TOKEN}}
+        env: {GITHUB_REPOS: *repos}
