@@ -16,6 +16,7 @@ from github_plugin import scripts
 
 MANIFEST_PATH = Path(__file__).parents[2] / "manifest.json"
 DOCKERFILE_PATH = Path(__file__).parents[2] / "Dockerfile"
+GH_CAGE_LINK = "ln -s /plugin/entry /usr/local/bin/gh-cage"
 LINKED_ACTIONS = re.compile(r"for action in ([^;]+); do")
 GIT_SIDECAR_GH_TOOLS = {
     "gh_pr_create",
@@ -40,21 +41,21 @@ NUMBER_PROPERTY = {"type": "integer", "minimum": 1}
 TEXT_PROPERTY = {"type": "string"}
 NON_EMPTY_PROPERTY = {"type": "string", "minLength": 1}
 FLAG_PROPERTY = {"type": "boolean"}
-# Each command action's argv, and its parameters in order.
+# Each command action's argv, which starts gh-cage, and its parameters in order.
 COMMAND_ACTIONS: dict[str, tuple[tuple[str, ...], tuple[Parameter, ...]]] = {
     "pr_list": (
-        ("gh", "pr", "list", "--json", "number,title,url,headRefName,state"),
+        ("gh-cage", "pr", "list", "--json", "number,title,url,headRefName,state"),
         (REPO, Parameter(name="head", placement="flag", flag="--head")),
     ),
     "run_view": (
-        ("gh", "run", "view"),
+        ("gh-cage", "run", "view"),
         (
             Parameter(name="run_id", placement="positional", flag=None),
             REPO,
             Parameter(name="log_failed", placement="flag", flag="--log-failed"),
         ),
     ),
-    "run_list": (("gh", "run", "list"), (REPO,)),
+    "run_list": (("gh-cage", "run", "list"), (REPO,)),
 }
 SCRIPT_TIMEOUTS = {
     "pr_create": MINUTE,
@@ -183,7 +184,7 @@ def test_manifest_declares_git_sidecars_gh_tools_and_job_log_url(
 
 @pytest.mark.parametrize("name", sorted(COMMAND_ACTIONS))
 def test_command_action_runs_its_gh_words(manifest: Manifest, name: str) -> None:
-    """Each command action runs gh with its words and parameters, no pass-through."""
+    """Each command action runs gh-cage with its gh words, no pass-through."""
     argv, parameters = COMMAND_ACTIONS[name]
     action = manifest.actions[name]
 
@@ -248,7 +249,7 @@ def test_pr_edit_requires_one_field_to_change(manifest: Manifest) -> None:
             "pr_list",
             {"repo": "o/n", "head": "task/x"},
             (
-                "gh",
+                "gh-cage",
                 "pr",
                 "list",
                 "--json",
@@ -263,7 +264,7 @@ def test_pr_edit_requires_one_field_to_change(manifest: Manifest) -> None:
             "pr_list",
             {"repo": "o/n"},
             (
-                "gh",
+                "gh-cage",
                 "pr",
                 "list",
                 "--json",
@@ -275,14 +276,14 @@ def test_pr_edit_requires_one_field_to_change(manifest: Manifest) -> None:
         (
             "run_view",
             {"repo": "o/n", "run_id": 42, "log_failed": True},
-            ("gh", "run", "view", "42", "--repo", "o/n", "--log-failed"),
+            ("gh-cage", "run", "view", "42", "--repo", "o/n", "--log-failed"),
         ),
         (
             "run_view",
             {"repo": "o/n", "run_id": 42},
-            ("gh", "run", "view", "42", "--repo", "o/n"),
+            ("gh-cage", "run", "view", "42", "--repo", "o/n"),
         ),
-        ("run_list", {"repo": "o/n"}, ("gh", "run", "list", "--repo", "o/n")),
+        ("run_list", {"repo": "o/n"}, ("gh-cage", "run", "list", "--repo", "o/n")),
     ],
 )
 def test_command_action_forms_its_argv(
@@ -365,3 +366,8 @@ def test_dockerfile_links_each_script_action(manifest: Manifest) -> None:
         script_actions,
         script_actions,
     )
+
+
+def test_dockerfile_links_gh_cage_to_the_entry() -> None:
+    """The image runs the wrapper under the name gh-cage, first on PATH."""
+    assert GH_CAGE_LINK in DOCKERFILE_PATH.read_text()

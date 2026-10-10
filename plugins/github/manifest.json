@@ -96,7 +96,7 @@
       },
       "credentials": [{"env": "GH_TOKEN"}],
       "timeout": "60s",
-      "argv": ["gh", "pr", "list", "--json", "number,title,url,headRefName,state"],
+      "argv": ["gh-cage", "pr", "list", "--json", "number,title,url,headRefName,state"],
       "parameters": [
         {"name": "repo", "as": "flag", "flag": "--repo"},
         {"name": "head", "as": "flag", "flag": "--head"}
@@ -246,7 +246,7 @@
       },
       "credentials": [{"env": "GH_TOKEN"}],
       "timeout": "60s",
-      "argv": ["gh", "run", "view"],
+      "argv": ["gh-cage", "run", "view"],
       "parameters": [
         {"name": "run_id", "as": "positional"},
         {"name": "repo", "as": "flag", "flag": "--repo"},
@@ -266,7 +266,7 @@
       },
       "credentials": [{"env": "GH_TOKEN"}],
       "timeout": "60s",
-      "argv": ["gh", "run", "list"],
+      "argv": ["gh-cage", "run", "list"],
       "parameters": [
         {"name": "repo", "as": "flag", "flag": "--repo"}
       ],

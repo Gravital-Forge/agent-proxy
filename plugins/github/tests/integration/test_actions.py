@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 
+import pytest
 from agent_proxy.config import Root
 from agent_proxy.egress import CageNetwork
 from harness import RunAction
@@ -10,6 +11,12 @@ CHECKS_7 = (
     "build\tfail\t1m\thttps://github.com/o/n/actions/runs/101/job/1\t\n"
     "lint\tpass\t10s\thttps://github.com/o/n/actions/runs/102/job/2\t\n"
     "test\tfail\t2m\thttps://github.com/o/n/actions/runs/101/job/3\t\n"
+)
+LISTED = {"GITHUB_REPOS": "o/n"}
+UNLISTED_STDERR = "github plugin refused: repository 'o/n' is not in GITHUB_REPOS\n"
+NO_REPOS_STDERR = (
+    "github plugin refused: "
+    "GITHUB_REPOS is not set or names no repository; the grant's env sets it\n"
 )
 
 
@@ -23,6 +30,14 @@ def echoed(*argv: str) -> dict[str, object]:
     }
 
 
+@pytest.fixture
+def stub_log(tmp_path: Path) -> Path:
+    """The file the stub gh logs each argv to, in a directory a root can grant."""
+    log_dir = tmp_path / "gh-log"
+    log_dir.mkdir()
+    return log_dir / "gh.log"
+
+
 def test_pr_create_passes_every_field_to_gh(run_action: RunAction) -> None:
     """The pr_create action calls gh pr create with each field as one flag."""
     arguments = {
@@ -33,7 +48,7 @@ def test_pr_create_passes_every_field_to_gh(run_action: RunAction) -> None:
         "body": "b",
     }
 
-    outcome = run_action("pr_create", arguments)
+    outcome = run_action("pr_create", arguments, env=LISTED)
 
     assert outcome.content == echoed(
         "pr",
@@ -51,14 +66,14 @@ def test_pr_edit_passes_the_given_field(run_action: RunAction) -> None:
     """The pr_edit action calls gh pr edit with only the title it was given."""
     arguments = {"repo": "o/n", "pr_number": 3, "title": "t"}
 
-    outcome = run_action("pr_edit", arguments)
+    outcome = run_action("pr_edit", arguments, env=LISTED)
 
     assert outcome.content == echoed("pr", "edit", "3", "--repo", "o/n", "--title=t")
 
 
 def test_pr_view_asks_for_the_default_fields(run_action: RunAction) -> None:
     """The pr_view action with no fields asks gh for the default JSON fields."""
-    outcome = run_action("pr_view", {"repo": "o/n", "pr": "3"})
+    outcome = run_action("pr_view", {"repo": "o/n", "pr": "3"}, env=LISTED)
 
     assert outcome.content == echoed(
         "pr",
@@ -72,7 +87,7 @@ def test_pr_view_asks_for_the_default_fields(run_action: RunAction) -> None:
 
 def test_pr_list_passes_repo_and_head(run_action: RunAction) -> None:
     """The pr_list action forms gh pr list with its JSON fields, repo, and head."""
-    outcome = run_action("pr_list", {"repo": "o/n", "head": "task/x"})
+    outcome = run_action("pr_list", {"repo": "o/n", "head": "task/x"}, env=LISTED)
 
     assert outcome.content == echoed(
         "pr",
@@ -88,7 +103,7 @@ def test_pr_list_passes_repo_and_head(run_action: RunAction) -> None:
 
 def test_pr_fetch_joins_the_three_comment_lists(run_action: RunAction) -> None:
     """The pr_fetch action on 5 returns the three lists the stub gives."""
-    outcome = run_action("pr_fetch", {"repo": "o/n", "pr_number": 5})
+    outcome = run_action("pr_fetch", {"repo": "o/n", "pr_number": 5}, env=LISTED)
 
     assert outcome.content == {
         "exit_code": 0,
@@ -102,7 +117,7 @@ def test_pr_fetch_joins_the_three_comment_lists(run_action: RunAction) -> None:
 
 def test_pr_fetch_returns_the_first_failing_call(run_action: RunAction) -> None:
     """The pr_fetch action on 6 returns the failed reviews call's result."""
-    outcome = run_action("pr_fetch", {"repo": "o/n", "pr_number": 6})
+    outcome = run_action("pr_fetch", {"repo": "o/n", "pr_number": 6}, env=LISTED)
 
     assert outcome.content == {
         "exit_code": 1,
@@ -115,7 +130,7 @@ def test_pr_reply_posts_a_reply_to_a_comment(run_action: RunAction) -> None:
     """The pr_reply action with comment_id posts to that comment's replies."""
     arguments = {"repo": "o/n", "pr_number": 3, "body": "hi", "comment_id": 4}
 
-    outcome = run_action("pr_reply", arguments)
+    outcome = run_action("pr_reply", arguments, env=LISTED)
 
     assert outcome.content == echoed(
         "api",
@@ -140,6 +155,7 @@ def test_pr_checks_appends_each_failed_jobs_log_url(
         {"repo": "o/n", "pr_number": 7},
         roots=[Root(path=str(fake_api_ca.parent), mode="ro")],
         network=network,
+        env=LISTED,
     )
 
     assert outcome.content == {
@@ -155,7 +171,7 @@ def test_pr_checks_returns_a_failed_call_with_no_output(
     run_action: RunAction,
 ) -> None:
     """The pr_checks action on 8 returns the checks call's result as it is."""
-    outcome = run_action("pr_checks", {"repo": "o/n", "pr_number": 8})
+    outcome = run_action("pr_checks", {"repo": "o/n", "pr_number": 8}, env=LISTED)
 
     assert outcome.content == {
         "exit_code": 1,
@@ -173,7 +189,7 @@ def test_pr_close_passes_comment_and_delete_branch(run_action: RunAction) -> Non
         "delete_branch": True,
     }
 
-    outcome = run_action("pr_close", arguments)
+    outcome = run_action("pr_close", arguments, env=LISTED)
 
     assert outcome.content == echoed(
         "pr", "close", "3", "--repo", "o/n", "--comment=done", "--delete-branch"
@@ -184,7 +200,7 @@ def test_run_view_passes_the_run_and_log_failed(run_action: RunAction) -> None:
     """The run_view action forms gh run view with the run ID, repo, and flag."""
     arguments = {"repo": "o/n", "run_id": 2, "log_failed": True}
 
-    outcome = run_action("run_view", arguments)
+    outcome = run_action("run_view", arguments, env=LISTED)
 
     assert outcome.content == echoed(
         "run", "view", "2", "--repo", "o/n", "--log-failed"
@@ -193,6 +209,60 @@ def test_run_view_passes_the_run_and_log_failed(run_action: RunAction) -> None:
 
 def test_run_list_passes_the_repo(run_action: RunAction) -> None:
     """The run_list action forms gh run list with the repo."""
-    outcome = run_action("run_list", {"repo": "o/n"})
+    outcome = run_action("run_list", {"repo": "o/n"}, env=LISTED)
 
     assert outcome.content == echoed("run", "list", "--repo", "o/n")
+
+
+def test_a_listed_repo_reaches_the_stub_gh_through_gh_cage(
+    run_action: RunAction, stub_log: Path
+) -> None:
+    """The run_list action on a listed repo runs gh, which logs its argv."""
+    outcome = run_action(
+        "run_list",
+        {"repo": "o/n"},
+        roots=[Root(path=str(stub_log.parent), mode="rw")],
+        env={**LISTED, "GH_STUB_LOG": str(stub_log)},
+    )
+
+    assert outcome.content == echoed("run", "list", "--repo", "o/n")
+    assert stub_log.read_text().splitlines() == ['["run","list","--repo","o/n"]']
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("pr_close", {"repo": "o/n", "pr_number": 3}),
+        ("pr_list", {"repo": "o/n"}),
+        ("run_view", {"repo": "o/n", "run_id": 2}),
+        ("run_list", {"repo": "o/n"}),
+    ],
+)
+def test_an_unlisted_repo_is_refused_before_gh_runs(
+    run_action: RunAction, stub_log: Path, name: str, arguments: dict[str, object]
+) -> None:
+    """A script action and each command action refuse a repo the list omits."""
+    outcome = run_action(
+        name,
+        arguments,
+        roots=[Root(path=str(stub_log.parent), mode="rw")],
+        env={"GITHUB_REPOS": "other/*", "GH_STUB_LOG": str(stub_log)},
+    )
+
+    assert outcome.content == {"exit_code": 2, "stdout": "", "stderr": UNLISTED_STDERR}
+    assert not stub_log.exists()
+
+
+def test_a_command_action_is_refused_without_a_repository_list(
+    run_action: RunAction, stub_log: Path
+) -> None:
+    """The run_list action with GITHUB_REPOS unset refuses before gh runs."""
+    outcome = run_action(
+        "run_list",
+        {"repo": "o/n"},
+        roots=[Root(path=str(stub_log.parent), mode="rw")],
+        env={"GH_STUB_LOG": str(stub_log)},
+    )
+
+    assert outcome.content == {"exit_code": 2, "stdout": "", "stderr": NO_REPOS_STDERR}
+    assert not stub_log.exists()

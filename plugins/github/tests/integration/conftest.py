@@ -177,11 +177,13 @@ def run_action(
         image: str | None = None,
         roots: Sequence[Root] = (),
         network: CageNetwork | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> Outcome:
         grant = Grant(
             roots=list(roots),
             domains=[],
             credentials={CREDENTIAL_NAME: EnvMount(env="GH_TOKEN")},
+            env=dict(env or {}),
         )
         return cage_runner.run(
             CageCall(

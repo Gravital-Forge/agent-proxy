@@ -17,9 +17,10 @@ class RunAction(Protocol):
         image: str | None = None,
         roots: Sequence[Root] = (),
         network: CageNetwork | None = None,
+        env: Mapping[str, str] | None = None,
     ) -> Outcome:
-        """Run the named action in a cage granted github-token as GH_TOKEN.
+        """Run the named action in a cage granted github-token as GH_TOKEN, and env.
 
-        The image defaults to the stub image, and the network to the cage
-        network with an empty environment.
+        The image defaults to the stub image, the network to the cage network
+        with an empty environment, and env to none.
         """

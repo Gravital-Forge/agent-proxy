@@ -7,6 +7,7 @@ from harness import RunAction
 FAILED_STEP_LOG = (
     "build\ttest\t2026-01-01T00:00:00.0000000Z FAILED: expected 1, got 2\n"
 )
+LISTED = {"GITHUB_REPOS": "o/n"}
 
 
 def test_pr_create_with_a_head_and_no_checkout_gets_past_the_branch_and_git_steps(
@@ -39,6 +40,7 @@ def test_pr_create_with_a_head_and_no_checkout_gets_past_the_branch_and_git_step
         image=plugin_image,
         roots=[Root(path=str(fake_api_ca.parent), mode="ro")],
         network=network,
+        env=LISTED,
     )
 
     stderr = outcome.content["stderr"]
@@ -70,6 +72,7 @@ def test_run_view_log_failed_caches_its_log_on_a_read_only_root(
         image=plugin_image,
         roots=[Root(path=str(fake_api_ca.parent), mode="ro")],
         network=network,
+        env=LISTED,
     )
 
     assert outcome.content == {
@@ -100,6 +103,7 @@ def test_job_log_url_returns_the_fakes_location_without_following_it(
         image=plugin_image,
         roots=[Root(path=str(fake_api_ca.parent), mode="ro")],
         network=network,
+        env=LISTED,
     )
 
     assert outcome.content == {
@@ -126,6 +130,7 @@ def test_job_log_url_names_the_404_for_a_job_the_api_does_not_know(
         image=plugin_image,
         roots=[Root(path=str(fake_api_ca.parent), mode="ro")],
         network=network,
+        env=LISTED,
     )
 
     assert outcome.content == {
@@ -158,6 +163,7 @@ def test_pr_edit_gets_past_the_lookup_and_applies_the_edit(
         image=plugin_image,
         roots=[Root(path=str(fake_api_ca.parent), mode="ro")],
         network=network,
+        env=LISTED,
     )
 
     assert outcome.content == {

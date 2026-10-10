@@ -24,6 +24,29 @@ JOB_LOGS_PATH = "/repos/o/n/actions/jobs/{job_id}/logs"
 LOG_URL = "https://results-receiver.invalid/job/{job_id}?sig=s"
 NOT_FOUND = b'{"message":"Not Found"}'
 PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+UNLISTED_REFUSAL = {
+    "exit_code": 2,
+    "stdout": "",
+    "stderr": "github plugin refused: repository 'o/n' is not in GITHUB_REPOS\n",
+}
+# One input on the repository o/n for each script action.
+SCRIPT_INPUTS: dict[str, dict[str, object]] = {
+    "pr_create": {
+        "repo": "o/n",
+        "base": "main",
+        "head": "task/x",
+        "title": "t",
+        "body": "b",
+    },
+    "pr_edit": {"repo": "o/n", "pr_number": 3, "title": "t"},
+    "pr_view": {"repo": "o/n", "pr": "3"},
+    "pr_fetch": {"repo": "o/n", "pr_number": 5},
+    "pr_reply": {"repo": "o/n", "pr_number": 3, "body": "hi"},
+    "pr_checks": {"repo": "o/n", "pr_number": 3},
+    "pr_close": {"repo": "o/n", "pr_number": 3},
+    "job_log_url": {"repo": "o/n", "job_id": 1},
+}
+GH_SCRIPT_ACTIONS = sorted(set(SCRIPT_INPUTS) - {"job_log_url"})
 
 
 @dataclass
@@ -43,11 +66,12 @@ class FakeApi:
 
 @pytest.fixture(autouse=True)
 def gh_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Put the stub gh first on PATH, and return the file it logs each argv to."""
+    """Put the stub gh first on PATH, list o/n, and return the file gh logs to."""
     log = tmp_path / "gh.log"
     monkeypatch.setenv("PATH", f"{STUB_DIR}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("GH_STUB_LOG", str(log))
     monkeypatch.setenv("GH_TOKEN", TOKEN)
+    monkeypatch.setenv("GITHUB_REPOS", "o/n")
     return log
 
 
@@ -609,3 +633,79 @@ def test_run_script_returns_a_refusal_as_a_result() -> None:
         "stderr": "github plugin refused: "
         "gh api repos/o/n/pulls/9/comments did not print JSON\n",
     }
+
+
+def test_script_inputs_cover_every_script_action() -> None:
+    """The inputs below name one input for each script action."""
+    assert set(SCRIPT_INPUTS) == set(scripts.ACTIONS)
+
+
+@pytest.mark.parametrize("name", sorted(SCRIPT_INPUTS))
+def test_run_script_refuses_an_unlisted_repo_before_the_action_runs(
+    monkeypatch: pytest.MonkeyPatch, api: FakeApi, gh_log: Path, name: str
+) -> None:
+    """An unlisted repo is the refusal, and neither gh nor the API is called."""
+    monkeypatch.setenv("GITHUB_REPOS", "other/*")
+
+    result = scripts.run_script(name, json.dumps(SCRIPT_INPUTS[name]).encode())
+
+    assert result == UNLISTED_REFUSAL
+    assert not gh_log.exists()
+    assert api.seen == []
+
+
+@pytest.mark.parametrize("name", GH_SCRIPT_ACTIONS)
+def test_run_script_runs_an_action_on_a_listed_repo(gh_log: Path, name: str) -> None:
+    """A listed repo runs the action, and the result is the action's own."""
+    stdin = json.dumps(SCRIPT_INPUTS[name]).encode()
+
+    result = scripts.run_script(name, stdin)
+
+    assert result == scripts.ACTIONS[name](SCRIPT_INPUTS[name])
+    assert result["exit_code"] == 0
+
+
+def test_run_script_runs_job_log_url_on_a_listed_repo(api: FakeApi) -> None:
+    """A listed repo lets job_log_url ask the API for the log URL."""
+    url = api.redirect(1)
+    stdin = json.dumps(SCRIPT_INPUTS["job_log_url"]).encode()
+
+    result = scripts.run_script("job_log_url", stdin)
+
+    assert result == {"exit_code": 0, "stdout": f"{url}\n", "stderr": ""}
+
+
+def test_run_script_refuses_without_a_repository_list(
+    monkeypatch: pytest.MonkeyPatch, gh_log: Path
+) -> None:
+    """An unset GITHUB_REPOS refuses the call before gh runs."""
+    monkeypatch.delenv("GITHUB_REPOS")
+    stdin = json.dumps(SCRIPT_INPUTS["pr_close"]).encode()
+
+    result = scripts.run_script("pr_close", stdin)
+
+    assert result == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": "github plugin refused: "
+        "GITHUB_REPOS is not set or names no repository; the grant's env sets it\n",
+    }
+    assert not gh_log.exists()
+
+
+def test_run_script_checks_pr_creates_repo_and_never_its_head() -> None:
+    """A head on another owner's fork runs, since pr_create checks repo alone."""
+    arguments = {**SCRIPT_INPUTS["pr_create"], "head": "fork-owner:task/x"}
+
+    result = scripts.run_script("pr_create", json.dumps(arguments).encode())
+
+    assert result == _echo(
+        "pr",
+        "create",
+        "--repo",
+        "o/n",
+        "--base=main",
+        "--head=fork-owner:task/x",
+        "--title=t",
+        "--body=b",
+    )
