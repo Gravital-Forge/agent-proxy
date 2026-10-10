@@ -57,8 +57,8 @@ gives the reason. The wrapper refuses as its own exit; a script refuses through 
 - A call runs in a cage that holds `GH_TOKEN` while `GITHUB_REPOS` is unset, names no entry, or
   holds an entry that is neither `owner/name` nor `owner/*`.
 - The credential helper is asked for a repository that `GITHUB_REPOS` does not name.
-- The credential helper gets a request with no path or with a path of fewer than two segments, or
-  runs while `GH_TOKEN` is unset or empty.
+- The credential helper gets a request whose path does not name `owner/name`, or runs while
+  `GH_TOKEN` is unset or empty.
 - `diff`'s `output` does not resolve strictly beneath the repository's `.agent-proxy` directory.
 - `worktree` with `add` names a `path` inside the repository it comes from.
 - `commit` finds no identity, or nothing staged.
@@ -154,9 +154,20 @@ On git's `get`, the helper reads the path's first two segments as `owner/name`, 
 `.git` dropped from the name, and checks that repository against `GITHUB_REPOS`, as "The repository
 list" gives. When the list names it, the helper answers with `x-access-token` and the value of
 `GH_TOKEN`. Otherwise the helper refuses: it writes the reason to stderr and answers `quit=1`, so
-git stops and fails. A request with no path, a path of fewer than two segments, and an unset or
-empty `GH_TOKEN` are refused the same way. The helper answers `store` and `erase` with nothing. It
-reads the path and never the host, because the grant's `domains` bound the host.
+git stops and fails. The helper refuses the same way when `GH_TOKEN` is unset or empty, or when the
+path does not name `owner/name`:
+
+- The request has no path, or a path of fewer than two segments.
+- A segment anywhere in the path is `.` or `..`.
+- The first segment is not an owner, or the second, its `.git` dropped, is not a name, by the
+  patterns "The repository list" gives.
+
+git decodes percent escapes in the path it hands the helper, but sends the request still encoded. A
+`%2F..` in a URL therefore reaches the helper as a `..` segment that the request never resolves, so
+the helper refuses every `.` and `..` segment.
+
+The helper answers `store` and `erase` with nothing. It reads the path and never the host, because
+the grant's `domains` bound the host.
 
 GitHub serves a public repository without a credential, so git fetches an unlisted public repository
 without asking the helper. The list bounds where the token goes. Every push to GitHub asks the
