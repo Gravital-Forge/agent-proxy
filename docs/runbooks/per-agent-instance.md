@@ -214,10 +214,10 @@ Teardown leaves these in place:
 
 ## Deployment acceptance checks
 
-`docs/design.md` lists the design's checks under "Deployment acceptance checks". Check 9 tests the
-git plugin's commit signing, which `plugins/git/README.md` gives under "Commit signing".
-`.dev/verification.md` says why every check runs here and never in the project. Every `docker`
-command below runs as root with `DOCKER_HOST=unix:///run/user/<uid>/docker.sock`.
+`docs/design.md` lists the design's checks under "Deployment acceptance checks". A check that tests
+one plugin's own setting cites that plugin's README instead. `.dev/verification.md` says why every
+check runs here and never in the project. Every `docker` command below runs as root with
+`DOCKER_HOST=unix:///run/user/<uid>/docker.sock`.
 
 1. **Provisioning twice.** On a clean host, provision once. Then capture four records:
 

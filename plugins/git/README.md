@@ -257,7 +257,7 @@ all four makes merge commits as that identity.
 
 A grant can make the plugin sign each commit it creates with an SSH key. The setting has two halves:
 
-- The key is a credential. After the instance starts, the operator stores the private key with
+- The key is a credential. After the instance starts, the admin stores the private key with
   `agent-proxy credential set <name>`, as any other credential, and the grant gives it in the file
   form, `{file: /run/credentials/<name>}`. `docs/runbooks/per-agent-instance.md` gives the command
   under "The first start".
@@ -364,7 +364,7 @@ Under a root of mode `ro`, the action fails with a read-only file system error.
   executable runs under: `git-cage` runs the wrapper, `git-credential-agent-proxy` runs the
   credential helper, and the name of a script action runs that action.
 - `Dockerfile` builds the image on the Alpine base the core's test plugin pins, with git, git LFS,
-  `ssh-keygen`, and Python 3 from apk. It links `git-cage` on the `PATH`, and
+  `openssh-keygen`, and Python 3 from apk. It links `git-cage` on the `PATH`, and
   `git-credential-agent-proxy` and each script action's `executable` under `/plugin/bin/`, to
   `/plugin/entry`.
 - `describe` prints `manifest.json`.
