@@ -322,8 +322,8 @@ command below runs as root with `DOCKER_HOST=unix:///run/user/<uid>/docker.sock`
    - The committer email that `commit` takes is a verified email of the account that holds the
      signing key. `plugins/git/README.md` gives where `commit` takes it from under "Commit
      identity".
-   - The `git.push` grant is shaped like the one in `examples/instance.yaml`, and its
-     `GITHUB_REPOS` names the repository.
+   - The `git.push` grant is shaped like the one in `examples/instance.yaml`, and its `GITHUB_REPOS`
+     names the repository.
 
    Put the config in force as "The first start" does.
 

@@ -255,8 +255,7 @@ all four makes merge commits as that identity.
 
 ### Commit signing
 
-A grant can make the plugin sign each commit it creates with an SSH key. The setting has two
-halves:
+A grant can make the plugin sign each commit it creates with an SSH key. The setting has two halves:
 
 - The key is a credential. After the instance starts, the operator stores the private key with
   `agent-proxy credential set <name>`, as any other credential, and the grant gives it in the file
