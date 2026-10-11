@@ -1,4 +1,6 @@
+import os
 from itertools import pairwise
+from pathlib import Path
 
 import pytest
 from git_plugin import cage
@@ -11,6 +13,12 @@ HELPER = (
     "credential.helper=/plugin/bin/git-credential-agent-proxy",
     "-c",
     "credential.useHttpPath=true",
+)
+SIGNING_OFF = ("-c", "commit.gpgSign=false")
+KEY_PATH = "/run/credentials/git-signing-key"
+NO_KEY_REFUSAL = (
+    "GIT_SIGNING_KEY names no readable file: {}; "
+    "the grant mounts the key there as a file credential"
 )
 SHAPE_REFUSAL = "AGENT_PROXY_ROOTS must be a JSON array of absolute paths, got {!r}"
 NO_REPOS_STDERR = (
@@ -33,9 +41,23 @@ def _no_exec(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cage.os, "execvp", fake_execvp)
 
 
-def test_git_argv_orders_repo_roots_hooks_helper_then_args() -> None:
-    """git_argv gives -C, the repo, two values per root, hooks off, helper, args."""
-    argv = cage.git_argv("/work/repo", ["/work", "/other"], ["log", "--oneline"])
+def _signing_on(key: str) -> tuple[str, ...]:
+    """The four -c values git_argv passes when GIT_SIGNING_KEY names key."""
+    return (
+        "-c",
+        "gpg.format=ssh",
+        "-c",
+        "gpg.ssh.program=/usr/bin/ssh-keygen",
+        "-c",
+        f"user.signingKey={key}",
+        "-c",
+        "commit.gpgSign=true",
+    )
+
+
+def test_git_argv_orders_repo_roots_hooks_helper_signing_then_args() -> None:
+    """git_argv gives -C, repo, two per root, hooks off, helper, signing, then args."""
+    argv = cage.git_argv("/work/repo", ["/work", "/other"], ["log", "--oneline"], {})
 
     assert argv == [
         "git",
@@ -51,6 +73,7 @@ def test_git_argv_orders_repo_roots_hooks_helper_then_args() -> None:
         "safe.directory=/other/*",
         *HOOKS_OFF,
         *HELPER,
+        *SIGNING_OFF,
         "log",
         "--oneline",
     ]
@@ -58,15 +81,15 @@ def test_git_argv_orders_repo_roots_hooks_helper_then_args() -> None:
 
 def test_git_argv_with_no_roots_trusts_no_directory() -> None:
     """With no roots, git_argv passes no safe.directory value."""
-    argv = cage.git_argv("/repo", [], ["status"])
+    argv = cage.git_argv("/repo", [], ["status"], {})
 
-    assert argv == ["git", "-C", "/repo", *HOOKS_OFF, *HELPER, "status"]
+    assert argv == ["git", "-C", "/repo", *HOOKS_OFF, *HELPER, *SIGNING_OFF, "status"]
 
 
 @pytest.mark.parametrize("root", ["/work/", "/work//"])
 def test_git_argv_drops_a_roots_trailing_slashes(root: str) -> None:
     """A root given as /work/ trusts /work and /work/*, never /work//*."""
-    argv = cage.git_argv("/work/repo", [root], ["status"])
+    argv = cage.git_argv("/work/repo", [root], ["status"], {})
 
     assert argv == [
         "git",
@@ -78,22 +101,106 @@ def test_git_argv_drops_a_roots_trailing_slashes(root: str) -> None:
         "safe.directory=/work/*",
         *HOOKS_OFF,
         *HELPER,
+        *SIGNING_OFF,
         "status",
     ]
 
 
 def test_git_argv_keeps_the_filesystem_root_as_a_slash() -> None:
     """The root / keeps its one slash, so its own value never goes empty."""
-    argv = cage.git_argv("/repo", ["/"], ["status"])
+    argv = cage.git_argv("/repo", ["/"], ["status"], {})
 
     assert argv[3:7] == ["-c", "safe.directory=/", "-c", "safe.directory=//*"]
 
 
 def test_git_argv_turns_hooks_off() -> None:
     """git_argv passes -c core.hooksPath=/dev/null, as one pair, before the args."""
-    argv = cage.git_argv("/repo", ["/work"], ["commit", "-m", "x"])
+    argv = cage.git_argv("/repo", ["/work"], ["commit", "-m", "x"], {})
 
     assert HOOKS_OFF in pairwise(argv[: argv.index("commit")])
+
+
+def test_git_argv_with_a_signing_key_signs_with_it() -> None:
+    """With GIT_SIGNING_KEY set, the four signing values follow the helper's."""
+    argv = cage.git_argv(
+        "/repo", [], ["commit", "-m", "x"], {"GIT_SIGNING_KEY": KEY_PATH}
+    )
+
+    assert argv == [
+        "git",
+        "-C",
+        "/repo",
+        *HOOKS_OFF,
+        *HELPER,
+        *_signing_on(KEY_PATH),
+        "commit",
+        "-m",
+        "x",
+    ]
+
+
+def test_git_argv_without_a_signing_key_turns_signing_off() -> None:
+    """With GIT_SIGNING_KEY unset, git_argv passes commit.gpgSign=false and no key."""
+    argv = cage.git_argv("/repo", [], ["commit", "-m", "x"], {"GH_TOKEN": "t"})
+
+    assert argv[-5:] == [*SIGNING_OFF, "commit", "-m", "x"]
+    assert not any(item.startswith("user.signingKey=") for item in argv)
+
+
+def test_check_signing_key_passes_an_unset_variable() -> None:
+    """With GIT_SIGNING_KEY unset, check_signing_key returns: signing is off."""
+    cage.check_signing_key({"AGENT_PROXY_ROOTS": "[]"})
+
+
+def test_check_signing_key_passes_a_readable_file(tmp_path: Path) -> None:
+    """A GIT_SIGNING_KEY naming a readable file passes."""
+    key = tmp_path / "key"
+    key.write_text("key\n")
+
+    cage.check_signing_key({"GIT_SIGNING_KEY": str(key)})
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["key", "run/credentials/git-signing-key", ""],
+    ids=["bare-name", "relative-path", "empty"],
+)
+def test_check_signing_key_refuses_a_value_that_is_not_an_absolute_path(
+    value: str,
+) -> None:
+    """A GIT_SIGNING_KEY that does not begin with '/' is refused, and quoted."""
+    with pytest.raises(cage.RefusalError) as refused:
+        cage.check_signing_key({"GIT_SIGNING_KEY": value})
+
+    assert str(refused.value) == (
+        f"GIT_SIGNING_KEY must be an absolute path, got {value!r}"
+    )
+
+
+@pytest.mark.parametrize("name", ["missing", "."], ids=["missing", "directory"])
+def test_check_signing_key_refuses_a_path_that_names_no_file(
+    tmp_path: Path, name: str
+) -> None:
+    """A GIT_SIGNING_KEY naming nothing, or a directory, is refused."""
+    path = str(tmp_path / name)
+
+    with pytest.raises(cage.RefusalError) as refused:
+        cage.check_signing_key({"GIT_SIGNING_KEY": path})
+
+    assert str(refused.value) == NO_KEY_REFUSAL.format(path)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a file of any mode")
+def test_check_signing_key_refuses_a_file_it_cannot_read(tmp_path: Path) -> None:
+    """A GIT_SIGNING_KEY naming a file this user cannot read is refused."""
+    key = tmp_path / "key"
+    key.write_text("key\n")
+    key.chmod(0)
+
+    with pytest.raises(cage.RefusalError) as refused:
+        cage.check_signing_key({"GIT_SIGNING_KEY": str(key)})
+
+    assert str(refused.value) == NO_KEY_REFUSAL.format(key)
 
 
 def test_split_repo_takes_out_the_flag_and_its_value() -> None:
@@ -263,4 +370,51 @@ def test_wrapper_runs_git_when_the_list_parses_or_no_token_is_held(
     with pytest.raises(_ExecedError) as execed:
         cage.wrapper(["git-cage", "fetch", "--repo", "/repo"], environ)
 
-    assert execed.value.args == ("git", cage.git_argv("/repo", [], ["fetch"]))
+    assert execed.value.args == (
+        "git",
+        cage.git_argv("/repo", [], ["fetch"], environ),
+    )
+
+
+@pytest.mark.usefixtures("_no_exec")
+def test_wrapper_refuses_a_signing_key_that_names_no_file(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """A GIT_SIGNING_KEY naming no readable file refuses before git runs."""
+    missing = tmp_path / "missing"
+    environ = {"AGENT_PROXY_ROOTS": "[]", "GIT_SIGNING_KEY": str(missing)}
+
+    exit_code = cage.wrapper(["git-cage", "status", "--repo", "/repo"], environ)
+
+    captured = capsys.readouterr()
+    assert exit_code == 2
+    assert (captured.out, captured.err) == (
+        "",
+        f"git plugin refused: {NO_KEY_REFUSAL.format(missing)}\n",
+    )
+
+
+@pytest.mark.usefixtures("_no_exec")
+def test_wrapper_runs_git_with_the_signing_values(tmp_path: Path) -> None:
+    """A GIT_SIGNING_KEY naming a readable file reaches git with the signing values."""
+    key = tmp_path / "key"
+    key.write_text("key\n")
+    environ = {"AGENT_PROXY_ROOTS": "[]", "GIT_SIGNING_KEY": str(key)}
+
+    with pytest.raises(_ExecedError) as execed:
+        cage.wrapper(["git-cage", "commit", "-m", "x", "--repo", "/repo"], environ)
+
+    assert execed.value.args == (
+        "git",
+        [
+            "git",
+            "-C",
+            "/repo",
+            *HOOKS_OFF,
+            *HELPER,
+            *_signing_on(str(key)),
+            "commit",
+            "-m",
+            "x",
+        ],
+    )

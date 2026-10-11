@@ -31,14 +31,18 @@ NO_REPOS_STDERR = (
     "git plugin refused: "
     "GITHUB_REPOS is not set or names no repository; the grant's env sets it\n"
 )
+NO_KEY_STDERR = (
+    "git plugin refused: GIT_SIGNING_KEY names no readable file: {}; "
+    "the grant mounts the key there as a file credential\n"
+)
 
 
 @pytest.fixture(autouse=True)
 def _isolate_git(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the host's git config and identity variables away from every git run."""
+    """Keep the host's git config, identity, and signing key away from every git run."""
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-    for variable in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"):
+    for variable in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_SIGNING_KEY"):
         monkeypatch.delenv(variable, raising=False)
 
 
@@ -511,6 +515,39 @@ def test_lfs_untrack_removes_the_pattern(repo: Path, roots: list[str]) -> None:
     assert "*.bin" not in (repo / ".gitattributes").read_text()
 
 
+@pytest.fixture
+def signing_key(tmp_path: Path) -> Path:
+    """A passphrase-less ed25519 private key, made for this test in tmp_path/keys."""
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    key = keys / "signing-key"
+    subprocess.run(  # noqa: S603 - fixed arguments the test chooses
+        [  # noqa: S607 - the host's ssh-keygen, on PATH
+            "ssh-keygen",
+            "-q",
+            "-t",
+            "ed25519",
+            "-N",
+            "",
+            "-C",
+            "fixture",
+            "-f",
+            str(key),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return key
+
+
+def _allowed_signers(key: Path) -> Path:
+    """Write an allowed-signers file beside key, trusting its public half for EMAIL."""
+    public_key = key.with_name(f"{key.name}.pub").read_text()
+    allowed = key.with_name("allowed-signers")
+    allowed.write_text(f"{EMAIL} {public_key}")
+    return allowed
+
+
 def test_commit_records_the_staged_change_as_the_repos_identity(
     repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -564,6 +601,41 @@ def test_commit_resolves_the_name_and_the_email_each_on_its_own(
     assert result["exit_code"] == 0
     logged = _git(repo, "log", "-1", "--format=%an <%ae>|%cn <%ce>")
     assert logged == f"{NAME} <{AGENT_EMAIL}>|{NAME} <{AGENT_EMAIL}>\n"
+
+
+def test_commit_with_a_signing_key_signs_the_commit(
+    repo: Path,
+    roots: list[str],
+    signing_key: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With GIT_SIGNING_KEY set, commit makes a commit whose SSH signature verifies."""
+    monkeypatch.setenv("GIT_SIGNING_KEY", str(signing_key))
+    (repo / "a.txt").write_text("two\n")
+    _git(repo, "add", "a.txt")
+
+    result = scripts.commit({"repo": str(repo), "message": "signed"}, roots)
+
+    assert result["exit_code"] == 0, result
+    allowed = _allowed_signers(signing_key)
+    status = _git(
+        repo, "-c", f"gpg.ssh.allowedSignersFile={allowed}", "log", "-1", "--format=%G?"
+    )
+    assert status == "G\n"
+
+
+def test_commit_without_a_signing_key_overrides_the_repos_gpgsign(
+    repo: Path, roots: list[str]
+) -> None:
+    """With GIT_SIGNING_KEY unset, a repository's commit.gpgSign=true signs nothing."""
+    _git(repo, "config", "commit.gpgSign", "true")
+    (repo / "a.txt").write_text("two\n")
+    _git(repo, "add", "a.txt")
+
+    result = scripts.commit({"repo": str(repo), "message": "unsigned"}, roots)
+
+    assert result["exit_code"] == 0, result
+    assert _git(repo, "log", "-1", "--format=%G?") == "N\n"
 
 
 def test_commit_refuses_without_user_name(repo: Path, roots: list[str]) -> None:
@@ -715,6 +787,27 @@ def test_run_script_refuses_a_token_cage_with_a_malformed_entry(
         "stderr": "git plugin refused: "
         "GITHUB_REPOS entry '*' is not owner/name or owner/*\n",
     }
+
+
+def test_run_script_refuses_a_signing_key_that_names_no_file(
+    repo: Path, roots: list[str], tmp_path: Path
+) -> None:
+    """A GIT_SIGNING_KEY naming no readable file refuses commit, and HEAD stays."""
+    missing = tmp_path / "missing-key"
+    (repo / "a.txt").write_text("two\n")
+    _git(repo, "add", "a.txt")
+    head = _git(repo, "rev-parse", "HEAD")
+    stdin = json.dumps({"repo": str(repo), "message": "m"}).encode()
+    environ = {"AGENT_PROXY_ROOTS": json.dumps(roots), "GIT_SIGNING_KEY": str(missing)}
+
+    result = scripts.run_script("commit", stdin, environ)
+
+    assert result == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": NO_KEY_STDERR.format(missing),
+    }
+    assert _git(repo, "rev-parse", "HEAD") == head
 
 
 @pytest.mark.parametrize(
