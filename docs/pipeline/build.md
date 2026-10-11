@@ -8,7 +8,7 @@ terms. Read it first. This document adds what Build alone does.
 
 ## Model
 
-Opus 5.5, the project model; `.dev/models.md`.
+Opus 5.5, the project model that `launch.md` sets.
 
 ## In
 
@@ -31,9 +31,9 @@ Open `<workspace root>/projects/agent-proxy-<slug>/CLAUDE.md` with the `Read` to
 
 Run `/multiplayer` with one implementer-lead at a time. Each dispatch carries the lead's own task
 and the plan's global constraints, names the *How to use it* section of `.dev/verification.md` for
-the light bar, and gives the model `.dev/models.md` sets for the lead and for every dev-worker it
-dispatches. Each lead's checkpoint runs the light bar. After a dispatch, end the turn and wait for
-the completion notification. A proxy index-lock error is a retry, not an anomaly.
+the light bar, and gives the model the workspace root's `models` topic sets for the lead and for
+every dev-worker it dispatches. Each lead's checkpoint runs the light bar. After a dispatch, end the
+turn and wait for the completion notification. A proxy index-lock error is a retry, not an anomaly.
 
 ### Close out
 

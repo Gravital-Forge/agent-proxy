@@ -50,7 +50,7 @@ proxy's `git_log` has no first-parent option. The roadmap stores no status.
   report. A job lands every artifact, confirms each one by reading it back through git or the pull
   request, and then calls `report_lifecycle(worker_id, state="success", message, next_prompt)` once.
   `worker_id` is the `BATON_WORKER_ID` environment variable. The call omits `model`, so the next
-  worker runs on the project model `.dev/models.md` names. Nothing follows the call.
+  worker runs on the project model `launch.md` sets. Nothing follows the call.
 - **Usage is checked before every `success` report.** Once every artifact is confirmed, a job runs
   `.claude/skills/checking-usage/usage-check.sh` from the workspace root. It reads `utilization` and
   `resetsAt` for the `seven_day` and `five_hour` windows, and the job applies the first case that

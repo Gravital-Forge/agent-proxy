@@ -8,7 +8,7 @@ terms. Read it first. This document adds what Plan alone does.
 
 ## Model
 
-Opus 5.5, the project model; `.dev/models.md`.
+Opus 5.5, the project model that `launch.md` sets.
 
 ## In
 
@@ -61,8 +61,8 @@ the job worker never reads a dependency's source or a container image's contents
 subagent can confirm becomes a spike task that opens the plan, or a blocker to PM when a spike
 cannot settle it.
 
-Dispatch every reviewer `writing-plans` names, in parallel, each with the model `.dev/models.md`
-gives, under `index.md`'s rules *Reviewers delegate retrieval and keep judgment* and
+Dispatch every reviewer `writing-plans` names, in parallel, each with the model the workspace root's
+`models` topic gives, under `index.md`'s rules *Reviewers delegate retrieval and keep judgment* and
 *A later review round is a follow-up*. Every reviewer returning Approved is the approval: append a
 `## Review` heading to the plan carrying each reviewer's status line, and continue.
 
