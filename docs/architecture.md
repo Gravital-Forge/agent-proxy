@@ -440,7 +440,8 @@ that one file, read-only, at `VERIFIER_PATH`.
 The git plugin is the uv package in `plugins/git/`, placed as `docs/design.md` sets out under
 "Repository layout". The `manifest-check` job in `.github/workflows/ci.yml` builds the image of each
 plugin under `plugins/` and runs `agent-proxy manifest check` on it. `plugins/git/README.md` gives
-everything about the plugin itself: its actions, its rules, its layout, and its tests.
+everything about the plugin itself: its actions, its rules, commit signing, its layout, and its
+tests.
 
 ## The github plugin
 

@@ -56,6 +56,7 @@ gives the reason. The wrapper refuses as its own exit; a script refuses through 
 - `push` or `checkout` runs while `GIT_BRANCH_PREFIXES` is unset or names no prefix.
 - A call runs in a cage that holds `GH_TOKEN` while `GITHUB_REPOS` is unset, names no entry, or
   holds an entry that is neither `owner/name` nor `owner/*`.
+- `GIT_SIGNING_KEY` is set, but is not an absolute path or names no readable regular file.
 - The credential helper is asked for a repository that `GITHUB_REPOS` does not name.
 - The credential helper gets a request whose path does not name `owner/name`, or runs while
   `GH_TOKEN` is unset or empty.
@@ -252,6 +253,66 @@ git.commit:
 set, and these variables win over the repository's config. So a `git.merge` grant whose `env` sets
 all four makes merge commits as that identity.
 
+### Commit signing
+
+A grant can make the plugin sign each commit it creates with an SSH key. The setting has two
+halves:
+
+- The key is a credential. After the instance starts, the operator stores the private key with
+  `agent-proxy credential set <name>`, as any other credential, and the grant gives it in the file
+  form, `{file: /run/credentials/<name>}`. `docs/runbooks/per-agent-instance.md` gives the command
+  under "The first start".
+- `GIT_SIGNING_KEY` in the grant's `env` names that file's path in the cage.
+
+The plugin signs in the SSH format only. The key must have no passphrase, because the cage has no
+terminal to ask for one and no SSH agent to hold the key.
+
+When `GIT_SIGNING_KEY` is set, `git_argv` in `scripts/git_plugin/cage.py` passes these values on
+every git run, after the credential helper's values and before the action's arguments:
+
+```text
+-c gpg.format=ssh
+-c gpg.ssh.program=/usr/bin/ssh-keygen
+-c user.signingKey=<the value of GIT_SIGNING_KEY>
+-c commit.gpgSign=true
+```
+
+When `GIT_SIGNING_KEY` is unset, `git_argv` passes `-c commit.gpgSign=false` instead. A value given
+with `-c` wins over the repository's config, so the grant alone decides: a repository's config can
+neither turn signing on nor turn it off. `config_get` runs through `git_argv` too, so it reports
+these values, as it reports `core.hooksPath=/dev/null`.
+
+With signing on, git signs each commit that an action creates: the commit that `commit` makes, the
+merge commit that `merge` makes, and each commit that `pull` makes when it merges or rebases. git
+does not sign the commits that `stash` makes.
+
+Before git runs, the wrapper and each script action check `GIT_SIGNING_KEY`, whatever the action.
+They refuse the call when the value is set but is not an absolute path, or names no readable regular
+file. An empty value counts as set, so it is refused too. A grant with a wrong path therefore fails
+on its first call, a `status` call included.
+
+GitHub shows a signed commit as Verified when both of these hold:
+
+- The public key is on a GitHub account as a signing key.
+- The commit's committer email is a verified email of that same account. "Commit identity" gives
+  where `commit` takes the committer from.
+
+A `git.commit` grant that signs each commit:
+
+```yaml
+git.commit:
+  roots: [{path: /home/agent-01/Projects/example-repo, mode: rw}]
+  domains: []
+  credentials: {git-signing-key: {file: /run/credentials/git-signing-key}}
+  env:
+    GIT_AUTHOR_NAME: Agent One
+    GIT_AUTHOR_EMAIL: agent-01@example.com
+    GIT_SIGNING_KEY: /run/credentials/git-signing-key
+```
+
+A `git.merge` or `git.pull` grant signs its commits only when it also gives the key and sets
+`GIT_SIGNING_KEY`.
+
 ### Hooks
 
 `git_argv` passes `-c core.hooksPath=/dev/null` on every git run, so git runs no hook of the
@@ -304,8 +365,9 @@ Under a root of mode `ro`, the action fails with a read-only file system error.
   executable runs under: `git-cage` runs the wrapper, `git-credential-agent-proxy` runs the
   credential helper, and the name of a script action runs that action.
 - `Dockerfile` builds the image on the Alpine base the core's test plugin pins, with git, git LFS,
-  and Python 3 from apk. It links `git-cage` on the `PATH`, and `git-credential-agent-proxy` and
-  each script action's `executable` under `/plugin/bin/`, to `/plugin/entry`.
+  `ssh-keygen`, and Python 3 from apk. It links `git-cage` on the `PATH`, and
+  `git-credential-agent-proxy` and each script action's `executable` under `/plugin/bin/`, to
+  `/plugin/entry`.
 - `describe` prints `manifest.json`.
 - `tests/unit/` runs the module with the host's git and git LFS, and checks the manifest. It needs
   no Docker.

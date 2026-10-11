@@ -38,6 +38,9 @@ Start from `examples/instance.yaml`. `docs/design.md` gives the rules a config m
 - Every root names a directory below the tree, never the tree itself.
 - Every grant that holds `github-token` sets `GITHUB_REPOS` in its `env`, or the plugin refuses each
   call under that grant. `plugins/git/README.md` gives the list's form under "The repository list".
+- A grant that signs commits gives the signing key as a file credential, and sets `GIT_SIGNING_KEY`
+  in its `env` to that file's path. Store the key as "The first start" stores each credential.
+  `plugins/git/README.md` gives the setting under "Commit signing".
 
 ## Provisioning
 
@@ -211,9 +214,10 @@ Teardown leaves these in place:
 
 ## Deployment acceptance checks
 
-`docs/design.md` lists these checks under "Deployment acceptance checks", and `.dev/verification.md`
-says why they run here and never in the project. Every `docker` command below runs as root with
-`DOCKER_HOST=unix:///run/user/<uid>/docker.sock`.
+`docs/design.md` lists the design's checks under "Deployment acceptance checks". Check 9 tests the
+git plugin's commit signing, which `plugins/git/README.md` gives under "Commit signing".
+`.dev/verification.md` says why every check runs here and never in the project. Every `docker`
+command below runs as root with `DOCKER_HOST=unix:///run/user/<uid>/docker.sock`.
 
 1. **Provisioning twice.** On a clean host, provision once. Then capture four records:
 
@@ -298,3 +302,37 @@ says why they run here and never in the project. Every `docker` command below ru
 
    The check passes when each result is as given. Afterwards, delete the branch `task/list-check`
    from `<listed>` on GitHub.
+9. **A signed commit with a real key.** Make a key pair with no passphrase, and store its private
+   half as the credential `git-signing-key`, as "The first start" stores `github-token`:
+
+   ```sh
+   ssh-keygen -q -t ed25519 -N "" -C agent-01-signing -f <key dir>/signing-key
+   docker exec -i agent-proxy agent-proxy credential set git-signing-key < <key dir>/signing-key
+   ```
+
+   Upload `<key dir>/signing-key.pub` to a GitHub account as a signing key. Then delete
+   `<key dir>/signing-key`, because the instance's store holds the key now. With a real
+   `github-token` stored, take a checkout below the tree whose `origin` is a GitHub repository the
+   token can push to. Give a `git.commit` grant and a `git.push` grant whose `roots` name that
+   checkout with mode `rw`:
+
+   - The `git.commit` grant gives `git-signing-key` as `{file: /run/credentials/git-signing-key}`,
+     and sets `GIT_SIGNING_KEY: /run/credentials/git-signing-key` in its `env`.
+     `plugins/git/README.md` gives the setting under "Commit signing".
+   - The committer email that `commit` takes is a verified email of the account that holds the
+     signing key. `plugins/git/README.md` gives where `commit` takes it from under "Commit
+     identity".
+   - The `git.push` grant is shaped like the one in `examples/instance.yaml`, and its
+     `GITHUB_REPOS` names the repository.
+
+   Put the config in force as "The first start" does.
+
+   1. As the agent, create a branch under the `git.push` grant's prefix in the checkout, and stage
+      one change on it, for example with `git -C <checkout> checkout -b task/signing-check` and
+      `git -C <checkout> add <file>`.
+   2. Through the agent's MCP client, call `git_commit` with `repo` set to the checkout. The
+      result's `exit_code` is 0.
+   3. Call `git_push` with `repo` set to the checkout. The result's `exit_code` is 0.
+
+   The check passes when the commit's page on GitHub shows Verified. Afterwards, delete the branch
+   `task/signing-check` on GitHub.
