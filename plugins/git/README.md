@@ -368,8 +368,8 @@ Under a root of mode `ro`, the action fails with a read-only file system error.
   `git-credential-agent-proxy` and each script action's `executable` under `/plugin/bin/`, to
   `/plugin/entry`.
 - `describe` prints `manifest.json`.
-- `tests/unit/` runs the module with the host's git and git LFS, and checks the manifest. It needs
-  no Docker.
+- `tests/unit/` runs the module with the host's git, git LFS, and `ssh-keygen` at
+  `/usr/bin/ssh-keygen`, and checks the manifest. It needs no Docker.
 - `tests/integration/` builds the plugin image and the core's verifier image, and runs each action
   in a real cage through the core's `CageRunner`. `conftest.py` there builds the fixture
   repositories, one of them owned by uid 1000 from the image in `tests/fixture-image/`.
@@ -393,6 +393,7 @@ poe test
 poe test-integration
 ```
 
-`poe test` runs the unit tests and needs only the host's git and git LFS. `poe test-integration`
-runs on the Docker daemon that `DOCKER_HOST` names. `.dev/verification.md` gives which bar runs each
-check, and what the integration tests must leave behind.
+`poe test` runs the unit tests and needs only the host's git, git LFS, and `ssh-keygen` at
+`/usr/bin/ssh-keygen`. `poe test-integration` runs on the Docker daemon that `DOCKER_HOST` names.
+`.dev/verification.md` gives which bar runs each check, and what the integration tests must leave
+behind.

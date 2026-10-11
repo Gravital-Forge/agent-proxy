@@ -330,8 +330,8 @@ check runs here and never in the project. Every `docker` command below runs as r
    1. As the agent, create a branch under the `git.push` grant's prefix in the checkout, and stage
       one change on it, for example with `git -C <checkout> checkout -b task/signing-check` and
       `git -C <checkout> add <file>`.
-   2. Through the agent's MCP client, call `git_commit` with `repo` set to the checkout. The
-      result's `exit_code` is 0.
+   2. Through the agent's MCP client, call `git_commit` with `repo` set to the checkout and
+      `message` set to `Check commit signing`. The result's `exit_code` is 0.
    3. Call `git_push` with `repo` set to the checkout. The result's `exit_code` is 0.
 
    The check passes when the commit's page on GitHub shows Verified. Afterwards, delete the branch
