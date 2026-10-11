@@ -15,6 +15,7 @@ FIXTURE_NAME = "Fixture"
 FIXTURE_EMAIL = "fixture@example.invalid"
 AGENT_NAME = "Agent One"
 AGENT_EMAIL = "agent-01@example.com"
+SIGNING_KEY_PATH = "/run/credentials/git-signing-key"
 _ISOLATED_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
 
 type GrantedCredentials = Mapping[str, tuple[EnvMount | FileMount, bytes]]
@@ -70,6 +71,45 @@ def host_git(repo: Path, *args: str) -> str:
         env={**os.environ, **_ISOLATED_GIT},
     )
     return completed.stdout
+
+
+def make_signing_key(directory: Path) -> tuple[bytes, str]:
+    """Make a passphrase-less ed25519 key pair in directory.
+
+    Returns:
+        The private key's bytes and the public key's text.
+
+    Raises:
+        subprocess.CalledProcessError: ssh-keygen exits non-zero.
+    """
+    key = directory / "signing-key"
+    subprocess.run(  # noqa: S603 - fixed arguments the tests choose
+        [  # noqa: S607 - the host's ssh-keygen, on PATH
+            "ssh-keygen",
+            "-q",
+            "-t",
+            "ed25519",
+            "-N",
+            "",
+            "-C",
+            "integration",
+            "-f",
+            str(key),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    return key.read_bytes(), key.with_name(f"{key.name}.pub").read_text()
+
+
+def write_allowed_signers(path: Path, email: str, public_key: str) -> Path:
+    """Write an allowed-signers file at path that trusts public_key for email.
+
+    Returns:
+        path, for the caller to hand to gpg.ssh.allowedSignersFile.
+    """
+    path.write_text(f"{email} {public_key}")
+    return path
 
 
 def plant_hook(repo: Path, name: str, mark: Path) -> None:

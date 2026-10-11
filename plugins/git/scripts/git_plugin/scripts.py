@@ -122,11 +122,12 @@ def _completed_git(
     env: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
     """Run git on repo with the roots trusted, env over the process environment."""
+    environ = {**os.environ, **(env or {})}
     return subprocess.run(  # noqa: S603 - git_argv puts every input after git's own options
-        cage.git_argv(repo, roots, args),
+        cage.git_argv(repo, roots, args, environ),
         capture_output=True,
         check=False,
-        env={**os.environ, **(env or {})},
+        env=environ,
     )
 
 
@@ -521,12 +522,14 @@ def run_script(name: str, stdin: bytes, environ: Mapping[str, str]) -> ActionRes
     """Run the script action name on the JSON input stdin holds.
 
     A cage that holds GH_TOKEN is refused before the action runs unless
-    GITHUB_REPOS parses. A refusal is returned as the result: exit code 2, no
-    stdout, and the refusal's reason on stderr.
+    GITHUB_REPOS parses, and a set GIT_SIGNING_KEY is refused unless it names a
+    readable file. A refusal is returned as the result: exit code 2, no stdout,
+    and the refusal's reason on stderr.
     """
     try:
         roots = cage.roots_from_env(environ)
         rules.check_token_cage(environ)
+        cage.check_signing_key(environ)
         return ACTIONS[name](json.loads(stdin), roots)
     except cage.RefusalError as refusal:
         return {

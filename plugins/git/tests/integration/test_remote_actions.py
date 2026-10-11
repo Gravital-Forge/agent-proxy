@@ -2,7 +2,7 @@ import hashlib
 from pathlib import Path
 
 import pytest
-from agent_proxy.config import EnvMount
+from agent_proxy.config import EnvMount, FileMount
 from agent_proxy.runner import Outcome
 from docker.models.containers import Container
 from harness import (
@@ -10,10 +10,13 @@ from harness import (
     AGENT_NAME,
     FIXTURE_EMAIL,
     FIXTURE_NAME,
+    SIGNING_KEY_PATH,
     RemotePair,
     RunAction,
     host_git,
+    make_signing_key,
     stdout_of,
+    write_allowed_signers,
 )
 
 LISTED_URL = "http://auth:8080/listed-org/repo.git"
@@ -144,6 +147,53 @@ def test_merge_takes_its_identity_from_the_grants_env(
     parents, author, committer = logged.rstrip("\n").split("|")
     assert len(parents.split()) == 2
     assert author == committer == f"{AGENT_NAME} <{AGENT_EMAIL}>"
+
+
+def test_merge_with_a_granted_signing_key_signs_the_merge_commit(
+    run_action: RunAction, remote_pair: RemotePair, tmp_path: Path
+) -> None:
+    """A non-fast-forward merge with the key granted makes a signed merge commit."""
+    work = remote_pair.work
+    host_git(work, "checkout", "-q", "-b", "task/m")
+    (work / "m.txt").write_text("merged\n")
+    host_git(work, "add", "m.txt")
+    host_git(work, "commit", "-q", "-m", "on task/m")
+    host_git(work, "checkout", "-q", "main")
+    (work / "a.txt").write_text("two\n")
+    host_git(work, "commit", "-q", "-am", "on main")
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    private_key, public_key = make_signing_key(keys)
+    allowed = write_allowed_signers(keys / "allowed-signers", AGENT_EMAIL, public_key)
+    env = {
+        "GIT_AUTHOR_NAME": AGENT_NAME,
+        "GIT_AUTHOR_EMAIL": AGENT_EMAIL,
+        "GIT_COMMITTER_NAME": AGENT_NAME,
+        "GIT_COMMITTER_EMAIL": AGENT_EMAIL,
+        "GIT_SIGNING_KEY": SIGNING_KEY_PATH,
+    }
+
+    outcome = run_action(
+        "merge",
+        {"repo": str(work), "branch": "task/m"},
+        [remote_pair.root],
+        {"git-signing-key": (FileMount(file=SIGNING_KEY_PATH), private_key)},
+        env=env,
+    )
+
+    stdout_of(outcome)
+    logged = host_git(
+        work,
+        "-c",
+        f"gpg.ssh.allowedSignersFile={allowed}",
+        "log",
+        "-1",
+        "--format=%p|%G?",
+        "main",
+    )
+    parents, status = logged.rstrip("\n").split("|")
+    assert len(parents.split()) == 2
+    assert status == "G"
 
 
 def test_worktree_adds_lists_and_removes_a_worktree(

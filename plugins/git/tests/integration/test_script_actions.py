@@ -2,21 +2,32 @@ import os
 from pathlib import Path
 
 import pytest
+from agent_proxy.config import FileMount
 from agent_proxy.runner import InputError
 from harness import (
     AGENT_EMAIL,
     AGENT_NAME,
+    FIXTURE_EMAIL,
+    SIGNING_KEY_PATH,
     OtherUidRepo,
     RunAction,
     host_git,
+    make_signing_key,
     plant_hook,
     stdout_of,
+    write_allowed_signers,
 )
 
 LFS_POINTER_HEADER = "version https://git-lfs.github.com/spec/v1"
 NOTHING_STAGED = "git plugin refused: nothing staged; stage changes with git add\n"
 NESTED = "worktree path '{}' is inside the repository it comes from"
 A_STAT = " a.txt | 2 +-\n 1 file changed, 1 insertion(+), 1 deletion(-)\n"
+SIGNING_KEY_ENV = {"GIT_SIGNING_KEY": SIGNING_KEY_PATH}
+NO_KEY_REFUSAL = (
+    "git plugin refused: GIT_SIGNING_KEY names no readable file: "
+    "/run/credentials/git-signing-key; "
+    "the grant mounts the key there as a file credential\n"
+)
 
 
 def test_add_then_commit_makes_a_commit_that_log_shows(
@@ -80,6 +91,52 @@ def test_commit_takes_the_grants_identity_when_the_repo_has_none(
 
     logged = host_git(host_repo, "log", "-1", "--format=%an <%ae>|%cn <%ce>")
     assert logged == f"{AGENT_NAME} <{AGENT_EMAIL}>|{AGENT_NAME} <{AGENT_EMAIL}>\n"
+
+
+def test_commit_with_a_granted_signing_key_signs_the_commit(
+    run_action: RunAction, host_repo: Path, tmp_path: Path
+) -> None:
+    """A commit with the key granted as a file and GIT_SIGNING_KEY set verifies."""
+    repo = str(host_repo)
+    roots = [host_repo.parent]
+    keys = tmp_path / "keys"
+    keys.mkdir()
+    private_key, public_key = make_signing_key(keys)
+    allowed = write_allowed_signers(keys / "allowed-signers", FIXTURE_EMAIL, public_key)
+    signing_key = {"git-signing-key": (FileMount(file=SIGNING_KEY_PATH), private_key)}
+    (host_repo / "b.txt").write_text("new\n")
+
+    stdout_of(run_action("add", {"repo": repo, "files": ["b.txt"]}, roots))
+    stdout_of(
+        run_action(
+            "commit",
+            {"repo": repo, "message": "signed"},
+            roots,
+            signing_key,
+            env=SIGNING_KEY_ENV,
+        )
+    )
+
+    status = host_git(
+        host_repo,
+        "-c",
+        f"gpg.ssh.allowedSignersFile={allowed}",
+        "log",
+        "-1",
+        "--format=%G?",
+    )
+    assert status == "G\n"
+
+
+def test_commit_with_a_signing_key_but_no_credential_returns_the_refusal(
+    run_action: RunAction, host_repo: Path
+) -> None:
+    """GIT_SIGNING_KEY set with no key mounted at its path refuses the commit."""
+    arguments = {"repo": str(host_repo), "message": "m"}
+
+    outcome = run_action("commit", arguments, [host_repo.parent], env=SIGNING_KEY_ENV)
+
+    assert outcome.content == {"exit_code": 2, "stdout": "", "stderr": NO_KEY_REFUSAL}
 
 
 def test_rm_removes_a_tracked_file_from_the_index(
