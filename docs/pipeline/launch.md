@@ -133,7 +133,7 @@ Report the project id the call returns, then call `list_projects` and show the r
 
 The project model is `claude-opus-5-5`, and every worker runs on it: the first PM, each worker a
 handoff starts, and each diagnosis or resumed worker baton starts on its own. No handoff names a
-model. `.dev/models.md` holds the rule.
+model. The workspace root's `models` topic sets the model of each subagent a worker dispatches.
 
 ## 4 · Operating
 

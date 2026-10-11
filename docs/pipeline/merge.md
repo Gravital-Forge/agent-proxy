@@ -8,7 +8,7 @@ terms. Read it first. This document adds what Merge alone does.
 
 ## Model
 
-Opus 5.5, the project model; `.dev/models.md`.
+Opus 5.5, the project model that `launch.md` sets.
 
 ## In
 
