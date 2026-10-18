@@ -86,11 +86,12 @@ def edit_with_attachments(
     return edit
 
 
-def logged_update_body(fake_api_log: FakeApiLog) -> object:
+def logged_update_body(fake_api_log: FakeApiLog) -> str:
     """Return the body of the one update the fake logged."""
     (body,) = [
         entry["update_body"] for entry in fake_api_log() if "update_body" in entry
     ]
+    assert isinstance(body, str)
     return body
 
 
@@ -341,7 +342,7 @@ def test_pr_edit_applies_the_edit_when_an_upload_fails_partway(
     assert result["exit_code"] == 1
     assert result["pr_url"] == "https://github.com/o/n/pull/1"
     assert result["pr_number"] == 1
-    assert "could not upload" in result["stderr"]
+    assert f"could not upload {media_dir}/upload-fails.png" in result["stderr"]
     assert uploaded == ["demo.png", "upload-fails.png"]
     assert f"![one]({ASSET_URL}demo.png)" in update_body
     assert f"{media_dir}/upload-fails.png" in update_body
