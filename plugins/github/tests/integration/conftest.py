@@ -101,7 +101,7 @@ def plugin_manifest(docker_client: DockerClient) -> Iterator[Manifest]:
 
 @pytest.fixture(scope="session")
 def stub_image(docker_client: DockerClient, plugin_manifest: Manifest) -> Iterator[str]:
-    """The tag of the plugin image with the stub gh ahead of the real one on PATH."""
+    """The tag of the plugin image with the stub gh in place of the real one."""
     image, _ = docker_client.images.build(
         path=str(STUB_DIR),
         tag=STUB_IMAGE_TAG,
@@ -118,7 +118,7 @@ def stub_image(docker_client: DockerClient, plugin_manifest: Manifest) -> Iterat
 
 @pytest.fixture(scope="session")
 def plugin_image(plugin_manifest: Manifest) -> str:
-    """The tag of the plugin image, whose gh is the pinned one from apk."""
+    """The tag of the plugin image, whose gh is the pinned release tarball's."""
     return PLUGIN_IMAGE_TAG
 
 
