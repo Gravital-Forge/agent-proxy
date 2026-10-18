@@ -45,10 +45,15 @@ scopes:
         credentials: {github-token: {env: GH_TOKEN}}
         env: {GITHUB_REPOS: *repos}
       github.pr_create:
-        roots: []
-        domains: [api.github.com]
+        roots: [{path: /home/agent-01/Projects/example-repo, mode: ro}]
+        domains: [api.github.com, uploads.github.com]
         credentials: {github-token: {env: GH_TOKEN}}
-        env: {GITHUB_REPOS: *repos}
+        env: {GITHUB_REPOS: *repos, GITHUB_PR_ATTACHMENTS: "on"}
+      github.pr_edit:
+        roots: [{path: /home/agent-01/Projects/example-repo, mode: ro}]
+        domains: [api.github.com, uploads.github.com]
+        credentials: {github-token: {env: GH_TOKEN}}
+        env: {GITHUB_REPOS: *repos, GITHUB_PR_ATTACHMENTS: "on"}
       github.pr_checks:
         roots: []
         domains: [api.github.com]

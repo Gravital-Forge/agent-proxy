@@ -16,8 +16,12 @@ def test_example_config_loads_with_its_paths() -> None:
     assert config.overflow_dir == "/home/agent-01/Projects/.agent-proxy-overflow"
 
 
-def test_example_github_grants_name_only_the_api_host() -> None:
-    """Every github grant in the example names api.github.com and no other host."""
+def test_example_github_grants_name_the_hosts_their_actions_reach() -> None:
+    """The example's github grants name the hosts their actions reach.
+
+    pr_view and pr_checks name api.github.com alone. pr_create and pr_edit,
+    which allow attach, add uploads.github.com.
+    """
     config = load_config(EXAMPLE_CONFIG, CREDENTIAL_NAMES)
 
     github_domains = {
@@ -28,7 +32,8 @@ def test_example_github_grants_name_only_the_api_host() -> None:
     }
     assert github_domains == {
         "github.pr_view": ["api.github.com"],
-        "github.pr_create": ["api.github.com"],
+        "github.pr_create": ["api.github.com", "uploads.github.com"],
+        "github.pr_edit": ["api.github.com", "uploads.github.com"],
         "github.pr_checks": ["api.github.com"],
     }
 
