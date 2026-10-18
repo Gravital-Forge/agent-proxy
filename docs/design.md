@@ -167,10 +167,11 @@ scopes:
 - The image-based plugin form is settled: the git and github plugins are built on it.
 - The github plugin's `pr_create` and `pr_edit` upload image and video attachments through gh's
   `--attach`, each file confined to the grant's roots. The grant setting `GITHUB_PR_ATTACHMENTS`
-  governs them, and they are on unless a grant sets it `off`. A grant that allows them adds a root
-  that holds the files, and `uploads.github.com`. The plugin's image takes gh from its release
-  tarball, pinned by its SHA-256, because Alpine's `github-cli` package lacks `--attach`.
-  `plugins/github/README.md` gives the detail under "Attachments".
+  governs them: they are on when a grant leaves it unset or sets it `on`, and refused under any
+  other value. A grant that allows them adds a root that holds the files, and `uploads.github.com`.
+  The plugin's image takes gh from its release tarball, pinned by its SHA-256, because Alpine's
+  `github-cli` package lacks `--attach`. `plugins/github/README.md` gives the detail under
+  "Attachments".
 
 ## The cage
 
