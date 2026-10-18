@@ -1,11 +1,17 @@
 """What the github plugin's integration tests share with their fixtures."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Protocol
 
 from agent_proxy.config import Root
 from agent_proxy.egress import CageNetwork
 from agent_proxy.runner import Outcome
+
+# gh uploads attachments only with a token whose type it can tell from its
+# prefix; ghp_ marks a classic personal access token.
+GITHUB_TOKEN = "ghp_" + "0" * 36
+
+type FakeApiLog = Callable[[], list[dict[str, object]]]
 
 
 class RunAction(Protocol):

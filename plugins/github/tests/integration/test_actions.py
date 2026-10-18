@@ -4,9 +4,8 @@ from pathlib import Path
 import pytest
 from agent_proxy.config import Root
 from agent_proxy.egress import CageNetwork
-from harness import RunAction
+from harness import GITHUB_TOKEN, RunAction
 
-STUB_TOKEN = "stub-token"
 CHECKS_7 = (
     "build\tfail\t1m\thttps://github.com/o/n/actions/runs/101/job/1\t\n"
     "lint\tpass\t10s\thttps://github.com/o/n/actions/runs/102/job/2\t\n"
@@ -18,11 +17,14 @@ NO_REPOS_STDERR = (
     "github plugin refused: "
     "GITHUB_REPOS is not set or names no repository; the grant's env sets it\n"
 )
+ATTACH_OFF_STDERR = (
+    "github plugin refused: attach is off: GITHUB_PR_ATTACHMENTS is 'off'\n"
+)
 
 
 def echoed(*argv: str) -> dict[str, object]:
     """Return the result of a gh call the stub answers by echoing its argv."""
-    echo = {"argv": list(argv), "gh_token": STUB_TOKEN}
+    echo = {"argv": list(argv), "gh_token": GITHUB_TOKEN}
     return {
         "exit_code": 0,
         "stdout": json.dumps(echo, separators=(",", ":")) + "\n",
@@ -265,4 +267,66 @@ def test_a_command_action_is_refused_without_a_repository_list(
     )
 
     assert outcome.content == {"exit_code": 2, "stdout": "", "stderr": NO_REPOS_STDERR}
+    assert not stub_log.exists()
+
+
+def test_attach_is_refused_when_the_grant_turns_it_off(
+    run_action: RunAction, stub_log: Path
+) -> None:
+    """The pr_edit action with GITHUB_PR_ATTACHMENTS off refuses before gh runs."""
+    shot = stub_log.parent / "shot.png"
+    shot.write_bytes(b"png")
+    arguments = {"repo": "o/n", "pr_number": 3, "attach": [{"path": str(shot)}]}
+
+    outcome = run_action(
+        "pr_edit",
+        arguments,
+        roots=[Root(path=str(stub_log.parent), mode="rw")],
+        env={
+            **LISTED,
+            "GITHUB_PR_ATTACHMENTS": "off",
+            "GH_STUB_LOG": str(stub_log),
+        },
+    )
+
+    assert outcome.content == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": ATTACH_OFF_STDERR,
+    }
+    assert not stub_log.exists()
+
+
+def test_an_attach_path_outside_the_cages_roots_is_refused(
+    run_action: RunAction, stub_log: Path, tmp_path: Path
+) -> None:
+    """The pr_create action refuses a file that no root of the cage holds."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    shot = outside / "shot.png"
+    shot.write_bytes(b"png")
+    arguments = {
+        "repo": "o/n",
+        "base": "main",
+        "head": "task/x",
+        "title": "t",
+        "body": "b",
+        "attach": [{"path": str(shot)}],
+    }
+
+    outcome = run_action(
+        "pr_create",
+        arguments,
+        roots=[Root(path=str(stub_log.parent), mode="rw")],
+        env={**LISTED, "GH_STUB_LOG": str(stub_log)},
+    )
+
+    assert outcome.content == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": (
+            f"github plugin refused: attach path '{shot}' "
+            "resolves outside the grant's roots\n"
+        ),
+    }
     assert not stub_log.exists()
