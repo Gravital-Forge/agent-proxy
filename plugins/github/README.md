@@ -45,7 +45,8 @@ then one slash, then a name of letters, digits, `_`, `.`, and `-` that is not on
 builds each `gh api` path from `repo`, so the path stays under `repos/<owner>/<name>/`.
 
 `pr_create` takes a required `head`, the branch the pull request comes from. git-sidecar takes that
-branch from the checkout, and the cage has no checkout.
+branch from the checkout, and gh runs outside any checkout, because neither the core nor the image
+sets a working directory.
 
 ### The repository list
 
@@ -400,7 +401,7 @@ The `pr_create` grant allows `attach`: its root holds the files to upload, and i
   redirect fails. It also answers gh's pull-request lookup, project-items query, and update, and
   each upload, which it refuses for a file named `upload-fails.png`. It logs each upload and each
   update's body as a JSON line, which a test reads back. `test_actions.py` runs every action in an
-  image that puts the stub gh ahead of the real one, built from `tests/stub/Dockerfile`. Its
+  image whose gh is the stub, in place of the real one, built from `tests/stub/Dockerfile`. Its
   `pr_checks` test joins the fake's network and gets the fake's log URLs. `test_actions.py` also
   shows `attach` refused in a real cage, with the setting `off` and with a path outside the roots.
   `test_pinned_gh.py` runs the plugin image against the fake, and checks claims this plugin rests
