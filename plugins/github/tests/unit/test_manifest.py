@@ -41,6 +41,20 @@ NUMBER_PROPERTY = {"type": "integer", "minimum": 1}
 TEXT_PROPERTY = {"type": "string"}
 NON_EMPTY_PROPERTY = {"type": "string", "minLength": 1}
 FLAG_PROPERTY = {"type": "boolean"}
+ATTACH_PROPERTY = {
+    "type": "array",
+    "minItems": 1,
+    "maxItems": 50,
+    "items": {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "pattern": "^/[^#]*$"},
+            "alt": {"type": "string", "pattern": "^[^#]*$"},
+        },
+        "required": ["path"],
+        "additionalProperties": False,
+    },
+}
 # Each command action's argv, which starts gh-cage, and its parameters in order.
 COMMAND_ACTIONS: dict[str, tuple[tuple[str, ...], tuple[Parameter, ...]]] = {
     "pr_list": (
@@ -58,8 +72,8 @@ COMMAND_ACTIONS: dict[str, tuple[tuple[str, ...], tuple[Parameter, ...]]] = {
     "run_list": (("gh-cage", "run", "list"), (REPO,)),
 }
 SCRIPT_TIMEOUTS = {
-    "pr_create": MINUTE,
-    "pr_edit": MINUTE,
+    "pr_create": timedelta(minutes=10),
+    "pr_edit": timedelta(minutes=10),
     "pr_view": MINUTE,
     "pr_fetch": timedelta(minutes=3),
     "pr_reply": MINUTE,
@@ -77,6 +91,23 @@ SCRIPT_OUTPUT_SCHEMA = {
     "required": ["exit_code", "stdout", "stderr"],
     "additionalProperties": False,
 }
+PULL_REQUEST_OUTPUT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "exit_code": {"type": "integer"},
+        "stdout": {"type": "string"},
+        "stderr": {"type": "string"},
+        "pr_url": {"type": "string"},
+        "pr_number": {"type": "integer"},
+    },
+    "required": ["exit_code", "stdout", "stderr"],
+    "additionalProperties": False,
+}
+# pr_create and pr_edit add the pull request their stdout names.
+OUTPUT_SCHEMAS = dict.fromkeys(SCRIPT_TIMEOUTS, SCRIPT_OUTPUT_SCHEMA) | {
+    "pr_create": PULL_REQUEST_OUTPUT_SCHEMA,
+    "pr_edit": PULL_REQUEST_OUTPUT_SCHEMA,
+}
 # Each action's input properties, and the properties it requires.
 INPUTS: dict[str, tuple[dict[str, dict[str, object]], set[str]]] = {
     "pr_create": (
@@ -86,6 +117,7 @@ INPUTS: dict[str, tuple[dict[str, dict[str, object]], set[str]]] = {
             "head": NON_EMPTY_PROPERTY,
             "title": NON_EMPTY_PROPERTY,
             "body": TEXT_PROPERTY,
+            "attach": ATTACH_PROPERTY,
         },
         {"repo", "base", "head", "title", "body"},
     ),
@@ -96,6 +128,7 @@ INPUTS: dict[str, tuple[dict[str, dict[str, object]], set[str]]] = {
             "title": TEXT_PROPERTY,
             "body": TEXT_PROPERTY,
             "base": TEXT_PROPERTY,
+            "attach": ATTACH_PROPERTY,
         },
         {"repo", "pr_number"},
     ),
@@ -200,7 +233,7 @@ def test_command_action_runs_its_gh_words(manifest: Manifest, name: str) -> None
 
 @pytest.mark.parametrize("name", sorted(SCRIPT_TIMEOUTS))
 def test_script_action_runs_its_executable(manifest: Manifest, name: str) -> None:
-    """Each script action runs /plugin/bin/<name> with GH_TOKEN and its timeout."""
+    """Each script action runs /plugin/bin/<name> with GH_TOKEN, timeout, and schema."""
     action = manifest.actions[name]
 
     assert isinstance(action, ScriptAction)
@@ -209,7 +242,12 @@ def test_script_action_runs_its_executable(manifest: Manifest, name: str) -> Non
         action.credentials,
         action.timeout,
         action.output_schema,
-    ) == (f"/plugin/bin/{name}", GH_TOKEN, SCRIPT_TIMEOUTS[name], SCRIPT_OUTPUT_SCHEMA)
+    ) == (
+        f"/plugin/bin/{name}",
+        GH_TOKEN,
+        SCRIPT_TIMEOUTS[name],
+        OUTPUT_SCHEMAS[name],
+    )
 
 
 @pytest.mark.parametrize("name", sorted(INPUTS))
@@ -234,11 +272,12 @@ def test_every_action_refuses_an_unknown_member(manifest: Manifest) -> None:
 
 
 def test_pr_edit_requires_one_field_to_change(manifest: Manifest) -> None:
-    """The pr_edit schema requires at least one of title, body, and base."""
+    """The pr_edit schema requires at least one of title, body, base, and attach."""
     assert manifest.actions["pr_edit"].input_schema.get("anyOf") == [
         {"required": ["title"]},
         {"required": ["body"]},
         {"required": ["base"]},
+        {"required": ["attach"]},
     ]
 
 
@@ -350,6 +389,61 @@ def test_action_accepts_an_input_inside_its_schema(
 ) -> None:
     """An empty field to edit, a branch as pr, and every optional member pass."""
     validate_input(manifest.actions[name], {"repo": "o/n", **arguments})
+
+
+@pytest.mark.parametrize("name", ["pr_create", "pr_edit"])
+@pytest.mark.parametrize(
+    "attach",
+    [
+        [],
+        [{"path": "/r/x.png"}] * 51,
+        [{"path": "r/x.png"}],
+        [{"path": "/r/x#y.png"}],
+        [{"path": "/r/x.png", "alt": "a#b"}],
+        [{"path": "/r/x.png", "size": 1}],
+        [{"alt": "a"}],
+    ],
+    ids=[
+        "empty",
+        "51-entries",
+        "relative",
+        "hash-in-path",
+        "hash-in-alt",
+        "unknown-member",
+        "no-path",
+    ],
+)
+def test_attach_refuses_an_entry_list_outside_its_schema(
+    manifest: Manifest, name: str, attach: list[dict[str, object]]
+) -> None:
+    """No entry, 51, a relative path, a '#', a stray member, or no path fails."""
+    arguments = {
+        "pr_create": {"base": "main", "head": "task/x", "title": "t", "body": "b"},
+        "pr_edit": {"pr_number": 5},
+    }[name]
+
+    with pytest.raises(InputError):
+        validate_input(
+            manifest.actions[name], {"repo": "o/n", **arguments, "attach": attach}
+        )
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments"),
+    [
+        ("pr_edit", {"pr_number": 5}),
+        ("pr_create", {"base": "main", "head": "task/x", "title": "t", "body": "b"}),
+    ],
+)
+def test_attach_accepts_fifty_entries_with_alt(
+    manifest: Manifest, name: str, arguments: dict[str, object]
+) -> None:
+    """Fifty absolute paths with alt pass, and attach alone is a pr_edit change."""
+    attach = [{"path": f"/r/shot-{index}.png", "alt": "A shot"} for index in range(50)]
+
+    validate_input(
+        manifest.actions[name], {"repo": "o/n", **arguments, "attach": attach}
+    )
 
 
 def test_dockerfile_links_each_script_action(manifest: Manifest) -> None:
