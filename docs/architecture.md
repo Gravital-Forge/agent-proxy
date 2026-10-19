@@ -448,7 +448,7 @@ tests.
 The github plugin is the uv package in `plugins/github/`, placed as `docs/design.md` sets out under
 "Repository layout". The `manifest-check` job in `.github/workflows/ci.yml` checks its image as it
 checks the git plugin's. `plugins/github/README.md` gives everything about the plugin itself: its
-actions, its egress, its layout, and its tests.
+actions, its attachments, its egress, its layout, and its tests.
 
 ## Where state lives
 

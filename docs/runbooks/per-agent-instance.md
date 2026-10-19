@@ -336,3 +336,36 @@ check runs here and never in the project. Every `docker` command below runs as r
 
    The check passes when the commit's page on GitHub shows Verified. Afterwards, delete the branch
    `task/signing-check` on GitHub.
+
+10. **Attachments with a real credential.** With a real `github-token` stored, take a private
+    repository of a GitHub organization that the token can push to, as `owner/name`, and a checkout
+    of it below the tree. Open a scratch pull request on it, and note its number. Give a
+    `github.pr_edit` grant shaped like the one in `examples/instance.yaml`: its `roots` name a
+    directory below the tree, `<root>` below, with mode `ro`; its `domains` name `api.github.com`
+    and `uploads.github.com`; its `GITHUB_REPOS` names the repository; and its `env` sets
+    `GITHUB_PR_ATTACHMENTS: "on"`. `plugins/github/README.md` gives each member under "Attachments".
+    Put the config in force as "The first start" does.
+
+    1. As the agent, create a worktree of the checkout below `<root>`, for example with
+       `git -C <checkout> worktree add <root>/attach-check`. As the agent, write two files in it: a
+       PNG, `proof.png`, and an H.264 MP4, `proof.mp4`.
+    2. Through the agent's MCP client, call `github_pr_edit` with `repo` set to the repository,
+       `pr_number` set to the scratch pull request's number, `attach` naming
+       `<root>/attach-check/proof.png` and `<root>/attach-check/proof.mp4`, and `body` set to:
+
+       ```markdown
+       ![screenshot](<root>/attach-check/proof.png)
+
+       ![](<root>/attach-check/proof.mp4)
+       ```
+
+       The result's `exit_code` is 0, and its `pr_number` is the scratch pull request's number.
+    3. As the operator, open the pull request's page on GitHub. The image shows, and the video plays
+       in the page.
+    4. Set the grant's `GITHUB_PR_ATTACHMENTS` to `"off"`, and put the config in force again. Make
+       the call of step 2 again. The result's `exit_code` is 2, and its `stderr` holds
+       `github plugin refused: attach is off: GITHUB_PR_ATTACHMENTS is 'off'`.
+
+    The check passes when each result is as given and both files render in step 3. Afterwards, close
+    the scratch pull request, and remove the worktree with
+    `git -C <checkout> worktree remove <root>/attach-check`.

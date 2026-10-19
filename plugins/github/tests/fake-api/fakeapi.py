@@ -1,8 +1,9 @@
-"""A fake api.github.com for the tests that run the pinned gh.
+"""A fake api.github.com and uploads.github.com for the tests that run the pinned gh.
 
-It runs in a container on the test's internal network, under the network alias
-api.github.com, and serves TLS with a certificate the image's test CA signs. It
-prints serving once its socket is bound.
+It runs in a container on the test's internal network, under the network
+aliases api.github.com and uploads.github.com, and serves TLS with a
+certificate the image's test CA signs for both names. It prints serving once
+its socket is bound.
 
 Its GET answers serve run 1 of repository o/n: the run, its workflow, its jobs,
 of which one failed, and the run's log archive. It answers two jobs' log
@@ -11,9 +12,18 @@ that follows it fails.
 
 On /graphql it answers gh's repository query, and the three requests gh's pr
 edit sends for pull request 1: the pull-request lookup, the project-items
-query, and the update. It refuses a lookup that asks for the classic-Projects
-field projectCards with the error GitHub gives for that field. It answers any
-other request with 404.
+query, and the update. The lookup's answer names the pull request's
+repository, which gh asks for when it attaches files. It refuses a lookup
+that asks for the classic-Projects field projectCards with the error GitHub
+gives for that field.
+
+A POST to /user-attachments/assets uploads the file its name query parameter
+names: upload-fails.png answers 422, and any other name answers 201 with the
+asset URL https://github.com/user-attachments/assets/fake-<name>.
+
+It prints one JSON line for each upload, with the file's name and the
+request's Host and Authorization headers, and one for each update, with the
+body it sets. It answers any other request with 404.
 """
 
 import io
@@ -21,6 +31,7 @@ import json
 import ssl
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs
 
 ADDRESS = ("", 443)
 CERTIFICATE_PATH = "/pki/server.crt"
@@ -84,6 +95,13 @@ PULL_REQUEST = {
     "labels": {"nodes": [], "totalCount": 0},
     "assignedActors": {"nodes": [], "totalCount": 0},
     "milestone": None,
+    "repository": {
+        "id": "R_1",
+        "name": "n",
+        "nameWithOwner": "o/n",
+        "databaseId": 1,
+        "viewerPermission": "ADMIN",
+    },
 }
 CLASSIC_PROJECTS_ERROR = {
     "data": {"repository": {"pullRequest": None}},
@@ -115,6 +133,10 @@ PROJECT_ITEMS = {
 UPDATE_PAYLOAD = {
     "data": {"updatePullRequest": {"__typename": "UpdatePullRequestPayload"}}
 }
+UPLOAD_PATH = "/user-attachments/assets"
+FAILING_UPLOAD_NAME = "upload-fails.png"
+ASSET_URL_PREFIX = "https://github.com/user-attachments/assets/fake-"
+VALIDATION_FAILED = {"message": "Validation Failed"}
 
 
 def logs_archive() -> bytes:
@@ -140,6 +162,11 @@ def graphql_answer(body: str) -> object | None:
     return None
 
 
+def log_event(event: dict[str, object]) -> None:
+    """Print event as one JSON line, for the test to read from the log."""
+    print(json.dumps(event))
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -156,10 +183,51 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(404, NOT_FOUND)
 
     def do_POST(self) -> None:
-        """Answer gh's GraphQL requests on /graphql, and any other POST with 404."""
-        body = self.rfile.read(int(self.headers.get("Content-Length", 0))).decode()
-        path = self.path.split("?", 1)[0]
-        answer = graphql_answer(body) if path == GRAPHQL_PATH else None
+        """Answer uploads, gh's GraphQL requests, and any other POST with 404."""
+        body = self._read_body()
+        path, _, query = self.path.partition("?")
+        if path == UPLOAD_PATH:
+            self._answer_upload(parse_qs(query).get("name", [""])[0])
+        elif path == GRAPHQL_PATH:
+            self._answer_graphql(body.decode())
+        else:
+            self._send_json(404, NOT_FOUND)
+
+    def _read_body(self) -> bytes:
+        """Return the request body, whether it is sized or chunked."""
+        if self.headers.get("Transfer-Encoding", "").lower() == "chunked":
+            return self._read_chunked_body()
+        return self.rfile.read(int(self.headers.get("Content-Length", 0)))
+
+    def _read_chunked_body(self) -> bytes:
+        """Return a chunked request body, reading through its trailer."""
+        chunks = []
+        while size := int(self.rfile.readline().split(b";", 1)[0], 16):
+            chunks.append(self.rfile.read(size))
+            self.rfile.readline()
+        while self.rfile.readline() not in (b"\r\n", b"\n", b""):
+            pass
+        return b"".join(chunks)
+
+    def _answer_upload(self, name: str) -> None:
+        log_event(
+            {
+                "upload": name,
+                "host": self.headers.get("Host"),
+                "authorization": self.headers.get("Authorization"),
+            }
+        )
+        if name == FAILING_UPLOAD_NAME:
+            self._send_json(422, VALIDATION_FAILED)
+        else:
+            self._send_json(201, {"url": ASSET_URL_PREFIX + name})
+
+    def _answer_graphql(self, body: str) -> None:
+        if UPDATE_MUTATION in body:
+            log_event(
+                {"update_body": json.loads(body)["variables"]["input"].get("body")}
+            )
+        answer = graphql_answer(body)
         if answer is None:
             self._send_json(404, NOT_FOUND)
         else:

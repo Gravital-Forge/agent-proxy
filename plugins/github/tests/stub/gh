@@ -11,6 +11,8 @@ CHECKS_7 = (
     "lint\tpass\t10s\thttps://github.com/o/n/actions/runs/102/job/2\t\n"
     "test\tfail\t2m\thttps://github.com/o/n/actions/runs/101/job/3\t\n"
 )
+UPLOAD_FAILS_NAME = "upload-fails.png"
+OPENED_URL = "https://github.com/o/n/pull/5"
 ANSWERS: dict[tuple[str, ...], tuple[int, str, str]] = {
     ("pr", "checks", "7", "--repo", "o/n"): (1, CHECKS_7, ""),
     ("pr", "checks", "8", "--repo", "o/n"): (1, "", "no checks reported\n"),
@@ -20,7 +22,25 @@ ANSWERS: dict[tuple[str, ...], tuple[int, str, str]] = {
     ("api", "repos/o/n/pulls/6/comments"): (0, "[]", ""),
     ("api", "repos/o/n/pulls/6/reviews"): (1, "", "HTTP 404: Not Found\n"),
     ("api", "repos/o/n/pulls/9/comments"): (0, "not json\n", ""),
+    ("pr", "edit", "5", "--repo", "o/n", "--title=opened"): (
+        0,
+        f"{OPENED_URL}\n\n",
+        "",
+    ),
 }
+
+
+def _failed_upload(argv: list[str]) -> tuple[int, str, str] | None:
+    """Return gh's answer to an upload of upload-fails.png, or None without one."""
+    for item in argv:
+        path = item.removeprefix("--attach=").partition("#")[0]
+        if item.startswith("--attach=") and Path(path).name == UPLOAD_FAILS_NAME:
+            return (
+                1,
+                f"{OPENED_URL}\n",
+                f"could not upload {path}: rate limited; wait and try again\n",
+            )
+    return None
 
 
 def main(argv: list[str]) -> int:
@@ -29,7 +49,7 @@ def main(argv: list[str]) -> int:
     if log is not None:
         with Path(log).open("a") as stream:
             stream.write(json.dumps(argv, separators=(",", ":")) + "\n")
-    answer = ANSWERS.get(tuple(argv))
+    answer = _failed_upload(argv) or ANSWERS.get(tuple(argv))
     if answer is None:
         echo = {"argv": argv, "gh_token": os.environ.get("GH_TOKEN")}
         print(json.dumps(echo, separators=(",", ":")))

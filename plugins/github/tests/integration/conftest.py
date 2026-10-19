@@ -1,3 +1,4 @@
+import json
 import secrets
 import time
 from collections.abc import Iterator, Mapping, Sequence
@@ -14,7 +15,7 @@ from agent_proxy.results import new_call_id
 from agent_proxy.runner import CageCall, CageLimiter, CageRunner, Outcome
 from docker import DockerClient
 from docker.models.containers import Container
-from harness import RunAction
+from harness import GITHUB_TOKEN, FakeApiLog, RunAction
 
 TEST_LABELS = {"agent-proxy.test": "1"}
 PLUGIN_DIR = Path(__file__).parents[2]
@@ -23,14 +24,14 @@ STUB_DIR = Path(__file__).parents[1] / "stub"
 STUB_IMAGE_TAG = "apx-github-stub:it"
 FAKE_API_DIR = Path(__file__).parents[1] / "fake-api"
 FAKE_API_IMAGE_TAG = "apx-github-fake-api:it"
-FAKE_API_ALIAS = "api.github.com"
+FAKE_API_ALIASES = ["api.github.com", "uploads.github.com"]
 FAKE_API_START_SECONDS = 30
 VERIFIER_DIR = Path(__file__).parents[4] / "core" / "verifier"
 VERIFIER_BUILD_TAG = "apx-github-verifier-build:it"
 VERIFIER_IMAGE_TAG = "apx-github-verifier:it"
 MAX_CAGES = 4
 CREDENTIAL_NAME = "github-token"
-CREDENTIAL_VALUE = b"stub-token"
+CREDENTIAL_VALUE = GITHUB_TOKEN.encode()
 
 
 @pytest.fixture(autouse=True)
@@ -101,7 +102,7 @@ def plugin_manifest(docker_client: DockerClient) -> Iterator[Manifest]:
 
 @pytest.fixture(scope="session")
 def stub_image(docker_client: DockerClient, plugin_manifest: Manifest) -> Iterator[str]:
-    """The tag of the plugin image with the stub gh ahead of the real one on PATH."""
+    """The tag of the plugin image with the stub gh in place of the real one."""
     image, _ = docker_client.images.build(
         path=str(STUB_DIR),
         tag=STUB_IMAGE_TAG,
@@ -118,7 +119,7 @@ def stub_image(docker_client: DockerClient, plugin_manifest: Manifest) -> Iterat
 
 @pytest.fixture(scope="session")
 def plugin_image(plugin_manifest: Manifest) -> str:
-    """The tag of the plugin image, whose gh is the pinned one from apk."""
+    """The tag of the plugin image, whose gh is the pinned release tarball's."""
     return PLUGIN_IMAGE_TAG
 
 
@@ -202,8 +203,13 @@ def run_action(
 
 
 @pytest.fixture
-def fake_api_network(docker_client: DockerClient, fake_api_image: str) -> Iterator[str]:
-    """The name of an internal network on which the fake answers as api.github.com."""
+def fake_api_container(
+    docker_client: DockerClient, fake_api_image: str
+) -> Iterator[Container]:
+    """The fake, running on an internal network of its own under FAKE_API_ALIASES.
+
+    Each test gets a new one, so its log holds only that test's requests.
+    """
     network = docker_client.networks.create(
         f"apx-github-fake-{secrets.token_hex(4)}", internal=True, labels=TEST_LABELS
     )
@@ -214,18 +220,36 @@ def fake_api_network(docker_client: DockerClient, fake_api_image: str) -> Iterat
             network=network.name,
             networking_config={
                 network.name: docker_client.api.create_endpoint_config(
-                    aliases=[FAKE_API_ALIAS]
+                    aliases=FAKE_API_ALIASES
                 )
             },
             labels=TEST_LABELS,
         )
         try:
             _wait_for_serving(container)
-            yield network.name
+            yield container
         finally:
             container.remove(force=True)
     finally:
         network.remove()
+
+
+@pytest.fixture
+def fake_api_network(fake_api_container: Container) -> str:
+    """The name of the internal network on which the fake answers as both hosts."""
+    (name,) = fake_api_container.attrs["NetworkSettings"]["Networks"]
+    return name
+
+
+@pytest.fixture
+def fake_api_log(fake_api_container: Container) -> FakeApiLog:
+    """A reader of the fake's log: each line that begins with {, decoded as JSON."""
+
+    def read() -> list[dict[str, object]]:
+        lines = fake_api_container.logs().decode().splitlines()
+        return [json.loads(line) for line in lines if line.startswith("{")]
+
+    return read
 
 
 @pytest.fixture

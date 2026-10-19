@@ -35,15 +35,18 @@ that begins with `-`.
 ### The `repo` input
 
 Every action takes a required `repo`, the GitHub repository as `owner/name`, and passes it to gh as
-`--repo`. gh needs no checkout for that. So every grant of the plugin has `roots: []`: a cage with
-no roots reaches less than one that mounts the agent's tree.
+`--repo`. gh needs no checkout for that. So a grant of the plugin has `roots: []`, because a cage
+with no roots reaches less than one that mounts the agent's tree. The one exception is a grant of
+`pr_create` or `pr_edit` that allows `attach`: it mounts a root that holds the files to upload, as
+"The grant" under "Attachments" gives.
 
 The input schema takes an owner of letters, digits, and `-` that begins with a letter or a digit,
 then one slash, then a name of letters, digits, `_`, `.`, and `-` that is not only dots. A script
 builds each `gh api` path from `repo`, so the path stays under `repos/<owner>/<name>/`.
 
 `pr_create` takes a required `head`, the branch the pull request comes from. git-sidecar takes that
-branch from the checkout, and the cage has no checkout.
+branch from the checkout, and gh runs outside any checkout, because neither the core nor the image
+sets a working directory.
 
 ### The repository list
 
@@ -63,7 +66,8 @@ where the git plugin judges it by the URL git connects to.
 `pr_create` checks `repo` alone, never `head`. `head` may name a branch on another owner's fork,
 which the pull request only reads.
 
-The cage mounts no repository, so nothing inside the plugin gets past the check.
+No action runs git inside a repository, so nothing inside the plugin gets past the check. A root
+that `attach` needs supplies only the files that gh uploads.
 
 ### What an action returns
 
@@ -72,6 +76,13 @@ script action prints the same three members, and its `output_schema` states them
 whenever it runs to its end, and gh's exit code goes in `exit_code`. `job_log_url` runs no gh, so
 its exit code is its own, as given below. Each action returns gh's stdout as gh prints it, except
 for `pr_fetch`, `pr_checks`, and `job_log_url`.
+
+`pr_create` and `pr_edit` add two members when the last non-empty line of gh's stdout is a pull
+request's URL, `https://github.com/<owner>/<name>/pull/<number>`: `pr_url`, that URL, and
+`pr_number`, the number as an integer. gh prints that URL on success, and also after an upload fails
+once the pull request exists. The rule holds with or without `attach`, and whatever the exit code,
+so a call that fails after gh opened or changed the pull request still names it. Both actions'
+`output_schema` states the two members.
 
 `pr_fetch` makes three `gh api` calls in this order: the pull request's inline comments, its
 reviews, and its conversation comments. Each call fetches one page, as gh api does without
@@ -121,14 +132,19 @@ refuses as its own exit. The plugin refuses these:
   `owner/*`.
 - `repo` names a repository that `GITHUB_REPOS` does not list.
 - `gh-cage` finds `--repo` missing, repeated, or with no value after it.
+- A call passes `attach`, and the setting, the roots, or an entry fails a check. "What `attach`
+  refuses" gives each reason and the order of the checks.
 
 The core refuses a call before a cage starts when the input fails the action's input schema. These
 calls fail it:
 
 - `repo` is not in the form "The `repo` input" gives.
 - `pr_view`'s `pr` begins with `-`, or a number is below 1.
-- `pr_edit` has none of `title`, `body`, and `base`.
+- `pr_edit` has none of `title`, `body`, `base`, and `attach`.
 - `pr_create` has an empty `base`, `head`, or `title`, or `pr_list` has an empty `head`.
+- `attach` is not in the form "The `attach` input" gives: it is empty or holds more than 50 entries,
+  or an entry lacks `path`, has a `path` that does not begin with `/`, has a `#` in `path` or in
+  `alt`, or has a member other than these two.
 
 ### Output past the cap
 
@@ -148,6 +164,136 @@ command action, whose stdout past the cap goes to an overflow file.
   comments on the pull request's conversation.
 - `pr_close` passes `comment` only when it is not empty, and passes `--delete-branch` when
   `delete_branch` is true.
+- `pr_create` and `pr_edit` pass each `attach` entry as one `--attach=` item, after every other
+  flag, as "Attachments" gives. A call without `attach` passes no `--attach=` item.
+
+## Attachments
+
+`pr_create` and `pr_edit` take an optional `attach`, a list of local image and video files. gh's
+`--attach` uploads each file to GitHub, and rewrites the body's references to it as the uploaded
+asset's URL. The script checks every entry against the grant before gh runs, and passes each entry
+as one argv item after every other flag: `--attach=<path>`, or `--attach=<path>#<alt>` when the
+entry has `alt`. `attachments.py` holds the checks. Both actions' timeout is `10m`, because a video
+of up to 100 MiB uploads through the egress proxy within the call.
+
+### The `attach` input
+
+`attach` is an array of 1 to 50 objects; 50 is gh's own limit. Each object has these members, and no
+other:
+
+- `path`, required: the file's absolute path, as the agent sees it on the host. It begins with `/`
+  and holds no `#`. The grant's root mounts the file at the same path in the cage.
+- `alt`, optional: alt text for an image that the body does not reference. It holds no `#`. A video
+  takes none.
+
+gh splits `<path>#<alt>` by scanning for the longest prefix that exists as a file, so a `#` in
+either member could let gh pick a file the script never checked. The input schema refuses it for
+that reason.
+
+`pr_edit` accepts a call whose only change is `attach`. gh then appends each file to the body that
+the pull request already has.
+
+### The setting
+
+The grant's `env` member `GITHUB_PR_ATTACHMENTS` governs `attach`:
+
+- Unset, or `on`: a call may pass `attach`.
+- `off`: a call that passes `attach` is refused.
+- Any other value: a call that passes `attach` is refused, and the reason names the value.
+
+A call without `attach` runs under every value.
+
+### What `attach` refuses
+
+The script refuses a call before gh runs, as "Refusals" gives, with one of these reasons. `<path>`
+is the entry's `path` as given:
+
+- `attach is off: GITHUB_PR_ATTACHMENTS is 'off'`
+- `GITHUB_PR_ATTACHMENTS must be 'on' or 'off', got '<value>'`
+- `attach needs the grant's roots: AGENT_PROXY_ROOTS is not set`
+- `AGENT_PROXY_ROOTS must be a JSON array of absolute paths, got '<value>'`
+- `attach path '<path>' resolves outside the grant's roots`
+- `attach path '<path>' is not a regular file`
+- `attach path '<path>' is not a png, jpg, jpeg, gif, webp, mp4, mov, or webm file`
+- `attach path '<path>' is a video, and a video takes no alt`
+
+The checks run in that order: the setting, the roots, then each entry in order. The first failure is
+the refusal.
+
+The script resolves each path with symlinks followed. The real path must lie below the real path of
+one of the roots that the core passes in `AGENT_PROXY_ROOTS`, so a symlink that leads out of every
+root is refused. The extension check applies to the path as given and to its real path, compared
+lowercase, because gh picks the content type from the name it is given. SVG is not accepted. The
+type list keeps a source file or an env file from reaching GitHub by mistake. `docs/design.md`
+gives, under "Known gaps", what these checks cannot stop.
+
+### Body references
+
+gh matches a body reference to an attachment by absolute path. It parses the body as Markdown, and
+compares each image or link destination, made absolute, with each attached `path`, made absolute. It
+never compares base names. So:
+
+- Reference each file by its exact `path` as the destination: `![<alt>](<path>)` for an image, and
+  `![](<path>)` for a video, alone in its paragraph, with a blank line on each side.
+- gh replaces an image reference with `![<alt>](<asset URL>)`, and keeps the alt text written in the
+  body. It replaces a video reference that stands alone in its paragraph with the bare asset URL,
+  which GitHub renders as a player. A video reference anywhere else becomes a link.
+- gh appends each attached file that the body does not reference to the end of the body, in its own
+  paragraph. An image becomes `![<alt>](<asset URL>)`, with the file name as the alt when the entry
+  has no `alt`. A video becomes the bare URL.
+- A reference to a file that did not upload stays in the body as the local path.
+- Keep paths free of spaces and of Markdown punctuation. gh also tries a destination's unescaped
+  forms, but a plain path needs none.
+
+### What an upload returns
+
+gh uploads the files in order, and stops at the first failure. Its failure exit is 1, and its errors
+go to `stderr`. "What an action returns" gives `pr_url` and `pr_number`. A call that passes `attach`
+ends in one of three ways:
+
+- **All uploaded.** `exit_code` is 0, and the result has `pr_url` and `pr_number`. `pr_create`
+  opened the pull request, and `pr_edit` changed it.
+- **Partial.** At least one file uploaded, and then one failed. `exit_code` is 1, and the result has
+  `pr_url` and `pr_number`. `pr_create` still opened the pull request, and `pr_edit` still changed
+  it, with the uploaded files' references rewritten. The failed file and every file after it did not
+  upload, so their references stay local paths. `stderr` names the failed file:
+  `could not upload <path>`, then GitHub's reason, such as `: rate limited; wait and try again` or
+  `: attaching files requires write access to the repository`.
+- **None uploaded.** `exit_code` is 1, and the result has no `pr_url`. `pr_create` opened nothing,
+  and `stderr` ends `no pull request was created`. `pr_edit` changed nothing, and `stderr` ends
+  `the pull request was not changed`.
+
+The caller's rules:
+
+- A result with `pr_number` means the pull request exists. Never call `pr_create` again for it.
+- To re-attach after a partial failure, read the body with `pr_view`, with `fields` set to `body`.
+  The files still missing are the attached `path`s that still appear in it. Call `pr_edit` with that
+  body as `body`, and with `attach` naming only the missing files. gh rewrites the remaining local
+  references in place, and leaves the uploaded URLs as they are.
+- After "none uploaded" on `pr_create`, the caller may call `pr_create` again.
+
+### The grant
+
+A grant of `pr_create` or `pr_edit` that allows `attach` needs these members. "A grant" shows one.
+
+- `roots`: a root that holds every attached file. Mode `ro` suffices. A grant with `roots: []`
+  refuses every `attach` with the outside-the-roots reason, because the core then passes `[]`.
+- `domains`: `api.github.com` and `uploads.github.com`, as "Egress" gives.
+- `credentials`: the GitHub token as `GH_TOKEN`, with write access to the repository. gh uploads
+  only with a classic or fine-grained personal access token, an OAuth token, or a user-to-server
+  token. It checks the viewer's permission on the repository first, and refuses below `WRITE`.
+- `env`: `GITHUB_REPOS`, as for every grant of the plugin, and `GITHUB_PR_ATTACHMENTS`, as "The
+  setting" gives.
+
+A grant that turns attachments off sets `GITHUB_PR_ATTACHMENTS: "off"`, and may drop the root and
+`uploads.github.com`. The grant then loses the reach along with the input.
+
+### Size and type limits
+
+gh checks these before it uploads, and its error is the result: an image of at most 10 MiB, a video
+of at most 100 MiB, a non-empty regular file, and no file attached twice. `maxImageBytes` and
+`maxVideoBytes` in gh's `internal/attachments/` at `v2.102.0` set the two sizes. GitHub's own limits
+follow the organization's plan.
 
 ## In the cage
 
@@ -167,19 +313,23 @@ under its home for these actions, so the image sets no other directory variable.
 
 ### git
 
-The image holds git, which the `github-cli` package from apk depends on. `gh pr create --head` runs
-git. It tolerates git's failure outside a repository, but it fails when git is missing, so the image
-needs git.
+The image installs git from apk. `gh pr create --head` runs git. It tolerates git's failure outside
+a repository, but it fails when git is missing, so the image needs git.
 
 ## Egress
 
 Each gh command that these actions run calls GitHub's API at `api.github.com`, and so does each log
-URL request of `pr_checks` and `job_log_url`. The grant below names that host alone, because no
-action calls `github.com`. The cage reaches the web only through its egress proxy, which refuses a
-host the grant does not name.
+URL request of `pr_checks` and `job_log_url`. No action calls `github.com`. The cage reaches the web
+only through its egress proxy, which refuses a host the grant does not name.
 
 `pr_checks` and `job_log_url` need only `api.github.com` for a job's log URL, because they read the
 redirect and do not follow it. The agent fetches the URL itself, outside the cage.
+
+`attach` needs one more host. gh sends each file in one
+`POST https://uploads.github.com/user-attachments/assets`, with the token in its `Authorization`
+header, and calls no storage host. A grant of `pr_create` or `pr_edit` that allows `attach` names
+`uploads.github.com` beside `api.github.com`, as "A grant" shows. When an upload reaches a host the
+grant does not name, the egress proxy's refusal names that host, and the fix is a grant edit.
 
 `run_view` with `log_failed` needs one more host. gh asks `api.github.com` for the run's log at
 `repos/<repo>/actions/runs/<id>/logs`, and follows GitHub's redirect to a storage host GitHub picks,
@@ -197,10 +347,10 @@ scopes:
   dev-agent:
     grants:
       github.pr_create:
-        roots: []
-        domains: [api.github.com]
+        roots: [{path: /home/agent-01/Projects/example-repo, mode: ro}]
+        domains: [api.github.com, uploads.github.com]
         credentials: {github-token: {env: GH_TOKEN}}
-        env: {GITHUB_REPOS: "example-org/*"}
+        env: {GITHUB_REPOS: "example-org/*", GITHUB_PR_ATTACHMENTS: "on"}
       github.pr_checks:
         roots: []
         domains: [api.github.com]
@@ -215,39 +365,56 @@ scopes:
 
 Every grant sets `GITHUB_REPOS` in its `env`, as "The repository list" gives.
 
+The `pr_create` grant allows `attach`: its root holds the files to upload, and it names
+`uploads.github.com`. "The grant" under "Attachments" gives what each member is for.
+
 "Egress" gives the hosts a grant must add for `run_view` with `log_failed`.
 
 ## Layout
 
-- `scripts/github_plugin/` is the module. `scripts.py` holds the script actions, `repos.py` holds
-  the repository list, `cage.py` holds the `gh-cage` wrapper, and `entry.py` runs the wrapper or the
-  script action that the executable's name names.
+- `scripts/github_plugin/` is the module. `scripts.py` holds the script actions, `attachments.py`
+  holds the checks of `attach`, `repos.py` holds the repository list, `cage.py` holds the `gh-cage`
+  wrapper, and `entry.py` runs the wrapper or the script action that the executable's name names.
 - `scripts/entry` is the one executable every action runs.
-- `Dockerfile` builds the image on the Alpine base the git plugin pins, with gh and Python 3 from
-  apk. It sets `XDG_CACHE_HOME`, and links `gh-cage` on the `PATH` and each script action's
-  `executable` under `/plugin/bin/` to `/plugin/entry`. A command action runs `gh-cage`, which runs
-  the image's gh.
+- `Dockerfile` builds the image on the Alpine base the git plugin pins, with git and Python 3 from
+  apk. It installs gh from gh's release tarball, which it checks against a pinned SHA-256: the
+  `GH_VERSION` and `GH_SHA256` build arguments pin the version and the hash, and a tarball whose
+  hash differs fails the build. `docs/design.md` gives, under "Plugins and actions", why gh does not
+  come from apk. The image sets `XDG_CACHE_HOME`, and links `gh-cage` on the `PATH` and each script
+  action's `executable` under `/plugin/bin/` to `/plugin/entry`. A command action runs `gh-cage`,
+  which runs the image's gh.
 - `describe` prints `manifest.json`.
 - `tests/stub/gh` stands in for gh. It writes its argv to the file `GH_STUB_LOG` names, and answers
-  from a table of canned results. It answers any other argv with that argv and the value of
-  `GH_TOKEN`.
+  from a table of canned results. It answers an `--attach=` item whose file is named
+  `upload-fails.png` with gh's result for a partial upload failure. It answers any other argv with
+  that argv and the value of `GH_TOKEN`.
 - `tests/unit/` runs the module against the stub gh, first on the host's `PATH`, and against a local
   plain-HTTP server that stands in for GitHub's API. It also checks the manifest. It needs no Docker
   and no gh.
 - `tests/integration/` builds the plugin image and the core's verifier image, and runs actions in a
-  real cage through the core's `CageRunner`. `tests/fake-api/` builds a fake `api.github.com`, which
-  runs on an internal network. It answers a known job's log request with a redirect to a host the
-  network cannot resolve, so a client that follows the redirect fails. It also answers gh's
-  pull-request lookup, project-items query, and update. `test_actions.py` runs every action in an
-  image that puts the stub gh ahead of the real one, built from `tests/stub/Dockerfile`. Its
-  `pr_checks` test joins the fake's network and gets the fake's log URLs. `test_pinned_gh.py` runs
-  the plugin image against the fake, and checks claims this plugin rests on. `pr_create` with `head`
-  and no checkout gets past the steps that need the current branch and git, and fails at the fake's
-  answer to its next request. `run_view` with `log_failed` writes its log cache under the image's
-  `XDG_CACHE_HOME` while the root filesystem is read-only. `job_log_url` returns the fake's
-  `Location` without following it, and the fake's 404 for a job the fake does not know. `pr_edit`
-  gets past gh's pull-request lookup, which does not ask for the classic-Projects field GitHub
-  refuses, and applies the edit.
+  real cage through the core's `CageRunner`. `harness.py` holds what the tests share with their
+  fixtures, `GITHUB_TOKEN` among them: the value every cage gets as `GH_TOKEN`, in a classic token's
+  form, because gh uploads only with a token whose type it can tell from its prefix.
+  `tests/fake-api/` builds a fake `api.github.com` and `uploads.github.com`, which runs on an
+  internal network under both names, with a certificate for both. It answers a known job's log
+  request with a redirect to a host the network cannot resolve, so a client that follows the
+  redirect fails. It also answers gh's pull-request lookup, project-items query, and update, and
+  each upload, which it refuses for a file named `upload-fails.png`. It logs each upload and each
+  update's body as a JSON line, which a test reads back. `test_actions.py` runs every action in an
+  image whose gh is the stub, in place of the real one, built from `tests/stub/Dockerfile`. Its
+  `pr_checks` test joins the fake's network and gets the fake's log URLs. `test_actions.py` also
+  shows `attach` refused in a real cage, with the setting `off` and with a path outside the roots.
+  `test_pinned_gh.py` runs the plugin image against the fake, and checks claims this plugin rests
+  on. `pr_create` with `head` and no checkout gets past the steps that need the current branch and
+  git, and fails at the fake's answer to its next request. `run_view` with `log_failed` writes its
+  log cache under the image's `XDG_CACHE_HOME` while the root filesystem is read-only. `job_log_url`
+  returns the fake's `Location` without following it, and the fake's 404 for a job the fake does not
+  know. `pr_edit` gets past gh's pull-request lookup, which does not ask for the classic-Projects
+  field GitHub refuses, and applies the edit. `pr_edit` with `attach` uploads each file to
+  `uploads.github.com` with the token, and rewrites the body's references in place, and a body that
+  nests images in a numbered list inside a `<details>` block keeps its structure and indents. When
+  an upload fails, gh uploads no later file, still applies the edit, and the result holds `pr_url`
+  and `pr_number`.
 
 ## Build and test
 

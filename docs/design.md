@@ -165,6 +165,13 @@ scopes:
 - A plugin's source is a uv package under `plugins/`, so one CI job covers it. The executables in
   its image may be written in any language.
 - The image-based plugin form is settled: the git and github plugins are built on it.
+- The github plugin's `pr_create` and `pr_edit` upload image and video attachments through gh's
+  `--attach`, each file confined to the grant's roots. The grant setting `GITHUB_PR_ATTACHMENTS`
+  governs them: they are on when a grant leaves it unset or sets it `on`, and refused under any
+  other value. A grant that allows them adds a root that holds the files, and `uploads.github.com`.
+  The plugin's image takes gh from its release tarball, pinned by its SHA-256, because Alpine's
+  `github-cli` package lacks `--attach`. `plugins/github/README.md` gives the detail under
+  "Attachments".
 
 ## The cage
 
@@ -344,6 +351,11 @@ are the design's, and `docs/runbooks/per-agent-instance.md` carries them as step
 - With a real credential and grants whose `GITHUB_REPOS` names one repository, the git plugin's
   `push` and the github plugin's `pr_view` succeed on that repository, and each is refused on a
   repository the token reaches that the list does not name.
+- With a real credential and `GITHUB_PR_ATTACHMENTS` on, the github plugin's `pr_edit` attaches a
+  PNG and an H.264 MP4 to a scratch pull request in a private organization repository, and both
+  render for the operator on the pull request's page. The agent writes both files itself, in a
+  worktree below the grant's root, so the check also shows that the cage reads the agent's own files
+  there. With the setting `off`, the same call is refused.
 
 The `S` checks need no counterpart on the agent's daemon: in a deployment, cages never run there.
 
@@ -379,6 +391,13 @@ The `S` checks need no counterpart on the agent's daemon: in a deployment, cages
   wildcard, so a grant that wants such a log names each storage host. Under a grant that names only
   `api.github.com`, `pr_checks` and `job_log_url` return a failed job's signed log URL instead, and
   the agent fetches the log itself. `plugins/github/README.md` gives the detail.
+- A file swapped for a symlink between the github plugin's check of an `attach` path and gh's open
+  of it uploads whatever the symlink then names. Inside the cage that includes files such as
+  `/proc/<pid>/environ`, which holds `GH_TOKEN`. Where the git and github grants carry the same
+  token, as `examples/instance.yaml` does, this adds no reach to the `.git/config` gap above: code
+  planted in a repository already reads a credentialed git cage's token. The operator accepted this
+  gap on 2026-10-17, on the condition that it is documented. Handing gh a path the agent cannot
+  swap, with the body's references rewritten to it, would close it.
 
 ## Decision directives
 

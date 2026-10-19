@@ -11,7 +11,7 @@ from collections.abc import Callable, Mapping, Sequence
 from email.message import Message
 from typing import IO, NotRequired, TypedDict
 
-from github_plugin import repos
+from github_plugin import attachments, repos
 
 REFUSAL_EXIT = 2
 REFUSAL_PREFIX = "github plugin refused: "
@@ -21,6 +21,7 @@ USER_AGENT = "agent-proxy-github-plugin"
 LOG_URL_TIMEOUT_SECONDS = 30
 REASON_BODY_CHARACTERS = 200
 FAILED_JOB_ID = re.compile(r"/actions/runs/\d+/job/(\d+)")
+PULL_REQUEST_URL = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)")
 
 
 class RefusalError(Exception):
@@ -37,12 +38,23 @@ class ScriptResult(TypedDict):
     stderr: str
 
 
+class PullRequestResult(ScriptResult):
+    pr_url: NotRequired[str]
+    pr_number: NotRequired[int]
+
+
+class AttachEntry(TypedDict):
+    path: str
+    alt: NotRequired[str]
+
+
 class CreateInput(TypedDict):
     repo: str
     base: str
     head: str
     title: str
     body: str
+    attach: NotRequired[list[AttachEntry]]
 
 
 class EditInput(TypedDict):
@@ -51,6 +63,7 @@ class EditInput(TypedDict):
     title: NotRequired[str]
     body: NotRequired[str]
     base: NotRequired[str]
+    attach: NotRequired[list[AttachEntry]]
 
 
 class ViewInput(TypedDict):
@@ -106,24 +119,25 @@ def _decimal(number: float) -> str:
     return str(int(number))
 
 
-def pr_create(arguments: CreateInput) -> ScriptResult:
-    """Open a pull request from head into base."""
-    return run_gh(
-        [
-            "pr",
-            "create",
-            "--repo",
-            arguments["repo"],
-            f"--base={arguments['base']}",
-            f"--head={arguments['head']}",
-            f"--title={arguments['title']}",
-            f"--body={arguments['body']}",
-        ]
-    )
+def pr_create(arguments: CreateInput) -> PullRequestResult:
+    """Open a pull request from head into base, with any attachments."""
+    args = [
+        "pr",
+        "create",
+        "--repo",
+        arguments["repo"],
+        f"--base={arguments['base']}",
+        f"--head={arguments['head']}",
+        f"--title={arguments['title']}",
+        f"--body={arguments['body']}",
+    ]
+    if "attach" in arguments:
+        args.extend(_attach_args(arguments["attach"]))
+    return _with_pull_request(run_gh(args))
 
 
-def pr_edit(arguments: EditInput) -> ScriptResult:
-    """Change a pull request's title, body, or base.
+def pr_edit(arguments: EditInput) -> PullRequestResult:
+    """Change a pull request's title, body, or base, or attach files to it.
 
     Each of the three in the input is passed, an empty string included.
     """
@@ -135,7 +149,38 @@ def pr_edit(arguments: EditInput) -> ScriptResult:
         args.append(f"--body={arguments['body']}")
     if "base" in arguments:
         args.append(f"--base={arguments['base']}")
-    return run_gh(args)
+    if "attach" in arguments:
+        args.extend(_attach_args(arguments["attach"]))
+    return _with_pull_request(run_gh(args))
+
+
+def _attach_args(entries: Sequence[AttachEntry]) -> list[str]:
+    """Return the --attach= items for entries, checked against the grant.
+
+    Raises:
+        RefusalError: the grant's setting or roots refuse attach, or an entry
+            fails a check.
+    """
+    pairs = [(entry["path"], entry.get("alt")) for entry in entries]
+    return attachments.attach_args(pairs, os.environ)
+
+
+def _with_pull_request(result: ScriptResult) -> PullRequestResult:
+    """Return result, adding pr_url and pr_number when stdout names a pull request.
+
+    stdout names one when its last non-empty line is the pull request's URL.
+    """
+    lines = [line.strip() for line in result["stdout"].splitlines() if line.strip()]
+    found = PULL_REQUEST_URL.fullmatch(lines[-1]) if lines else None
+    outcome: PullRequestResult = {
+        "exit_code": result["exit_code"],
+        "stdout": result["stdout"],
+        "stderr": result["stderr"],
+    }
+    if found is not None:
+        outcome["pr_url"] = found[0]
+        outcome["pr_number"] = int(found[1])
+    return outcome
 
 
 def pr_view(arguments: ViewInput) -> ScriptResult:

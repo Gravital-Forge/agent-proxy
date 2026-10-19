@@ -9,20 +9,36 @@
           "base": {"type": "string", "minLength": 1},
           "head": {"type": "string", "minLength": 1},
           "title": {"type": "string", "minLength": 1},
-          "body": {"type": "string"}
+          "body": {"type": "string"},
+          "attach": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {"type": "string", "pattern": "^/[^#]*$"},
+                "alt": {"type": "string", "pattern": "^[^#]*$"}
+              },
+              "required": ["path"],
+              "additionalProperties": false
+            }
+          }
         },
         "required": ["repo", "base", "head", "title", "body"],
         "additionalProperties": false
       },
       "credentials": [{"env": "GH_TOKEN"}],
-      "timeout": "60s",
+      "timeout": "10m",
       "executable": "/plugin/bin/pr_create",
       "output_schema": {
         "type": "object",
         "properties": {
           "exit_code": {"type": "integer"},
           "stdout": {"type": "string"},
-          "stderr": {"type": "string"}
+          "stderr": {"type": "string"},
+          "pr_url": {"type": "string"},
+          "pr_number": {"type": "integer"}
         },
         "required": ["exit_code", "stdout", "stderr"],
         "additionalProperties": false
@@ -37,21 +53,37 @@
           "pr_number": {"type": "integer", "minimum": 1},
           "title": {"type": "string"},
           "body": {"type": "string"},
-          "base": {"type": "string"}
+          "base": {"type": "string"},
+          "attach": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 50,
+            "items": {
+              "type": "object",
+              "properties": {
+                "path": {"type": "string", "pattern": "^/[^#]*$"},
+                "alt": {"type": "string", "pattern": "^[^#]*$"}
+              },
+              "required": ["path"],
+              "additionalProperties": false
+            }
+          }
         },
         "required": ["repo", "pr_number"],
-        "anyOf": [{"required": ["title"]}, {"required": ["body"]}, {"required": ["base"]}],
+        "anyOf": [{"required": ["title"]}, {"required": ["body"]}, {"required": ["base"]}, {"required": ["attach"]}],
         "additionalProperties": false
       },
       "credentials": [{"env": "GH_TOKEN"}],
-      "timeout": "60s",
+      "timeout": "10m",
       "executable": "/plugin/bin/pr_edit",
       "output_schema": {
         "type": "object",
         "properties": {
           "exit_code": {"type": "integer"},
           "stdout": {"type": "string"},
-          "stderr": {"type": "string"}
+          "stderr": {"type": "string"},
+          "pr_url": {"type": "string"},
+          "pr_number": {"type": "integer"}
         },
         "required": ["exit_code", "stdout", "stderr"],
         "additionalProperties": false

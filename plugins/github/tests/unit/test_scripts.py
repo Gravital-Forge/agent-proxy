@@ -76,6 +76,18 @@ def gh_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
+def attach_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Make tmp_path/root the one root, holding three files to attach."""
+    root = tmp_path / "root"
+    root.mkdir()
+    for name in ("demo.png", "demo.mp4", "upload-fails.png"):
+        (root / name).write_bytes(b"x")
+    monkeypatch.setenv("AGENT_PROXY_ROOTS", json.dumps([str(root)]))
+    monkeypatch.delenv("GITHUB_PR_ATTACHMENTS", raising=False)
+    return root
+
+
+@pytest.fixture
 def direct(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear the proxy variables, so urllib connects straight to API_URL."""
     for name in PROXY_VARIABLES:
@@ -254,6 +266,168 @@ def test_a_number_is_written_as_decimal_digits() -> None:
     result = scripts.pr_edit({"repo": "o/n", "pr_number": 5.0, "title": "t"})
 
     assert result == _echo("pr", "edit", "5", "--repo", "o/n", "--title=t")
+
+
+def test_pr_create_passes_each_attachment_after_the_other_flags(
+    attach_root: Path, gh_log: Path
+) -> None:
+    """Each attach entry is one --attach= item, in order, after every other flag."""
+    png, mp4 = attach_root / "demo.png", attach_root / "demo.mp4"
+    arguments = {
+        **SCRIPT_INPUTS["pr_create"],
+        "attach": [{"path": str(png)}, {"path": str(mp4)}],
+    }
+
+    scripts.pr_create(arguments)
+
+    assert _calls(gh_log) == [
+        [
+            "pr",
+            "create",
+            "--repo",
+            "o/n",
+            "--base=main",
+            "--head=task/x",
+            "--title=t",
+            "--body=b",
+            f"--attach={png}",
+            f"--attach={mp4}",
+        ]
+    ]
+
+
+def test_pr_create_passes_an_attachments_alt_after_a_hash(
+    attach_root: Path, gh_log: Path
+) -> None:
+    """An entry's alt follows its path after a '#', in the one --attach= item."""
+    png = attach_root / "demo.png"
+    arguments = {
+        **SCRIPT_INPUTS["pr_create"],
+        "attach": [{"path": str(png), "alt": "The demo"}],
+    }
+
+    scripts.pr_create(arguments)
+
+    assert _calls(gh_log)[0][-1] == f"--attach={png}#The demo"
+
+
+def test_pr_edit_passes_each_attachment_after_the_other_flags(
+    attach_root: Path, gh_log: Path
+) -> None:
+    """The --attach= items follow the number, --repo, and each field given."""
+    png, mp4 = attach_root / "demo.png", attach_root / "demo.mp4"
+
+    scripts.pr_edit(
+        {
+            "repo": "o/n",
+            "pr_number": 5,
+            "body": "b",
+            "attach": [{"path": str(png)}, {"path": str(mp4)}],
+        }
+    )
+
+    assert _calls(gh_log) == [
+        [
+            "pr",
+            "edit",
+            "5",
+            "--repo",
+            "o/n",
+            "--body=b",
+            f"--attach={png}",
+            f"--attach={mp4}",
+        ]
+    ]
+
+
+def test_pr_edit_with_attach_alone_passes_no_other_field(
+    attach_root: Path, gh_log: Path
+) -> None:
+    """An edit whose only change is attach passes no body, title, or base."""
+    png = attach_root / "demo.png"
+
+    scripts.pr_edit({"repo": "o/n", "pr_number": 5, "attach": [{"path": str(png)}]})
+
+    assert _calls(gh_log) == [["pr", "edit", "5", "--repo", "o/n", f"--attach={png}"]]
+
+
+@pytest.mark.parametrize("setting", ["off", "yes"])
+@pytest.mark.parametrize("name", ["pr_create", "pr_edit"])
+def test_a_call_without_attach_runs_under_any_setting(
+    monkeypatch: pytest.MonkeyPatch, gh_log: Path, name: str, setting: str
+) -> None:
+    """GITHUB_PR_ATTACHMENTS governs attach alone, so a call without it runs."""
+    monkeypatch.setenv("GITHUB_PR_ATTACHMENTS", setting)
+
+    result = scripts.run_script(name, json.dumps(SCRIPT_INPUTS[name]).encode())
+
+    assert result["exit_code"] == 0
+    assert len(_calls(gh_log)) == 1
+
+
+def test_run_script_refuses_attach_with_the_setting_off_before_gh_runs(
+    monkeypatch: pytest.MonkeyPatch, attach_root: Path, gh_log: Path
+) -> None:
+    """With the setting off, a call with attach is the refusal, and gh never runs."""
+    monkeypatch.setenv("GITHUB_PR_ATTACHMENTS", "off")
+    arguments = {
+        **SCRIPT_INPUTS["pr_create"],
+        "attach": [{"path": str(attach_root / "demo.png")}],
+    }
+
+    result = scripts.run_script("pr_create", json.dumps(arguments).encode())
+
+    assert result == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": "github plugin refused: "
+        "attach is off: GITHUB_PR_ATTACHMENTS is 'off'\n",
+    }
+    assert not gh_log.exists()
+
+
+def test_pr_edit_adds_the_pull_request_its_last_stdout_line_names() -> None:
+    """A last non-empty stdout line that is a pull request URL adds URL and number."""
+    result = scripts.pr_edit({"repo": "o/n", "pr_number": 5, "title": "opened"})
+
+    assert result == {
+        "exit_code": 0,
+        "stdout": "https://github.com/o/n/pull/5\n\n",
+        "stderr": "",
+        "pr_url": "https://github.com/o/n/pull/5",
+        "pr_number": 5,
+    }
+
+
+@pytest.mark.parametrize("name", ["pr_create", "pr_edit"])
+def test_a_failed_upload_still_returns_the_pull_request(
+    attach_root: Path, name: str
+) -> None:
+    """A failed upload's exit 1 still carries the pull request's URL and number."""
+    fails = attach_root / "upload-fails.png"
+    entries = [
+        {"path": str(attach_root / "demo.png")},
+        {"path": str(fails)},
+        {"path": str(attach_root / "demo.mp4")},
+    ]
+
+    result = scripts.ACTIONS[name]({**SCRIPT_INPUTS[name], "attach": entries})
+
+    assert result == {
+        "exit_code": 1,
+        "stdout": "https://github.com/o/n/pull/5\n",
+        "stderr": f"could not upload {fails}: rate limited; wait and try again\n",
+        "pr_url": "https://github.com/o/n/pull/5",
+        "pr_number": 5,
+    }
+
+
+@pytest.mark.parametrize("name", ["pr_create", "pr_edit"])
+def test_a_stdout_without_a_pull_request_url_adds_neither(name: str) -> None:
+    """A stdout with no pull request URL last adds no pr_url or pr_number."""
+    result = scripts.ACTIONS[name](SCRIPT_INPUTS[name])
+
+    assert ("pr_url" in result, "pr_number" in result) == (False, False)
 
 
 def test_pr_view_asks_for_the_fields_given() -> None:
