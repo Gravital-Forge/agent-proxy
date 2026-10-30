@@ -165,7 +165,9 @@ To watch a worker, or to act on one that is stuck:
 2. Open the pull request from `task/poc` to `main`. Call `github_pr_create` with `base="main"` and
    `head="task/poc"`, or open it in the GitHub UI. **Pass:** the pull request lists on GitHub with
    base `main`.
-3. Merge that pull request with a merge commit. **Pass:** `main`'s log carries the merge commit.
+3. The operator merges that pull request with a merge commit, as a repository admin. The
+   `protected-branches` ruleset allows only squash merges into `main`, so the merge bypasses it.
+   **Pass:** `main`'s log carries the merge commit.
 4. When the operator declares the proof of concept done, remove the project worktree with
    `/cleanup-worktrees`. The branch `task/poc` stays. **Pass:**
    `<workspace root>/projects/agent-proxy-poc` no longer exists.
