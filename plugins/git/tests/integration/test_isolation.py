@@ -258,8 +258,9 @@ def test_raw_git_in_the_plugin_image_runs_each_planted_program(
     """Past git-cage and the isolation, the image's git fires each driver canary.
 
     So the planted programs and their triggers work, and their silence under
-    the actions is the isolation's doing. The .lfsconfig canary stays silent
-    even here: git LFS reads no custom transfer from .lfsconfig.
+    the actions is the isolation's doing. The .lfsconfig canary is no part of
+    this test: the standalone agent in .git/config outranks the one in
+    .lfsconfig.
     """
     peer = lfs_remote_pair.peer
     _commit_canary_files(peer)
