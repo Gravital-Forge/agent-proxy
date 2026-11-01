@@ -25,12 +25,14 @@ from harness import (
     RemotePair,
     RootMode,
     RunAction,
+    RunInImage,
     host_git,
 )
 
 TEST_LABELS = {"agent-proxy.test": "1"}
 PLUGIN_DIR = Path(__file__).parents[2]
 PLUGIN_IMAGE_TAG = "apx-git-plugin:it"
+PLUGIN_PYTHONPATH = "/plugin"
 FIXTURE_IMAGE_DIR = Path(__file__).parents[1] / "fixture-image"
 FIXTURE_IMAGE_TAG = "apx-git-fixture:it"
 VERIFIER_DIR = Path(__file__).parents[4] / "core" / "verifier"
@@ -191,6 +193,34 @@ def run_action(
                 max_cages=MAX_CAGES,
             )
         )
+
+    return run
+
+
+@pytest.fixture
+def run_in_plugin_image(
+    docker_client: DockerClient, plugin_manifest: Manifest
+) -> RunInImage:
+    """A runner of a command in the plugin image, bypassing git-cage and the cage.
+
+    The container runs as the image's root with no network, root bound at its
+    own path and /plugin on PYTHONPATH, so a command can import git_plugin.
+    The runner raises docker's ContainerError when the command exits non-zero.
+    """
+
+    def run(root: Path, command: Sequence[str]) -> str:
+        output = docker_client.containers.run(
+            PLUGIN_IMAGE_TAG,
+            list(command),
+            environment={"PYTHONPATH": PLUGIN_PYTHONPATH},
+            mounts=[
+                docker.types.Mount(target=str(root), source=str(root), type="bind")
+            ],
+            network_mode="none",
+            labels=TEST_LABELS,
+            remove=True,
+        )
+        return output.decode()
 
     return run
 

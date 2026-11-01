@@ -385,8 +385,9 @@ def push(arguments: RepoInput, roots: Sequence[str]) -> ScriptResult:
     The allowed prefixes come from GIT_BRANCH_PREFIXES in the environment,
     which the grant's env sets; they are read before git runs. The refspec
     names both sides and carries no '+', so no push refspec or mirror setting
-    in the repository's config can force the update. A git failure before the
-    ref push is returned as the result.
+    in the repository's config can force the update. Once the ref push
+    succeeds, the branch tracks origin's branch of the same name. A git
+    failure before the ref push is returned as the result.
 
     Raises:
         RefusalError: GIT_BRANCH_PREFIXES names no prefix, the current branch
@@ -401,7 +402,32 @@ def push(arguments: RepoInput, roots: Sequence[str]) -> ScriptResult:
     except _GitFailedError as failure:
         return failure.result
     ref = f"refs/heads/{branch}"
-    return run_git(repo, roots, ["push", "-u", "origin", f"{ref}:{ref}"])
+    pushed = run_git(repo, roots, ["push", "origin", f"{ref}:{ref}"])
+    if pushed["exit_code"] != 0:
+        return pushed
+    return _track_upstream(repo, roots, branch, pushed)
+
+
+def _track_upstream(
+    repo: str, roots: Sequence[str], branch: str, pushed: ScriptResult
+) -> ScriptResult:
+    """Make branch track origin's branch of its name, in repo's real config.
+
+    git push -u would write the tracking to the action's scratch config,
+    which no later action reads. pushed is the push's result; a failed write
+    becomes its exit code, its stderr following the push's.
+    """
+    config = cage.real_git_dirs(repo).common_dir / "config"
+    write = ["config", "--file", str(config), "--no-includes"]
+    for variable, value in (("remote", "origin"), ("merge", f"refs/heads/{branch}")):
+        written = run_git(repo, roots, [*write, f"branch.{branch}.{variable}", value])
+        if written["exit_code"] != 0:
+            return {
+                "exit_code": written["exit_code"],
+                "stdout": pushed["stdout"],
+                "stderr": pushed["stderr"] + written["stderr"],
+            }
+    return pushed
 
 
 def _current_branch(repo: str, roots: Sequence[str]) -> str:

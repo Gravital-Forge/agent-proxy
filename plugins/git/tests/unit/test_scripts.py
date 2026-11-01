@@ -1113,6 +1113,38 @@ def test_push_returns_a_failed_lfs_push_and_pushes_no_branch(
     assert _git(origin, "for-each-ref") == ""
 
 
+def test_push_that_fails_writes_no_upstream(
+    repo: Path, roots: list[str], origin: Path
+) -> None:
+    """A push git rejects leaves the repository's config with no branch tracking."""
+    _commit_on_branch(repo, "task/p")
+    shutil.rmtree(origin)
+
+    result = scripts.push({"repo": str(repo)}, roots)
+
+    assert result["exit_code"] != 0
+    assert "[branch " not in (repo / ".git" / "config").read_text()
+
+
+def test_push_returns_a_failed_upstream_write_with_the_push_streams(
+    repo: Path, roots: list[str], origin: Path
+) -> None:
+    """When the config cannot be written after the push, the result says so.
+
+    The branch still reaches origin, and the push's own streams stay in the
+    result.
+    """
+    pushed = _commit_on_branch(repo, "task/p")
+    (repo / ".git" / "config.lock").touch()
+
+    result = scripts.push({"repo": str(repo)}, roots)
+
+    assert result["exit_code"] != 0
+    assert "could not lock config file" in result["stderr"]
+    assert "task/p -> task/p" in result["stderr"]
+    assert _git(origin, "rev-parse", "refs/heads/task/p") == pushed
+
+
 def test_push_in_a_missing_directory_returns_gits_error(
     tmp_path: Path, roots: list[str]
 ) -> None:
