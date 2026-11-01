@@ -142,6 +142,8 @@ def _completed_git(
 def _isolated_environ(repo: str) -> Mapping[str, str]:
     """Return the environment of the action's isolation, built at its first call.
 
+    Inside run_script the isolation is the input repo's, whatever repo is
+    passed here, so every git call of an action runs on that one repository.
     Outside run_script, each call builds an isolation of its own for repo.
     """
     build = _ACTION_ISOLATION.get(None)
