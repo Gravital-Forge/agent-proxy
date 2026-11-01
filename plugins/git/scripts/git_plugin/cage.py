@@ -64,6 +64,9 @@ TRANSPORT_KEYS = frozenset(
         ("branch", "merge"),
     }
 )
+# Extension keys as git lists them, in lower case.
+REF_STORAGE = "extensions.refstorage"
+WORKTREE_CONFIG = "extensions.worktreeconfig"
 COMMITTER_FROM_AUTHOR = (
     ("GIT_COMMITTER_NAME", "GIT_AUTHOR_NAME"),
     ("GIT_COMMITTER_EMAIL", "GIT_AUTHOR_EMAIL"),
@@ -229,12 +232,14 @@ def build_isolation(
     name, so a test can replace it.
 
     Raises:
-        RefusalError: repo's .git file names no git directory, or a file
-            the real git directories are read from, or the real config,
-            cannot be read.
+        RefusalError: repo is a directory with no .git, its .git file names
+            no git directory, a file the real git directories are read
+            from or the real config cannot be read, or repo has a shape
+            check_shape refuses.
     """
     dirs = real_git_dirs(repo)
     entries = real_config_entries(dirs.common_dir, environ)
+    check_shape(repo, dirs, entries)
     scratch = _make_scratch(dirs, entries, scratch_parent)
     env = dict(environ)
     env.pop("GIT_ALLOW_PROTOCOL", None)
@@ -256,13 +261,19 @@ def real_git_dirs(repo: str) -> GitDirs:
     <repo>/.git is the git dir unless it is a file; a .git file names the git
     dir after 'gitdir: ', relative to repo. The git dir's commondir file names
     the common dir, relative to the git dir; with no such file the git dir is
-    the common dir.
+    the common dir. A repo that does not exist gets <repo>/.git, for git to
+    report the missing directory.
 
     Raises:
-        RefusalError: the .git file names no git directory, or a file
-            cannot be read.
+        RefusalError: repo is a directory with no .git, the .git file
+            names no git directory, or a file cannot be read.
     """
     dot_git = Path(repo) / ".git"
+    if Path(repo).is_dir() and not dot_git.exists():
+        raise RefusalError(
+            f"{repo} has no .git; "
+            "the repository path must be the top level of a checkout"
+        )
     git_dir = dot_git
     if dot_git.is_file():
         named = _read_path_file(dot_git)
@@ -320,6 +331,48 @@ def real_config_entries(
             f"the repository's config {config} could not be read: {reason}"
         )
     return [_config_entry(record) for record in completed.stdout.split(b"\0") if record]
+
+
+def check_shape(repo: str, dirs: GitDirs, entries: Sequence[ConfigEntry]) -> None:
+    """Return if repo has a shape the isolation reads correctly.
+
+    entries are the real config's. The scratch config carries none of the
+    real config's extensions, so each one the isolation does not reproduce
+    is refused: refStorage other than files, and every extension but
+    worktreeConfig, whose config.worktree the isolation leaves unread by
+    design. A .gitmodules counts whether git tracks it or not.
+
+    Raises:
+        RefusalError: repo is a shallow clone, uses reftable refs, has
+            submodules, or sets an extension the isolation does not support.
+    """
+    if (dirs.common_dir / "shallow").exists():
+        raise RefusalError(
+            f"{repo} is a shallow clone; the git plugin does not support shallow clones"
+        )
+    reftable = RefusalError(
+        f"{repo} uses the reftable ref format; the git plugin supports only files"
+    )
+    if (dirs.common_dir / "reftable").exists():
+        raise reftable
+    for key, value in entries:
+        name = key.lower()
+        if name == REF_STORAGE and value is not None and value.startswith("reftable"):
+            raise reftable
+        if name.startswith("extensions.") and not _supported_extension(name, value):
+            raise RefusalError(
+                f"{repo} sets {name}, an extension the git plugin does not support"
+            )
+    if os.path.lexists(Path(repo) / ".gitmodules") or any(
+        key.lower().startswith("submodule.") for key, _ in entries
+    ):
+        raise RefusalError(
+            f"{repo} has submodules; the git plugin does not support submodules"
+        )
+
+
+def _supported_extension(name: str, value: str | None) -> bool:
+    return name == WORKTREE_CONFIG or (name == REF_STORAGE and value == "files")
 
 
 def _without_git_variables(environ: Mapping[str, str]) -> dict[str, str]:

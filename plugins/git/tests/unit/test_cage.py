@@ -38,6 +38,13 @@ NO_KEY_REFUSAL = (
     "the grant mounts the key there as a file credential"
 )
 SHAPE_REFUSAL = "AGENT_PROXY_ROOTS must be a JSON array of absolute paths, got {!r}"
+NOT_TOP_LEVEL = (
+    "{} has no .git; the repository path must be the top level of a checkout"
+)
+SHALLOW = "{} is a shallow clone; the git plugin does not support shallow clones"
+REFTABLE = "{} uses the reftable ref format; the git plugin supports only files"
+SUBMODULES = "{} has submodules; the git plugin does not support submodules"
+EXTENSION = "{} sets {}, an extension the git plugin does not support"
 NO_REPOS_STDERR = (
     "git plugin refused: "
     "GITHUB_REPOS is not set or names no repository; the grant's env sets it\n"
@@ -652,17 +659,147 @@ def test_build_isolation_resolves_a_relative_gitdir_against_the_repo(
     assert env["GIT_DIR"] == str(checkout / ".git")
 
 
-def test_build_isolation_names_the_missing_git_dir_of_a_plain_directory(
+@pytest.mark.parametrize("place", ["plain", "subdirectory"])
+def test_build_isolation_refuses_a_directory_that_is_no_checkouts_top_level(
+    checkout: Path, scratch_parent: Path, tmp_path: Path, place: str
+) -> None:
+    """A directory with no .git, even one inside a checkout, is refused."""
+    directory = tmp_path / "plain" if place == "plain" else checkout / "sub"
+    directory.mkdir()
+
+    with pytest.raises(cage.RefusalError) as refused:
+        _build(directory, scratch_parent)
+
+    assert str(refused.value) == NOT_TOP_LEVEL.format(directory)
+    assert list(scratch_parent.iterdir()) == []
+
+
+def test_build_isolation_leaves_a_missing_directory_for_git_to_report(
     tmp_path: Path, scratch_parent: Path
 ) -> None:
-    """A directory with no .git gets <repo>/.git as its git dir, for git to report."""
-    plain = tmp_path / "plain"
-    plain.mkdir()
+    """A repository path that does not exist gets <repo>/.git, and git's own error."""
+    missing = tmp_path / "missing"
 
-    env = _build(plain, scratch_parent)
+    env = _build(missing, scratch_parent)
 
-    assert env["GIT_DIR"] == str(plain / ".git")
-    assert _scratch_entries(env) == _base_entries(plain / ".git")
+    assert env["GIT_DIR"] == str(missing / ".git")
+
+
+def _set_real(checkout: Path, key: str, value: str) -> None:
+    """Set key in checkout's real config file, which git reads as a plain file."""
+    config = checkout / ".git" / "config"
+    _host_git(checkout.parent, "config", "--file", str(config), key, value)
+
+
+def test_build_isolation_refuses_a_shallow_clone(
+    checkout: Path, scratch_parent: Path
+) -> None:
+    """A shallow file in the common dir marks a shallow clone, which is refused."""
+    (checkout / ".git" / "shallow").write_text("0" * 40 + "\n")
+
+    with pytest.raises(cage.RefusalError) as refused:
+        _build(checkout, scratch_parent)
+
+    assert str(refused.value) == SHALLOW.format(checkout)
+    assert list(scratch_parent.iterdir()) == []
+
+
+def test_build_isolation_refuses_a_linked_worktree_of_a_shallow_clone(
+    checkout: Path, scratch_parent: Path, tmp_path: Path
+) -> None:
+    """The shallow file is read from the common dir, not the worktree's git dir."""
+    worktree = tmp_path / "root" / "wt"
+    _host_git(checkout, "worktree", "add", "-q", "--orphan", str(worktree))
+    (checkout / ".git" / "shallow").write_text("0" * 40 + "\n")
+
+    with pytest.raises(cage.RefusalError) as refused:
+        _build(worktree, scratch_parent)
+
+    assert str(refused.value) == SHALLOW.format(worktree)
+
+
+@pytest.mark.parametrize("value", ["reftable", "reftable:///elsewhere"])
+def test_build_isolation_refuses_a_reftable_ref_storage_setting(
+    checkout: Path, scratch_parent: Path, value: str
+) -> None:
+    """extensions.refStorage naming reftable in the real config is refused."""
+    _set_real(checkout, "extensions.refStorage", value)
+
+    with pytest.raises(cage.RefusalError) as refused:
+        _build(checkout, scratch_parent)
+
+    assert str(refused.value) == REFTABLE.format(checkout)
+
+
+def test_build_isolation_refuses_a_reftable_directory(
+    checkout: Path, scratch_parent: Path
+) -> None:
+    """A reftable/ directory in the common dir is refused whatever the config says."""
+    (checkout / ".git" / "reftable").mkdir()
+
+    with pytest.raises(cage.RefusalError) as refused:
+        _build(checkout, scratch_parent)
+
+    assert str(refused.value) == REFTABLE.format(checkout)
+
+
+def test_build_isolation_refuses_a_gitmodules_file(
+    checkout: Path, scratch_parent: Path
+) -> None:
+    """A .gitmodules in the working tree is refused, tracked or not."""
+    (checkout / ".gitmodules").write_text('[submodule "s"]\n\tpath = s\n')
+
+    with pytest.raises(cage.RefusalError) as refused:
+        _build(checkout, scratch_parent)
+
+    assert str(refused.value) == SUBMODULES.format(checkout)
+
+
+def test_build_isolation_refuses_a_submodule_config_entry(
+    checkout: Path, scratch_parent: Path
+) -> None:
+    """A submodule.* key in the real config is refused."""
+    _set_real(checkout, "submodule.s.url", "https://github.com/octo/s.git")
+
+    with pytest.raises(cage.RefusalError) as refused:
+        _build(checkout, scratch_parent)
+
+    assert str(refused.value) == SUBMODULES.format(checkout)
+
+
+@pytest.mark.parametrize(
+    ("text", "key"),
+    [
+        ("[extensions]\n\tobjectFormat = sha256\n", "extensions.objectformat"),
+        ("[Extensions]\n\tPartialClone = origin\n", "extensions.partialclone"),
+        ("[extensions]\n\tnoop\n", "extensions.noop"),
+        ("[extensions]\n\trefStorage = files:///elsewhere\n", "extensions.refstorage"),
+    ],
+    ids=["object-format", "partial-clone-any-case", "unknown", "ref-storage-path"],
+)
+def test_build_isolation_refuses_an_extension_it_does_not_allow(
+    checkout: Path, scratch_parent: Path, text: str, key: str
+) -> None:
+    """An extensions.* key beyond files refStorage and worktreeConfig is refused."""
+    with (checkout / ".git" / "config").open("a") as config:
+        config.write(text)
+
+    with pytest.raises(cage.RefusalError) as refused:
+        _build(checkout, scratch_parent)
+
+    assert str(refused.value) == EXTENSION.format(checkout, key)
+
+
+def test_build_isolation_allows_files_ref_storage_and_worktree_config(
+    checkout: Path, scratch_parent: Path
+) -> None:
+    """The isolation supports refStorage = files and worktreeConfig."""
+    with (checkout / ".git" / "config").open("a") as config:
+        config.write("[Extensions]\n\tRefStorage = files\n\tworktreeConfig = true\n")
+
+    env = _build(checkout, scratch_parent)
+
+    assert Path(env["GIT_COMMON_DIR"]).parent == scratch_parent
 
 
 def test_build_isolation_keeps_quoted_names_and_values_whole(
