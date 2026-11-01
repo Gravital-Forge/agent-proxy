@@ -2,6 +2,7 @@ import secrets
 import shlex
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 import docker
@@ -40,7 +41,8 @@ ROOT_USER = "0:0"
 OTHER_USER = "1000:1000"
 AUTH_SERVER_PATH = Path(__file__).with_name("auth_server.py")
 AUTH_ALIAS = "auth"
-AUTH_START_SECONDS = 30
+GIT_DAEMON_ALIAS = "git-remote"
+SERVER_START_SECONDS = 30
 
 
 @pytest.fixture(autouse=True)
@@ -291,10 +293,14 @@ def _run_fixture(
 
 
 @pytest.fixture
-def remote_pair(tmp_path: Path) -> RemotePair:
+def remote_pair(
+    docker_client: DockerClient, fixture_image: str, cage_network: str, tmp_path: Path
+) -> Iterator[RemotePair]:
     """A bare remote, a clone work that pushed main, and a clone peer, in one root.
 
-    work's origin is the plain path of the remote, and both clones carry an identity.
+    A git daemon on the cage network serves the remote, and work's origin is
+    its git:// URL, which only a cage reaches. peer's origin is the plain path
+    of the remote, for the host's git. Both clones carry an identity.
     """
     root = tmp_path / "pair-root"
     root.mkdir()
@@ -314,17 +320,23 @@ def remote_pair(tmp_path: Path) -> RemotePair:
     host_git(pair.work, "push", "-q", "-u", "origin", "main")
     host_git(root, "clone", "-q", str(pair.remote), str(pair.peer))
     _set_identity(pair.peer)
-    return pair
+    host_git(pair.work, "remote", "set-url", "origin", _daemon_url(pair))
+    with _git_daemon(docker_client, fixture_image, cage_network, pair):
+        yield pair
 
 
 @pytest.fixture
 def lfs_remote_pair(
-    docker_client: DockerClient, fixture_image: str, tmp_path: Path
-) -> RemotePair:
+    docker_client: DockerClient, fixture_image: str, cage_network: str, tmp_path: Path
+) -> Iterator[RemotePair]:
     """A remote pair whose work committed a 2 KiB big.bin tracked by git LFS.
 
     The fixture image builds it as uid 0, so the files are the host user's.
     peer is cloned with smudging skipped, so its big.bin is an LFS pointer.
+    A git daemon serves the remote's refs, and both clones' origin is its
+    git:// URL. Each clone's untracked, excluded .lfsconfig sets lfs.url to
+    the remote's file:// URL, so git LFS copies objects to and from the
+    remote's lfs/objects with no server.
     """
     root = tmp_path / "lfs-root"
     root.mkdir()
@@ -337,6 +349,13 @@ def lfs_remote_pair(
     remote = shlex.quote(str(pair.remote))
     work = shlex.quote(str(pair.work))
     peer = shlex.quote(str(pair.peer))
+    daemon_url = shlex.quote(_daemon_url(pair))
+    lfs_url = shlex.quote(f"file://{pair.remote}")
+    point_at_daemon = [
+        f"git remote set-url origin {daemon_url}",
+        f"git config --file .lfsconfig lfs.url {lfs_url}",
+        "echo .lfsconfig >> .git/info/exclude",
+    ]
     _run_fixture(
         docker_client,
         fixture_image,
@@ -358,12 +377,15 @@ def lfs_remote_pair(
                 "git lfs push origin main",
                 "git push -q -u origin main",
                 f"GIT_LFS_SKIP_SMUDGE=1 git clone -q {remote} {peer}",
+                *point_at_daemon,
                 f"cd {peer}",
                 "git lfs install --local",
+                *point_at_daemon,
             ]
         ),
     )
-    return pair
+    with _git_daemon(docker_client, fixture_image, cage_network, pair):
+        yield pair
 
 
 @pytest.fixture
@@ -386,10 +408,52 @@ def auth_server(
         labels=TEST_LABELS,
     )
     try:
-        _wait_for_ready(container)
+        _wait_for_log(container, b"READY")
         yield container
     finally:
         container.remove(force=True)
+
+
+@contextmanager
+def _git_daemon(
+    client: DockerClient, image: str, network: str, pair: RemotePair
+) -> Iterator[None]:
+    """Serve pair's remote over git://, as GIT_DAEMON_ALIAS on network, until exit.
+
+    The daemon sees only the remote, bound at its own path, and accepts an
+    anonymous push.
+    """
+    remote = str(pair.remote)
+    container = client.containers.run(
+        image,
+        [
+            "git",
+            "daemon",
+            "--reuseaddr",
+            "--verbose",
+            "--export-all",
+            "--enable=receive-pack",
+            f"--base-path={pair.root}",
+            remote,
+        ],
+        detach=True,
+        mounts=[docker.types.Mount(target=remote, source=remote, type="bind")],
+        network=network,
+        networking_config={
+            network: client.api.create_endpoint_config(aliases=[GIT_DAEMON_ALIAS])
+        },
+        labels=TEST_LABELS,
+    )
+    try:
+        _wait_for_log(container, b"Ready to rumble")
+        yield
+    finally:
+        container.remove(force=True)
+
+
+def _daemon_url(pair: RemotePair) -> str:
+    """Return the git:// URL at which _git_daemon serves pair's remote."""
+    return f"git://{GIT_DAEMON_ALIAS}/{pair.remote.relative_to(pair.root)}"
 
 
 def _set_identity(repo: Path) -> None:
@@ -398,17 +462,17 @@ def _set_identity(repo: Path) -> None:
     host_git(repo, "config", "user.email", FIXTURE_EMAIL)
 
 
-def _wait_for_ready(container: Container) -> None:
-    """Return once the server's log holds READY.
+def _wait_for_log(container: Container, marker: bytes) -> None:
+    """Return once the server's log holds marker.
 
     Raises:
-        TimeoutError: READY did not appear within AUTH_START_SECONDS.
+        TimeoutError: marker did not appear within SERVER_START_SECONDS.
     """
-    deadline = time.monotonic() + AUTH_START_SECONDS
-    while b"READY" not in container.logs():
+    deadline = time.monotonic() + SERVER_START_SECONDS
+    while marker not in container.logs():
         if time.monotonic() > deadline:
             raise TimeoutError(
-                f"the auth server printed no READY in {AUTH_START_SECONDS}s; "
+                f"the server printed no {marker!r} in {SERVER_START_SECONDS}s; "
                 f"its log: {container.logs()!r}"
             )
         time.sleep(0.1)

@@ -46,6 +46,12 @@ def _push_from_peer(pair: RemotePair) -> str:
     return host_git(pair.peer, "rev-parse", "HEAD")
 
 
+def _point_lfs_clone_at(repo: Path, url: str) -> None:
+    """Set repo's origin to url and drop its .lfsconfig, so git LFS dials url too."""
+    host_git(repo, "remote", "set-url", "origin", url)
+    (repo / ".lfsconfig").unlink()
+
+
 def _run_with_token(
     run_action: RunAction,
     name: str,
@@ -265,7 +271,7 @@ def test_credential_helper_answers_the_servers_challenge(
 ) -> None:
     """Both git and git LFS send GH_TOKEN to a listed server that answers 401."""
     peer = lfs_remote_pair.peer
-    host_git(peer, "remote", "set-url", "origin", LISTED_URL)
+    _point_lfs_clone_at(peer, LISTED_URL)
 
     for name in ("fetch", "lfs_fetch"):
         outcome = _run_with_token(run_action, name, peer, lfs_remote_pair.root, LISTED)
@@ -312,7 +318,7 @@ def test_lfs_pull_sends_the_token_to_a_listed_remote(
 ) -> None:
     """An LFS pull from a listed remote sends GH_TOKEN for the batch request."""
     peer = lfs_remote_pair.peer
-    host_git(peer, "remote", "set-url", "origin", LISTED_URL)
+    _point_lfs_clone_at(peer, LISTED_URL)
 
     outcome = _run_with_token(
         run_action, "lfs_pull", peer, lfs_remote_pair.root, LISTED
@@ -349,7 +355,7 @@ def test_an_lfs_action_refuses_an_unlisted_remote(
 ) -> None:
     """An LFS origin outside GITHUB_REPOS gets no token, and the refusal names it."""
     peer = lfs_remote_pair.peer
-    host_git(peer, "remote", "set-url", "origin", UNLISTED_URL)
+    _point_lfs_clone_at(peer, UNLISTED_URL)
 
     outcome = _run_with_token(run_action, name, peer, lfs_remote_pair.root, LISTED)
 
@@ -388,7 +394,7 @@ def test_lfs_fetch_refuses_a_request_with_no_path(
 ) -> None:
     """A repository's useHttpPath=false withholds the path, and LFS gets no token."""
     peer = lfs_remote_pair.peer
-    host_git(peer, "remote", "set-url", "origin", LISTED_URL)
+    _point_lfs_clone_at(peer, LISTED_URL)
     host_git(peer, "config", "credential.http://auth:8080.useHttpPath", "false")
 
     outcome = _run_with_token(
