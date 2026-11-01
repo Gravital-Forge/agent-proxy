@@ -15,6 +15,7 @@ SHALLOW = "{} is a shallow clone; the git plugin does not support shallow clones
 REFTABLE = "{} uses the reftable ref format; the git plugin supports only files"
 SUBMODULES = "{} has submodules; the git plugin does not support submodules"
 EXTENSION = "{{}} sets {}, an extension the git plugin does not support"
+PARTIAL = "{} is a partial clone; the git plugin does not support partial clones"
 
 
 def _shallow_clone(host_repo: Path) -> Path:
@@ -85,13 +86,7 @@ def _subdirectory(host_repo: Path) -> Path:
             EXTENSION.format("extensions.objectformat"),
             id="sha256-status",
         ),
-        pytest.param(
-            _partial_clone,
-            "fetch",
-            {},
-            EXTENSION.format("extensions.partialclone"),
-            id="partial-clone-fetch",
-        ),
+        pytest.param(_partial_clone, "fetch", {}, PARTIAL, id="partial-clone-fetch"),
         pytest.param(_subdirectory, "status", {}, NOT_TOP_LEVEL, id="subdir-status"),
         pytest.param(
             _subdirectory, "add", {"files": ["a.txt"]}, NOT_TOP_LEVEL, id="subdir-add"

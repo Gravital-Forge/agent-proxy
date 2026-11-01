@@ -45,6 +45,11 @@ SHALLOW = "{} is a shallow clone; the git plugin does not support shallow clones
 REFTABLE = "{} uses the reftable ref format; the git plugin supports only files"
 SUBMODULES = "{} has submodules; the git plugin does not support submodules"
 EXTENSION = "{} sets {}, an extension the git plugin does not support"
+REF_STORE = (
+    "{} sets extensions.refstorage to a ref store other than files; "
+    "the git plugin supports only files"
+)
+PARTIAL = "{} is a partial clone; the git plugin does not support partial clones"
 NO_REPOS_STDERR = (
     "git plugin refused: "
     "GITHUB_REPOS is not set or names no repository; the grant's env sets it\n"
@@ -773,9 +778,8 @@ def test_build_isolation_refuses_a_submodule_config_entry(
         ("[extensions]\n\tobjectFormat = sha256\n", "extensions.objectformat"),
         ("[Extensions]\n\tPartialClone = origin\n", "extensions.partialclone"),
         ("[extensions]\n\tnoop\n", "extensions.noop"),
-        ("[extensions]\n\trefStorage = files:///elsewhere\n", "extensions.refstorage"),
     ],
-    ids=["object-format", "partial-clone-any-case", "unknown", "ref-storage-path"],
+    ids=["object-format", "partial-clone-any-case", "unknown"],
 )
 def test_build_isolation_refuses_an_extension_it_does_not_allow(
     checkout: Path, scratch_parent: Path, text: str, key: str
@@ -788,6 +792,45 @@ def test_build_isolation_refuses_an_extension_it_does_not_allow(
         _build(checkout, scratch_parent)
 
     assert str(refused.value) == EXTENSION.format(checkout, key)
+
+
+def test_build_isolation_refuses_a_ref_store_other_than_files(
+    checkout: Path, scratch_parent: Path
+) -> None:
+    """A refStorage naming a files store at some path is refused for its value."""
+    _set_real(checkout, "extensions.refStorage", "files:///elsewhere")
+
+    with pytest.raises(cage.RefusalError) as refused:
+        _build(checkout, scratch_parent)
+
+    assert str(refused.value) == REF_STORE.format(checkout)
+
+
+@pytest.mark.parametrize("value", [None, "true", "Yes", "1"])
+def test_build_isolation_refuses_a_promisor_remote(
+    checkout: Path, scratch_parent: Path, value: str | None
+) -> None:
+    """A remote marked promisor, as git clone --filter writes it, is refused."""
+    setting = "\tpromisor\n" if value is None else f"\tpromisor = {value}\n"
+    with (checkout / ".git" / "config").open("a") as config:
+        config.write(f'[remote "origin"]\n{setting}')
+
+    with pytest.raises(cage.RefusalError) as refused:
+        _build(checkout, scratch_parent)
+
+    assert str(refused.value) == PARTIAL.format(checkout)
+
+
+@pytest.mark.parametrize("value", ["false", "Off", "0", ""])
+def test_build_isolation_allows_a_remote_marked_not_promisor(
+    checkout: Path, scratch_parent: Path, value: str
+) -> None:
+    """A promisor setting git reads as false marks no partial clone."""
+    _set_real(checkout, "remote.origin.promisor", value)
+
+    env = _build(checkout, scratch_parent)
+
+    assert Path(env["GIT_COMMON_DIR"]).parent == scratch_parent
 
 
 def test_build_isolation_allows_files_ref_storage_and_worktree_config(

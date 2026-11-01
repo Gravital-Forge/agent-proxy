@@ -67,6 +67,16 @@ TRANSPORT_KEYS = frozenset(
 # Extension keys as git lists them, in lower case.
 REF_STORAGE = "extensions.refstorage"
 WORKTREE_CONFIG = "extensions.worktreeconfig"
+GIT_FALSE = frozenset({"false", "no", "off", "0", ""})
+# Each reason follows the repository's path in a shape refusal.
+SHALLOW_REASON = "is a shallow clone; the git plugin does not support shallow clones"
+REFTABLE_REASON = "uses the reftable ref format; the git plugin supports only files"
+REF_STORE_REASON = (
+    "sets extensions.refstorage to a ref store other than files; "
+    "the git plugin supports only files"
+)
+SUBMODULES_REASON = "has submodules; the git plugin does not support submodules"
+PARTIAL_REASON = "is a partial clone; the git plugin does not support partial clones"
 COMMITTER_FROM_AUTHOR = (
     ("GIT_COMMITTER_NAME", "GIT_AUTHOR_NAME"),
     ("GIT_COMMITTER_EMAIL", "GIT_AUTHOR_EMAIL"),
@@ -336,43 +346,62 @@ def real_config_entries(
 def check_shape(repo: str, dirs: GitDirs, entries: Sequence[ConfigEntry]) -> None:
     """Return if repo has a shape the isolation reads correctly.
 
-    entries are the real config's. The scratch config carries none of the
-    real config's extensions, so each one the isolation does not reproduce
-    is refused: refStorage other than files, and every extension but
-    worktreeConfig, whose config.worktree the isolation leaves unread by
-    design. A .gitmodules counts whether git tracks it or not.
+    entries are the real config's. A .gitmodules counts whether git tracks
+    it or not.
 
     Raises:
         RefusalError: repo is a shallow clone, uses reftable refs, has
-            submodules, or sets an extension the isolation does not support.
+            submodules, is a partial clone, or sets an extension the
+            isolation does not support.
     """
     if (dirs.common_dir / "shallow").exists():
-        raise RefusalError(
-            f"{repo} is a shallow clone; the git plugin does not support shallow clones"
-        )
-    reftable = RefusalError(
-        f"{repo} uses the reftable ref format; the git plugin supports only files"
-    )
-    if (dirs.common_dir / "reftable").exists():
-        raise reftable
-    for key, value in entries:
-        name = key.lower()
-        if name == REF_STORAGE and value is not None and value.startswith("reftable"):
-            raise reftable
-        if name.startswith("extensions.") and not _supported_extension(name, value):
-            raise RefusalError(
-                f"{repo} sets {name}, an extension the git plugin does not support"
-            )
-    if os.path.lexists(Path(repo) / ".gitmodules") or any(
-        key.lower().startswith("submodule.") for key, _ in entries
-    ):
-        raise RefusalError(
-            f"{repo} has submodules; the git plugin does not support submodules"
-        )
+        reason = SHALLOW_REASON
+    elif (dirs.common_dir / "reftable").exists():
+        reason = REFTABLE_REASON
+    elif os.path.lexists(Path(repo) / ".gitmodules"):
+        reason = SUBMODULES_REASON
+    else:
+        reason = next(filter(None, map(_config_refusal, entries)), None)
+    if reason is not None:
+        raise RefusalError(f"{repo} {reason}")
 
 
-def _supported_extension(name: str, value: str | None) -> bool:
-    return name == WORKTREE_CONFIG or (name == REF_STORAGE and value == "files")
+def _config_refusal(entry: ConfigEntry) -> str | None:
+    """Return why the real config entry marks a shape the isolation misreads.
+
+    The scratch config carries none of the real config's extensions, so each
+    one the isolation does not reproduce is refused: refStorage other than
+    files, and every extension but worktreeConfig, whose config.worktree the
+    isolation leaves unread by design. git clone --filter marks a partial
+    clone by a promisor remote, which the scratch config does not carry.
+    Names compare in lower case, as git compares them.
+    """
+    key, value = entry
+    name = key.lower()
+    section, _, rest = name.partition(".")
+    subsection, _, variable = rest.rpartition(".")
+    if section == "submodule":
+        return SUBMODULES_REASON
+    if section == "remote" and subsection and variable == "promisor":
+        return None if _git_false(value) else PARTIAL_REASON
+    if name == REF_STORAGE:
+        return _ref_storage_refusal(value)
+    if section == "extensions" and name != WORKTREE_CONFIG:
+        return f"sets {name}, an extension the git plugin does not support"
+    return None
+
+
+def _ref_storage_refusal(value: str | None) -> str | None:
+    if value == "files":
+        return None
+    if value is not None and value.startswith("reftable"):
+        return REFTABLE_REASON
+    return REF_STORE_REASON
+
+
+def _git_false(value: str | None) -> bool:
+    """Return if git reads value as the boolean false; a key with no '=' is true."""
+    return value is not None and value.lower() in GIT_FALSE
 
 
 def _without_git_variables(environ: Mapping[str, str]) -> dict[str, str]:
