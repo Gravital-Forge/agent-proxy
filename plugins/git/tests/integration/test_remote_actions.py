@@ -217,6 +217,7 @@ def test_worktree_adds_lists_and_removes_a_worktree(
     remove = {"repo": repo, "action": "remove", "path": str(worktree)}
     stdout_of(run_action("worktree", remove, roots))
 
+    assert listed.startswith(f"{repo} ")
     assert f"{worktree} " in listed
     assert "On branch task/wt" in status
     assert not worktree.exists()
@@ -376,23 +377,35 @@ def test_push_refuses_a_pushurl_to_an_unlisted_repository(
     _refused(outcome, UNLISTED_REFUSAL, auth_server.logs().decode())
 
 
-def test_fetch_refuses_an_insteadof_to_an_unlisted_repository(
+def test_fetch_ignores_a_planted_insteadof(
     run_action: RunAction, remote_pair: RemotePair, auth_server: Container
 ) -> None:
-    """A listed origin rewritten by insteadOf to an unlisted one gets no token."""
+    """A planted insteadOf has no effect: the fetch goes to the listed origin.
+
+    The key is never copied to the scratch config, so the listed origin gets
+    the token and the unlisted one gets no request.
+    """
     work = remote_pair.work
     host_git(work, "remote", "set-url", "origin", LISTED_URL)
     host_git(work, "config", f"url.{UNLISTED_URL}.insteadOf", LISTED_URL)
 
     outcome = _run_with_token(run_action, "fetch", work, remote_pair.root, LISTED)
 
-    _refused(outcome, UNLISTED_REFUSAL, auth_server.logs().decode())
+    assert outcome.content["exit_code"] != 0, outcome.content
+    assert UNLISTED_REFUSAL not in str(outcome.content["stderr"]), outcome.content
+    log = auth_server.logs().decode()
+    assert "AUTH OK GET /listed-org/repo.git/info/refs?service=git-upload-pack\n" in log
+    assert "/other-org/" not in log
 
 
-def test_lfs_fetch_refuses_a_request_with_no_path(
+def test_lfs_fetch_ignores_a_planted_use_http_path(
     run_action: RunAction, lfs_remote_pair: RemotePair, auth_server: Container
 ) -> None:
-    """A repository's useHttpPath=false withholds the path, and LFS gets no token."""
+    """A planted useHttpPath=false has no effect: LFS sends the path.
+
+    The key is never copied to the scratch config, so the plugin's -c value
+    governs, and the helper grants the LFS batch request.
+    """
     peer = lfs_remote_pair.peer
     _point_lfs_clone_at(peer, LISTED_URL)
     host_git(peer, "config", "credential.http://auth:8080.useHttpPath", "false")
@@ -402,8 +415,9 @@ def test_lfs_fetch_refuses_a_request_with_no_path(
     )
 
     assert outcome.content["exit_code"] != 0, outcome.content
-    assert NO_PATH_REFUSAL in str(outcome.content["stderr"]), outcome.content
-    assert "/info/lfs/objects/batch" not in auth_server.logs().decode()
+    assert NO_PATH_REFUSAL not in str(outcome.content["stderr"]), outcome.content
+    log = auth_server.logs().decode()
+    assert "AUTH OK POST /listed-org/repo.git/info/lfs/objects/batch\n" in log
 
 
 def test_fetch_with_a_token_refuses_without_a_repository_list(

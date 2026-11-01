@@ -4,22 +4,19 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from git_plugin import scripts
+from git_plugin import cage, scripts
 from git_plugin.cage import RefusalError
 
 NAME = "Fixture"
 EMAIL = "fixture@example.invalid"
 AGENT_NAME = "Agent One"
 AGENT_EMAIL = "agent-01@example.com"
-NO_NAME = (
-    r"^git config user\.name is not set, nor is GIT_AUTHOR_NAME in the grant's env$"
-)
-NO_EMAIL = (
-    r"^git config user\.email is not set, nor is GIT_AUTHOR_EMAIL in the grant's env$"
-)
+NO_NAME = r"^GIT_AUTHOR_NAME is not set in the grant's env$"
+NO_EMAIL = r"^GIT_AUTHOR_EMAIL is not set in the grant's env$"
 NO_PREFIXES = (
     r"^GIT_BRANCH_PREFIXES is not set or names no prefix; the grant's env sets it$"
 )
@@ -44,6 +41,28 @@ def _isolate_git(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     for variable in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_SIGNING_KEY"):
         monkeypatch.delenv(variable, raising=False)
+
+
+def _not_isolated(repo: str, environ: Mapping[str, str]) -> dict[str, str]:
+    """A builder that leaves environ as it is.
+
+    The host's git predates the files:// form of extensions.refStorage the
+    real scratch config needs; the heavy bar runs that on the cage's git.
+    """
+    return dict(environ)
+
+
+@pytest.fixture(autouse=True)
+def _no_isolation(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run git with no scratch common directory."""
+    monkeypatch.setattr(cage, "build_isolation", _not_isolated)
+
+
+@pytest.fixture
+def identity(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Name the fixture's identity in GIT_AUTHOR_*, as the grant's env would."""
+    monkeypatch.setenv("GIT_AUTHOR_NAME", NAME)
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", EMAIL)
 
 
 @pytest.fixture(autouse=True)
@@ -96,6 +115,7 @@ def test_actions_holds_each_script_action() -> None:
         "push",
         "checkout",
         "worktree",
+        "config_get",
     }
 
 
@@ -134,13 +154,22 @@ def test_run_git_trusts_each_root(repo: Path, roots: list[str]) -> None:
     assert result["stdout"] == f"{roots[0]}\n{roots[0]}/*\n"
 
 
-def test_run_git_adds_env_to_gits_environment(repo: Path, roots: list[str]) -> None:
-    """The env mapping reaches git on top of the process environment."""
-    env = {"GIT_AUTHOR_NAME": "Other", "GIT_AUTHOR_EMAIL": "other@example.invalid"}
+def test_run_git_runs_git_in_the_isolation_built_for_the_repo(
+    repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Outside run_script, run_git builds the isolation of its own repository."""
+    built: list[str] = []
 
-    result = scripts.run_git(str(repo), roots, ["var", "GIT_AUTHOR_IDENT"], env)
+    def isolated(repo: str, environ: Mapping[str, str]) -> dict[str, str]:
+        built.append(repo)
+        return {**environ, "GIT_AUTHOR_NAME": "Isolated"}
 
-    assert result["stdout"].startswith("Other <other@example.invalid> ")
+    monkeypatch.setattr(cage, "build_isolation", isolated)
+
+    result = scripts.run_git(str(repo), roots, ["var", "GIT_AUTHOR_IDENT"])
+
+    assert built == [str(repo)]
+    assert result["stdout"].startswith("Isolated <")
 
 
 def test_add_stages_the_files(repo: Path, roots: list[str]) -> None:
@@ -548,32 +577,14 @@ def _allowed_signers(key: Path) -> Path:
     return allowed
 
 
-def test_commit_records_the_staged_change_as_the_repos_identity(
+def test_commit_records_the_staged_change_as_the_grants_author(
     repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The commit action sets author and committer from the repository's config.
+    """The commit's author is the grant env's, not the repository's user.*.
 
-    The process environment names another identity, which the config's
-    values displace.
+    The committer is build_isolation's to set, which this file's stub leaves
+    out; the cage's own test covers it.
     """
-    for variable in ("GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME"):
-        monkeypatch.setenv(variable, "Intruder")
-    (repo / "a.txt").write_text("two\n")
-    _git(repo, "add", "a.txt")
-
-    result = scripts.commit({"repo": str(repo), "message": "second"}, roots)
-
-    assert result["exit_code"] == 0
-    logged = _git(repo, "log", "-1", "--format=%an <%ae>|%cn <%ce>|%s")
-    assert logged == f"{NAME} <{EMAIL}>|{NAME} <{EMAIL}>|second\n"
-
-
-def test_commit_takes_the_environments_identity_when_the_repo_has_none(
-    repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """With no identity in the config, author and committer are the environment's."""
-    _git(repo, "config", "--unset", "user.name")
-    _git(repo, "config", "--unset", "user.email")
     monkeypatch.setenv("GIT_AUTHOR_NAME", AGENT_NAME)
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", AGENT_EMAIL)
     (repo / "a.txt").write_text("two\n")
@@ -582,27 +593,12 @@ def test_commit_takes_the_environments_identity_when_the_repo_has_none(
     result = scripts.commit({"repo": str(repo), "message": "second"}, roots)
 
     assert result["exit_code"] == 0
-    logged = _git(repo, "log", "-1", "--format=%an <%ae>|%cn <%ce>")
-    assert logged == f"{AGENT_NAME} <{AGENT_EMAIL}>|{AGENT_NAME} <{AGENT_EMAIL}>\n"
+    assert _git(repo, "log", "-1", "--format=%an <%ae>|%s") == (
+        f"{AGENT_NAME} <{AGENT_EMAIL}>|second\n"
+    )
 
 
-def test_commit_resolves_the_name_and_the_email_each_on_its_own(
-    repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A repository with only user.name keeps it and takes the environment's email."""
-    _git(repo, "config", "--unset", "user.email")
-    monkeypatch.setenv("GIT_AUTHOR_NAME", AGENT_NAME)
-    monkeypatch.setenv("GIT_AUTHOR_EMAIL", AGENT_EMAIL)
-    (repo / "a.txt").write_text("two\n")
-    _git(repo, "add", "a.txt")
-
-    result = scripts.commit({"repo": str(repo), "message": "second"}, roots)
-
-    assert result["exit_code"] == 0
-    logged = _git(repo, "log", "-1", "--format=%an <%ae>|%cn <%ce>")
-    assert logged == f"{NAME} <{AGENT_EMAIL}>|{NAME} <{AGENT_EMAIL}>\n"
-
-
+@pytest.mark.usefixtures("identity")
 def test_commit_with_a_signing_key_signs_the_commit(
     repo: Path,
     roots: list[str],
@@ -624,6 +620,7 @@ def test_commit_with_a_signing_key_signs_the_commit(
     assert status == "G\n"
 
 
+@pytest.mark.usefixtures("identity")
 def test_commit_without_a_signing_key_overrides_the_repos_gpgsign(
     repo: Path, roots: list[str]
 ) -> None:
@@ -638,17 +635,13 @@ def test_commit_without_a_signing_key_overrides_the_repos_gpgsign(
     assert _git(repo, "log", "-1", "--format=%G?") == "N\n"
 
 
-def test_commit_refuses_without_user_name(repo: Path, roots: list[str]) -> None:
-    """An unset user.name, with no GIT_AUTHOR_NAME, is refused before a commit."""
-    _git(repo, "config", "--unset", "user.name")
-
-    with pytest.raises(RefusalError, match=NO_NAME):
-        scripts.commit({"repo": str(repo), "message": "m"}, roots)
-
-
-def test_commit_refuses_an_empty_user_name(repo: Path, roots: list[str]) -> None:
-    """An empty user.name counts as unset."""
-    _git(repo, "config", "user.name", "")
+def test_commit_refuses_without_git_author_name(
+    repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unset GIT_AUTHOR_NAME is refused, though the repository sets user.name."""
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", AGENT_EMAIL)
+    (repo / "a.txt").write_text("two\n")
+    _git(repo, "add", "a.txt")
 
     with pytest.raises(RefusalError, match=NO_NAME):
         scripts.commit({"repo": str(repo), "message": "m"}, roots)
@@ -658,21 +651,24 @@ def test_commit_refuses_an_empty_git_author_name(
     repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """An empty GIT_AUTHOR_NAME counts as unset."""
-    _git(repo, "config", "--unset", "user.name")
     monkeypatch.setenv("GIT_AUTHOR_NAME", "")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", AGENT_EMAIL)
 
     with pytest.raises(RefusalError, match=NO_NAME):
         scripts.commit({"repo": str(repo), "message": "m"}, roots)
 
 
-def test_commit_refuses_without_user_email(repo: Path, roots: list[str]) -> None:
-    """An unset user.email, with no GIT_AUTHOR_EMAIL, is refused once a name is set."""
-    _git(repo, "config", "--unset", "user.email")
+def test_commit_refuses_without_git_author_email(
+    repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unset GIT_AUTHOR_EMAIL is refused, though the repository sets user.email."""
+    monkeypatch.setenv("GIT_AUTHOR_NAME", AGENT_NAME)
 
     with pytest.raises(RefusalError, match=NO_EMAIL):
         scripts.commit({"repo": str(repo), "message": "m"}, roots)
 
 
+@pytest.mark.usefixtures("identity")
 def test_commit_refuses_with_nothing_staged(repo: Path, roots: list[str]) -> None:
     """A commit with an empty index is refused, and HEAD stays where it was."""
     head = _git(repo, "rev-parse", "HEAD")
@@ -685,10 +681,11 @@ def test_commit_refuses_with_nothing_staged(repo: Path, roots: list[str]) -> Non
     assert _git(repo, "rev-parse", "HEAD") == head
 
 
+@pytest.mark.usefixtures("identity")
 def test_commit_in_a_missing_directory_returns_gits_error(
     tmp_path: Path, roots: list[str]
 ) -> None:
-    """When git cannot read the config, its own error is the result."""
+    """When git cannot change to the repository, its own error is the result."""
     missing = tmp_path / "root" / "missing"
 
     result = scripts.commit({"repo": str(missing), "message": "m"}, roots)
@@ -697,13 +694,11 @@ def test_commit_in_a_missing_directory_returns_gits_error(
     assert result["stderr"].startswith("fatal: ")
 
 
+@pytest.mark.usefixtures("identity")
 def test_commit_outside_a_repository_returns_gits_error(
-    tmp_path: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, roots: list[str]
 ) -> None:
     """With an identity set but no repository, git's diff error is the result."""
-    global_config = tmp_path / "gitconfig"
-    global_config.write_text(f"[user]\n\tname = {NAME}\n\temail = {EMAIL}\n")
-    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
     plain = tmp_path / "root" / "plain"
     plain.mkdir()
 
@@ -727,6 +722,7 @@ def test_run_script_runs_the_named_action_on_its_input(
     assert "-one\n+two\n" in result["stdout"]
 
 
+@pytest.mark.usefixtures("identity")
 def test_run_script_returns_a_refusal_as_its_result(
     repo: Path, roots: list[str]
 ) -> None:
@@ -827,6 +823,108 @@ def test_run_script_runs_the_action_when_the_list_parses_or_no_token_is_held(
     assert result == {"exit_code": 0, "stdout": "", "stderr": ""}
 
 
+def test_run_script_runs_every_git_call_of_the_action_in_one_isolation(
+    repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The isolation is built once, from run_script's environ, for both diff calls.
+
+    The stand-in isolation turns diff.noprefix on, which the written diff
+    shows.
+    """
+    built: list[tuple[str, Mapping[str, str]]] = []
+
+    def isolated(repo: str, environ: Mapping[str, str]) -> dict[str, str]:
+        built.append((repo, environ))
+        return {
+            **os.environ,
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "diff.noprefix",
+            "GIT_CONFIG_VALUE_0": "true",
+        }
+
+    monkeypatch.setattr(cage, "build_isolation", isolated)
+    (repo / "a.txt").write_text("two\n")
+    stdin = json.dumps({"repo": str(repo), "output": "a.diff"}).encode()
+    environ = {"AGENT_PROXY_ROOTS": json.dumps(roots)}
+
+    result = scripts.run_script("diff", stdin, environ)
+
+    assert result["exit_code"] == 0, result
+    assert built == [(str(repo), environ)]
+    assert "--- a.txt\n" in (repo / ".agent-proxy" / "a.diff").read_text()
+
+
+def test_run_script_builds_no_isolation_for_an_action_refused_before_git(
+    repo: Path, roots: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A commit refused for want of an identity runs no git, so builds nothing."""
+    built: list[str] = []
+
+    def isolated(repo: str, environ: Mapping[str, str]) -> dict[str, str]:
+        built.append(repo)
+        return dict(environ)
+
+    monkeypatch.setattr(cage, "build_isolation", isolated)
+    stdin = json.dumps({"repo": str(repo), "message": "m"}).encode()
+    environ = {"AGENT_PROXY_ROOTS": json.dumps(roots)}
+
+    result = scripts.run_script("commit", stdin, environ)
+
+    assert result["stderr"] == (
+        "git plugin refused: GIT_AUTHOR_NAME is not set in the grant's env\n"
+    )
+    assert built == []
+
+
+def test_config_get_prints_the_value_in_the_repositorys_config(
+    repo: Path, roots: list[str]
+) -> None:
+    """config_get prints a value from the repository's own config file."""
+    result = scripts.config_get({"repo": str(repo), "key": "user.email"}, roots)
+
+    assert result == {"exit_code": 0, "stdout": f"{EMAIL}\n", "stderr": ""}
+
+
+def test_config_get_reads_no_command_line_value(repo: Path, roots: list[str]) -> None:
+    """A value the plugin passes with -c is not in the file, so it is unset."""
+    result = scripts.config_get({"repo": str(repo), "key": "core.hooksPath"}, roots)
+
+    assert result == {"exit_code": 1, "stdout": "", "stderr": ""}
+
+
+def test_config_get_follows_no_include(
+    repo: Path, roots: list[str], tmp_path: Path
+) -> None:
+    """A key that only an included file sets is unset."""
+    included = tmp_path / "included"
+    included.write_text("[planted]\n\tkey = value\n")
+    _git(repo, "config", "include.path", str(included))
+
+    result = scripts.config_get({"repo": str(repo), "key": "planted.key"}, roots)
+
+    assert result == {"exit_code": 1, "stdout": "", "stderr": ""}
+
+
+def test_config_get_on_a_linked_worktree_reads_the_main_config(
+    repo: Path, roots: list[str]
+) -> None:
+    """A linked worktree's value comes from the config of the repository it shares."""
+    path = repo.parent / "wt"
+    _git(repo, "worktree", "add", "-q", "-b", "task/wt", str(path))
+
+    result = scripts.config_get({"repo": str(path), "key": "user.name"}, roots)
+
+    assert result["stdout"] == f"{NAME}\n"
+
+
+def test_config_get_takes_a_dash_key_as_a_key(repo: Path, roots: list[str]) -> None:
+    """A key that reads like an option is looked up, and git says it has no section."""
+    result = scripts.config_get({"repo": str(repo), "key": "--file=/etc/passwd"}, roots)
+
+    assert result["exit_code"] == 1
+    assert "key does not contain a section" in result["stderr"]
+
+
 PROTECTED_MAIN = "Cannot push to protected branch: main"
 
 
@@ -836,8 +934,14 @@ def _prefix_refusal(branch: str) -> str:
 
 
 @pytest.fixture
-def origin(repo: Path) -> Path:
-    """A bare repository beside repo, which repo names as its origin."""
+def origin(repo: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A bare repository beside repo, which repo names as its origin.
+
+    Its path is the file transport, which git_argv's pins deny;
+    GIT_ALLOW_PROTOCOL overrides them, and only this file's stand-in builder
+    keeps that variable.
+    """
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "file")
     origin = repo.parent / "origin.git"
     _git(repo.parent, "init", "-q", "--bare", "-b", "main", str(origin))
     _git(repo, "remote", "add", "origin", str(origin))
@@ -1250,6 +1354,60 @@ def test_worktree_list_names_each_worktree(repo: Path, roots: list[str]) -> None
 
     assert result["exit_code"] == 0, result
     assert f"{path} " in result["stdout"]
+
+
+def _host_scratch(repo: Path, scratch: Path) -> dict[str, str]:
+    """Return an env whose common dir is scratch, laid out for the host's git.
+
+    scratch links refs and worktrees into repo's .git, where the cage's
+    scratch reaches refs through extensions.refStorage instead.
+    """
+    scratch.mkdir()
+    (scratch / "config").write_text("[core]\n\tbare = false\n")
+    (scratch / "HEAD").write_text("ref: refs/heads/.invalid\n")
+    for name in ("refs", "worktrees"):
+        (scratch / name).symlink_to(repo / ".git" / name)
+    return {
+        **os.environ,
+        "GIT_DIR": str(repo / ".git"),
+        "GIT_COMMON_DIR": str(scratch),
+        "GIT_OBJECT_DIRECTORY": str(repo / ".git" / "objects"),
+    }
+
+
+def test_worktree_list_names_the_repository_in_place_of_the_scratch(
+    repo: Path, roots: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The main worktree is listed at the repository's path, in git's columns.
+
+    git names the main worktree after its common dir, which here is the
+    scratch, longer than either worktree's path. The host's git reads the
+    main worktree's HEAD from the stub, so only the columns are compared.
+    """
+    path = repo.parent / "wt"
+    _git(repo, "worktree", "add", "-q", "-b", "task/wt", str(path))
+    env = _host_scratch(repo, tmp_path / ("scratch-" + "x" * 40))
+    monkeypatch.setattr(cage, "build_isolation", lambda _repo, _environ: env)
+
+    result = scripts.worktree({"repo": str(repo), "action": "list"}, roots)
+
+    main, linked = result["stdout"].splitlines()
+    assert (main.split()[0], linked.split()[0]) == (str(repo), str(path))
+    assert main.index(main.split()[1]) == linked.index(linked.split()[1])
+
+
+def test_worktree_list_that_fails_returns_gits_error_unchanged(
+    repo: Path, roots: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A listing git could not make has no scratch path to replace."""
+    env = _host_scratch(repo, tmp_path / "scratch")
+    monkeypatch.setattr(cage, "build_isolation", lambda _repo, _environ: env)
+    missing = repo.parent / "missing"
+
+    result = scripts.worktree({"repo": str(missing), "action": "list"}, roots)
+
+    assert (result["exit_code"], result["stdout"]) == (128, "")
+    assert result["stderr"].startswith("fatal: cannot change to ")
 
 
 def test_worktree_remove_deletes_the_worktree(repo: Path, roots: list[str]) -> None:

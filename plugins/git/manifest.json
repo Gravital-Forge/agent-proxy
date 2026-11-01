@@ -195,7 +195,7 @@
       "passthrough_args": false
     },
     "config_get": {
-      "kind": "command",
+      "kind": "script",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -207,12 +207,17 @@
       },
       "credentials": [],
       "timeout": "60s",
-      "argv": ["git-cage", "config", "--get"],
-      "parameters": [
-        {"name": "repo", "as": "flag", "flag": "--repo"},
-        {"name": "key", "as": "positional"}
-      ],
-      "passthrough_args": false
+      "executable": "/plugin/bin/config_get",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
     },
     "lfs_ls_files": {
       "kind": "command",

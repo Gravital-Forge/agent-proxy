@@ -43,6 +43,8 @@ AUTH_SERVER_PATH = Path(__file__).with_name("auth_server.py")
 AUTH_ALIAS = "auth"
 GIT_DAEMON_ALIAS = "git-remote"
 SERVER_START_SECONDS = 30
+COMMIT_CREATING_ACTIONS = frozenset({"commit", "merge", "pull", "stash"})
+FIXTURE_IDENTITY = {"GIT_AUTHOR_NAME": FIXTURE_NAME, "GIT_AUTHOR_EMAIL": FIXTURE_EMAIL}
 
 
 @pytest.fixture(autouse=True)
@@ -146,7 +148,11 @@ def run_action(
     cage_network: str,
     tmp_path: Path,
 ) -> RunAction:
-    """A runner of one plugin action in a cage, its credentials stored in tmp_path."""
+    """A runner of one plugin action in a cage, its credentials stored in tmp_path.
+
+    A commit-creating action's grant env names the fixture's identity, which
+    the caller's env overrides, since the cage reads no repository user.*.
+    """
     store = CredentialStore(tmp_path / "credentials")
     overflow_dir = tmp_path / "overflow"
     overflow_dir.mkdir()
@@ -164,12 +170,13 @@ def run_action(
         for credential_name, (mount, value) in (credentials or {}).items():
             store.set(credential_name, value)
             mounts[credential_name] = mount
+        identity = FIXTURE_IDENTITY if name in COMMIT_CREATING_ACTIONS else {}
         grant = Grant.model_validate(
             {
                 "roots": [Root(path=str(root), mode=mode) for root in roots],
                 "domains": [],
                 "credentials": mounts,
-                "env": dict(env or {}),
+                "env": {**identity, **(env or {})},
             }
         )
         return cage_runner.run(

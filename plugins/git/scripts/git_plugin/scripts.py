@@ -2,17 +2,19 @@
 
 import contextlib
 import errno
+import functools
 import json
 import os
 import stat
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Literal, NotRequired, TypedDict
 
 from git_plugin import cage, rules
 
-CONFIG_UNSET_EXIT = 1
+IDENTITY_ENV_NAMES = ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL")
 DIFF_CHANGED_EXIT = 1
 WRITE_FAILED_EXIT = 1
 OUTPUT_DIR_NAME = ".agent-proxy"
@@ -93,6 +95,16 @@ class WorktreeInput(TypedDict):
     create_branch: NotRequired[bool]
 
 
+class ConfigGetInput(TypedDict):
+    repo: str
+    key: str
+
+
+_ACTION_ISOLATION: ContextVar[Callable[[], Mapping[str, str]]] = ContextVar(
+    "action_isolation"
+)
+
+
 class _GitFailedError(Exception):
     """git failed in a step before an action's last; its result is the action's."""
 
@@ -101,34 +113,41 @@ class _GitFailedError(Exception):
         self.result = result
 
 
-def run_git(
-    repo: str,
-    roots: Sequence[str],
-    args: Sequence[str],
-    env: Mapping[str, str] | None = None,
-) -> ScriptResult:
+def run_git(repo: str, roots: Sequence[str], args: Sequence[str]) -> ScriptResult:
     """Run git on repo with the roots trusted, and return its exit code and streams.
 
-    env is laid over the process environment for this run. Each stream is
-    decoded as UTF-8, a byte that is not UTF-8 becoming U+FFFD.
+    git runs in the action's isolation. Each stream is decoded as UTF-8, a
+    byte that is not UTF-8 becoming U+FFFD.
     """
-    return _script_result(_completed_git(repo, roots, args, env))
+    return _script_result(_completed_git(repo, roots, args))
 
 
 def _completed_git(
     repo: str,
     roots: Sequence[str],
     args: Sequence[str],
-    env: Mapping[str, str] | None = None,
+    environ: Mapping[str, str] | None = None,
 ) -> subprocess.CompletedProcess[bytes]:
-    """Run git on repo with the roots trusted, env over the process environment."""
-    environ = {**os.environ, **(env or {})}
+    """Run git on repo with the roots trusted, in environ or the action's isolation."""
+    if environ is None:
+        environ = _isolated_environ(repo)
     return subprocess.run(  # noqa: S603 - git_argv puts every input after git's own options
         cage.git_argv(repo, roots, args, environ),
         capture_output=True,
         check=False,
         env=environ,
     )
+
+
+def _isolated_environ(repo: str) -> Mapping[str, str]:
+    """Return the environment of the action's isolation, built at its first call.
+
+    Outside run_script, each call builds an isolation of its own for repo.
+    """
+    build = _ACTION_ISOLATION.get(None)
+    if build is None:
+        return cage.build_isolation(repo, os.environ)
+    return build()
 
 
 def _script_result(completed: subprocess.CompletedProcess[bytes]) -> ScriptResult:
@@ -322,51 +341,26 @@ def lfs_untrack(arguments: PatternsInput, roots: Sequence[str]) -> ScriptResult:
 
 
 def commit(arguments: CommitInput, roots: Sequence[str]) -> ScriptResult:
-    """Commit what is staged, as the repository's identity or else the grant's.
+    """Commit what is staged, as the identity the grant's env names.
 
-    The name comes from user.name in the repository's config, or else from
-    GIT_AUTHOR_NAME in the environment, which the grant's env sets. The email
-    comes from user.email, or else from GIT_AUTHOR_EMAIL. A git failure in a
-    check before the commit is returned as the result.
+    git takes the author from GIT_AUTHOR_NAME and GIT_AUTHOR_EMAIL, and the
+    isolation sets the committer from them where the grant sets none. The
+    repository's user.* is never read. A git failure in the check before the
+    commit is returned as the result.
 
     Raises:
-        RefusalError: the name or the email is unset or empty in both
-            sources, or nothing is staged.
+        RefusalError: GIT_AUTHOR_NAME or GIT_AUTHOR_EMAIL is unset or empty,
+            or nothing is staged.
     """
     repo = arguments["repo"]
+    for name in IDENTITY_ENV_NAMES:
+        if not os.environ.get(name):
+            raise cage.RefusalError(f"{name} is not set in the grant's env")
     try:
-        name = _identity_value(repo, roots, "user.name", "GIT_AUTHOR_NAME")
-        email = _identity_value(repo, roots, "user.email", "GIT_AUTHOR_EMAIL")
         _require_staged(repo, roots)
     except _GitFailedError as failure:
         return failure.result
-    identity = {
-        "GIT_AUTHOR_NAME": name,
-        "GIT_AUTHOR_EMAIL": email,
-        "GIT_COMMITTER_NAME": name,
-        "GIT_COMMITTER_EMAIL": email,
-    }
-    return run_git(repo, roots, ["commit", "-m", arguments["message"]], identity)
-
-
-def _identity_value(repo: str, roots: Sequence[str], key: str, env_name: str) -> str:
-    """Return key's value in repo's config, or else env_name's in the environment.
-
-    An empty value counts as unset in both sources.
-
-    Raises:
-        RefusalError: key and env_name are both unset or empty.
-        _GitFailedError: git failed other than by finding key unset.
-    """
-    result = run_git(repo, roots, ["config", "--get", key])
-    if result["exit_code"] not in (0, CONFIG_UNSET_EXIT):
-        raise _GitFailedError(result)
-    value = result["stdout"].strip() or os.environ.get(env_name, "")
-    if not value:
-        raise cage.RefusalError(
-            f"git config {key} is not set, nor is {env_name} in the grant's env"
-        )
-    return value
+    return run_git(repo, roots, ["commit", "-m", arguments["message"]])
 
 
 def _require_staged(repo: str, roots: Sequence[str]) -> None:
@@ -467,6 +461,8 @@ def worktree(arguments: WorktreeInput, roots: Sequence[str]) -> ScriptResult:
     action = arguments["action"]
     path = arguments.get("path")
     args = ["worktree", action]
+    if action == "list":
+        return _worktree_list(repo, roots)
     if action == "add" and path is not None:
         _check_outside_repo(repo, path)
         args += _worktree_add_args(
@@ -475,6 +471,54 @@ def worktree(arguments: WorktreeInput, roots: Sequence[str]) -> ScriptResult:
     elif action == "remove" and path is not None:
         args.append(path)
     return run_git(repo, roots, args)
+
+
+def _worktree_list(repo: str, roots: Sequence[str]) -> ScriptResult:
+    """List repo's worktrees, the main one at its real path.
+
+    git names the main worktree after its common dir, which under isolation
+    is the scratch directory. With no scratch, the listing is already real.
+    """
+    environ = _isolated_environ(repo)
+    result = _script_result(_completed_git(repo, roots, ["worktree", "list"], environ))
+    scratch = environ.get("GIT_COMMON_DIR")
+    if scratch is not None:
+        main = str(cage.real_git_dirs(repo).common_dir).removesuffix("/.git")
+        result["stdout"] = _named_main_worktree(
+            result["stdout"], os.path.realpath(scratch), main
+        )
+    return result
+
+
+def _named_main_worktree(listing: str, scratch: str, main: str) -> str:
+    """Return listing with its first line's scratch path replaced by main.
+
+    The line keeps git's column for the commit wherever main fits in it.
+    """
+    first, newline, rest = listing.partition("\n")
+    if not first.startswith(f"{scratch} "):
+        return listing
+    padded = first.removeprefix(scratch)
+    columns = padded.lstrip(" ")
+    width = len(scratch) + len(padded) - len(columns) - 1
+    return f"{main.ljust(width)} {columns}{newline}{rest}"
+
+
+def config_get(arguments: ConfigGetInput, roots: Sequence[str]) -> ScriptResult:
+    """Print key's value from the repository's own config file.
+
+    git reads the real config file as data and follows no include, so no
+    value the plugin passes with -c, and no included file, answers. A linked
+    worktree reads the config of the repository it shares. An unset key is
+    git's exit code 1.
+
+    Raises:
+        RefusalError: the repository's .git file names no git directory.
+    """
+    repo = arguments["repo"]
+    config = cage.real_git_dirs(repo).common_dir / "config"
+    read = ["config", "--file", str(config), "--no-includes", "--get"]
+    return run_git(repo, roots, [*read, "--", arguments["key"]])
 
 
 def _check_outside_repo(repo: str, path: str) -> None:
@@ -515,6 +559,7 @@ ACTIONS: Mapping[str, Callable[..., ActionResult]] = {
     "push": push,
     "checkout": checkout,
     "worktree": worktree,
+    "config_get": config_get,
 }
 
 
@@ -523,14 +568,23 @@ def run_script(name: str, stdin: bytes, environ: Mapping[str, str]) -> ActionRes
 
     A cage that holds GH_TOKEN is refused before the action runs unless
     GITHUB_REPOS parses, and a set GIT_SIGNING_KEY is refused unless it names a
-    readable file. A refusal is returned as the result: exit code 2, no stdout,
+    readable file. The isolation of the input's repo is built from environ
+    once, at the action's first git call, and every git call of the action
+    runs in it. A refusal is returned as the result: exit code 2, no stdout,
     and the refusal's reason on stderr.
     """
     try:
         roots = cage.roots_from_env(environ)
         rules.check_token_cage(environ)
         cage.check_signing_key(environ)
-        return ACTIONS[name](json.loads(stdin), roots)
+        arguments = json.loads(stdin)
+        token = _ACTION_ISOLATION.set(
+            functools.cache(lambda: cage.build_isolation(arguments["repo"], environ))
+        )
+        try:
+            return ACTIONS[name](arguments, roots)
+        finally:
+            _ACTION_ISOLATION.reset(token)
     except cage.RefusalError as refusal:
         return {
             "exit_code": cage.REFUSAL_EXIT,

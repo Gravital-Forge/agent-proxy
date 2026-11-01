@@ -7,6 +7,6 @@ COPY scripts/entry /plugin/entry
 RUN ln -s /plugin/entry /usr/local/bin/git-cage \
     && mkdir /plugin/bin \
     && ln -s /plugin/entry /plugin/bin/git-credential-agent-proxy \
-    && for action in add rm restore commit diff lfs_track lfs_untrack push checkout worktree; do \
+    && for action in add rm restore commit diff lfs_track lfs_untrack push checkout worktree config_get; do \
         ln -s /plugin/entry "/plugin/bin/$action"; \
     done

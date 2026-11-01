@@ -1,9 +1,13 @@
 """The git-cage wrapper: git on one repository, with the cage's roots trusted."""
 
+import contextlib
 import json
 import os
+import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+import tempfile
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from git_plugin import rules
@@ -25,10 +29,65 @@ CREDENTIAL_HELPER = (
 SIGNING_KEY_ENV_NAME = "GIT_SIGNING_KEY"
 SIGNING_PROGRAM_PATH = "/usr/bin/ssh-keygen"
 SIGNING_OFF = ("-c", "commit.gpgSign=false")
+# The transports that run a program, or a local upload-pack or receive-pack
+# that git starts without the repo-local environment, so without these -c
+# values, inside the cage.
+PROTOCOL_PINS = (
+    "-c",
+    "protocol.file.allow=never",
+    "-c",
+    "protocol.ext.allow=never",
+    "-c",
+    "protocol.fd.allow=never",
+)
+SCRATCH_PARENT = "/tmp"  # noqa: S108 - the path is inside the cage, on its own tmpfs
+SCRATCH_PREFIX = "git-isolation-"
+SCRATCH_HEAD = "ref: refs/heads/.invalid\n"
+LINKED_ENTRIES = ("worktrees", "info", "lfs")
+GITDIR_PREFIX = "gitdir: "
+LFS_PROGRAM_PATH = "/usr/bin/git-lfs"
+# The keys of git lfs install --system, which GIT_CONFIG_SYSTEM=/dev/null hides.
+LFS_FILTER = (
+    ("clean", f"{LFS_PROGRAM_PATH} clean -- %f"),
+    ("smudge", f"{LFS_PROGRAM_PATH} smudge -- %f"),
+    ("process", f"{LFS_PROGRAM_PATH} filter-process"),
+    ("required", "true"),
+)
+# (section, variable) of each key copied from the real config; none names a
+# program.
+TRANSPORT_KEYS = frozenset(
+    {
+        ("remote", "url"),
+        ("remote", "fetch"),
+        ("remote", "pushurl"),
+        ("branch", "remote"),
+        ("branch", "merge"),
+    }
+)
+COMMITTER_FROM_AUTHOR = (
+    ("GIT_COMMITTER_NAME", "GIT_AUTHOR_NAME"),
+    ("GIT_COMMITTER_EMAIL", "GIT_AUTHOR_EMAIL"),
+)
+NO_GLOBAL_OR_SYSTEM = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
 
 
 class RefusalError(Exception):
     """A call the plugin refuses; the message is the reason."""
+
+
+@dataclass(frozen=True)
+class GitDirs:
+    """A checkout's real git directories, as its own files name them.
+
+    git_dir is the per-checkout directory, which holds HEAD and the index;
+    common_dir is the main .git, which holds the config, objects, and refs.
+    """
+
+    git_dir: Path
+    common_dir: Path
+
+
+type ConfigEntry = tuple[str, str | None]
 
 
 def roots_from_env(environ: Mapping[str, str]) -> list[str]:
@@ -82,7 +141,7 @@ def git_argv(
     args: Sequence[str],
     environ: Mapping[str, str],
 ) -> list[str]:
-    """Return git's argv: repo, safe.directory values, hooks off, helper, signing, args.
+    """Return git's argv: repo, trusted roots, hooks off, helper, signing, pins, args.
 
     Each root gives two safe.directory values. A root's trailing slashes are
     dropped, so /x/ trusts /x and /x/*; the root / stays /. The signing values
@@ -101,6 +160,7 @@ def git_argv(
         *HOOKS_OFF,
         *CREDENTIAL_HELPER,
         *_signing_values(environ),
+        *PROTOCOL_PINS,
         *args,
     ]
 
@@ -153,20 +213,209 @@ def _without_trailing_slashes(root: str) -> str:
     return root.rstrip("/") or "/"
 
 
+def build_isolation(
+    repo: str, environ: Mapping[str, str], scratch_parent: str = SCRATCH_PARENT
+) -> dict[str, str]:
+    """Return environ as git on repo runs in it, reading no config the agent wrote.
+
+    git reads its config from a new scratch common directory beneath
+    scratch_parent, while GIT_DIR, the objects, and through
+    extensions.refStorage the refs stay repo's real ones. The scratch config
+    holds the fixed keys and the transport keys of the real config; the
+    global and system config are /dev/null. GIT_ALLOW_PROTOCOL is dropped, so
+    the -c protocol pins govern. An unset committer takes the grant's author.
+
+    Both the wrapper and the script actions call this function by its module
+    name, so a test can replace it.
+
+    Raises:
+        RefusalError: repo's .git file names no git directory, or a file
+            the real git directories are read from, or the real config,
+            cannot be read.
+    """
+    dirs = real_git_dirs(repo)
+    entries = real_config_entries(dirs.common_dir, environ)
+    scratch = _make_scratch(dirs, entries, scratch_parent)
+    env = dict(environ)
+    env.pop("GIT_ALLOW_PROTOCOL", None)
+    env |= {
+        "GIT_DIR": str(dirs.git_dir),
+        "GIT_COMMON_DIR": str(scratch),
+        "GIT_OBJECT_DIRECTORY": str(dirs.common_dir / "objects"),
+        **NO_GLOBAL_OR_SYSTEM,
+    }
+    for committer, author in COMMITTER_FROM_AUTHOR:
+        if committer not in env and author in env:
+            env[committer] = env[author]
+    return env
+
+
+def real_git_dirs(repo: str) -> GitDirs:
+    """Return repo's real git directories, read from its files with no git run.
+
+    <repo>/.git is the git dir unless it is a file; a .git file names the git
+    dir after 'gitdir: ', relative to repo. The git dir's commondir file names
+    the common dir, relative to the git dir; with no such file the git dir is
+    the common dir.
+
+    Raises:
+        RefusalError: the .git file names no git directory, or a file
+            cannot be read.
+    """
+    dot_git = Path(repo) / ".git"
+    git_dir = dot_git
+    if dot_git.is_file():
+        named = _read_path_file(dot_git)
+        if not named.startswith(GITDIR_PREFIX):
+            raise RefusalError(f"{dot_git} names no git directory")
+        git_dir = Path(repo) / named.removeprefix(GITDIR_PREFIX)
+    commondir = git_dir / "commondir"
+    common_dir = git_dir
+    if commondir.is_file():
+        common_dir = git_dir / _read_path_file(commondir)
+    return GitDirs(
+        git_dir=Path(os.path.realpath(git_dir)),
+        common_dir=Path(os.path.realpath(common_dir)),
+    )
+
+
+def _read_path_file(path: Path) -> str:
+    """Return the path the file at path holds, its line ending dropped.
+
+    Raises:
+        RefusalError: the file cannot be read.
+    """
+    try:
+        return os.fsdecode(path.read_bytes()).rstrip("\r\n")
+    except OSError as error:
+        raise RefusalError(f"{path} could not be read: {error}") from error
+
+
+def real_config_entries(
+    common_dir: Path, environ: Mapping[str, str]
+) -> list[ConfigEntry]:
+    """Return each key and value of common_dir's config file, read as data.
+
+    git reads that file alone, follows no include, and runs from / with no
+    GIT_ variable and no global or system config, so it finds no repository
+    and runs nothing the file names. A key written with no '=' has the value
+    None. A missing file holds no entry.
+
+    Raises:
+        RefusalError: git cannot read the file.
+    """
+    config = common_dir / "config"
+    if not config.is_file():
+        return []
+    completed = subprocess.run(  # noqa: S603 - fixed arguments and the file's path
+        ["git", "config", "--file", str(config), "--no-includes", "--list", "-z"],  # noqa: S607 - the image's git, on PATH
+        capture_output=True,
+        check=False,
+        cwd="/",
+        env={**_without_git_variables(environ), **NO_GLOBAL_OR_SYSTEM},
+    )
+    if completed.returncode != 0:
+        reason = completed.stderr.decode("utf-8", errors="replace").strip()
+        raise RefusalError(
+            f"the repository's config {config} could not be read: {reason}"
+        )
+    return [_config_entry(record) for record in completed.stdout.split(b"\0") if record]
+
+
+def _without_git_variables(environ: Mapping[str, str]) -> dict[str, str]:
+    return {name: environ[name] for name in environ if not name.startswith("GIT_")}
+
+
+def _config_entry(record: bytes) -> ConfigEntry:
+    """Return the key and value of one record of git config --list -z."""
+    key, newline, value = os.fsdecode(record).partition("\n")
+    return key, value if newline else None
+
+
+def _make_scratch(dirs: GitDirs, entries: Sequence[ConfigEntry], parent: str) -> Path:
+    """Make a scratch common directory beneath parent for dirs, and return it."""
+    scratch = Path(tempfile.mkdtemp(prefix=SCRATCH_PREFIX, dir=parent))
+    (scratch / "config").write_text(
+        scratch_config(dirs.common_dir, entries),
+        encoding="utf-8",
+        errors="surrogateescape",
+    )
+    (scratch / "HEAD").write_text(SCRATCH_HEAD)
+    (scratch / "refs").mkdir()
+    # git makes no directory through a dangling link, and worktree add writes
+    # beneath worktrees. A read-only or missing .git cannot take it, and no
+    # worktree can be added there either.
+    with contextlib.suppress(OSError):
+        (dirs.common_dir / "worktrees").mkdir(exist_ok=True)
+    for name in LINKED_ENTRIES:
+        (scratch / name).symlink_to(dirs.common_dir / name)
+    return scratch
+
+
+def scratch_config(common_dir: Path, entries: Sequence[ConfigEntry]) -> str:
+    """Return the scratch config's text: the fixed keys, then entries' transport keys.
+
+    Each value is quoted, so no value or remote name can open a key of its
+    own.
+    """
+    lines = [
+        "[core]",
+        "\trepositoryformatversion = 1",
+        "\tbare = false",
+        "[extensions]",
+        f"\trefStorage = {_quoted_value(f'files://{common_dir}')}",
+        '[filter "lfs"]',
+        *(f"\t{variable} = {_quoted_value(value)}" for variable, value in LFS_FILTER),
+    ]
+    for section, subsection, variable, value in _transport_entries(entries):
+        lines += [
+            f"[{section} {_quoted_subsection(subsection)}]",
+            f"\t{variable} = {_quoted_value(value)}",
+        ]
+    return "\n".join(lines) + "\n"
+
+
+def _transport_entries(
+    entries: Sequence[ConfigEntry],
+) -> Iterator[tuple[str, str, str, str]]:
+    """Yield the section, subsection, variable, and value of each transport key.
+
+    git lists a key as section.subsection.variable with section and variable
+    in lower case; the subsection may hold dots.
+    """
+    for key, value in entries:
+        section, _, rest = key.partition(".")
+        subsection, _, variable = rest.rpartition(".")
+        if value is not None and subsection and (section, variable) in TRANSPORT_KEYS:
+            yield section, subsection, variable, value
+
+
+def _quoted_subsection(name: str) -> str:
+    escaped = name.replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{escaped}"'
+
+
+def _quoted_value(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    return f'"{escaped}"'
+
+
 def wrapper(argv: Sequence[str], environ: Mapping[str, str]) -> int:
     """Replace this process with git on the repository argv names, or refuse.
 
     argv is the wrapper's own argv, its name first. A cage that holds
     GH_TOKEN is refused unless GITHUB_REPOS parses, and a set GIT_SIGNING_KEY
-    is refused unless it names a readable file. The function returns only on
-    a refusal: it writes the reason to stderr and returns REFUSAL_EXIT.
+    is refused unless it names a readable file. git runs in the environment
+    build_isolation returns. The function returns only on a refusal: it
+    writes the reason to stderr and returns REFUSAL_EXIT.
     """
     try:
         roots = roots_from_env(environ)
         repo, args = split_repo(argv[1:])
         rules.check_token_cage(environ)
         check_signing_key(environ)
+        isolated = build_isolation(repo, environ)
     except RefusalError as refusal:
         print(f"{REFUSAL_PREFIX}{refusal}", file=sys.stderr)
         return REFUSAL_EXIT
-    os.execvp("git", git_argv(repo, roots, args, environ))  # noqa: S606, S607 - the wrapper exists to become git, found on PATH
+    os.execvpe("git", git_argv(repo, roots, args, isolated), isolated)  # noqa: S606, S607 - the wrapper exists to become git, found on PATH

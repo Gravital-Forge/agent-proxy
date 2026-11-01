@@ -156,18 +156,16 @@ def test_push_does_not_force_through_a_planted_push_refspec(
     assert host_git(remote_pair.remote, "rev-parse", "refs/heads/task/p") == pushed
 
 
-def test_push_fails_with_a_planted_mirror(
+def test_push_ignores_a_planted_mirror(
     run_action: RunAction, remote_pair: RemotePair
 ) -> None:
-    """remote.origin.mirror makes the explicit refspec fail, and no remote ref moves."""
-    _commit_on_branch(remote_pair.work, "task/p")
+    """remote.origin.mirror is never copied, so the explicit-refspec push proceeds."""
+    pushed = _commit_on_branch(remote_pair.work, "task/p")
     host_git(remote_pair.work, "config", "remote.origin.mirror", "true")
-    refs = host_git(remote_pair.remote, "for-each-ref")
 
-    outcome = _push(run_action, remote_pair)
+    stdout_of(_push(run_action, remote_pair))
 
-    assert outcome.content["exit_code"] != 0
-    assert host_git(remote_pair.remote, "for-each-ref") == refs
+    assert host_git(remote_pair.remote, "rev-parse", "refs/heads/task/p") == pushed
 
 
 def test_push_uploads_a_new_lfs_object(
