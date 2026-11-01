@@ -408,9 +408,11 @@ The `S` checks need no counterpart on the agent's daemon: in a deployment, cages
   the agent fetches the log itself. `plugins/github/README.md` gives the detail.
 - A file swapped for a symlink between the github plugin's check of an `attach` path and gh's open
   of it uploads whatever the symlink then names. Inside the cage that includes files such as
-  `/proc/<pid>/environ`, which holds `GH_TOKEN`. The operator accepted this gap on 2026-10-17, on
-  the condition that it is documented. Handing gh a path the agent cannot swap, with the body's
-  references rewritten to it, would close it.
+  `/proc/<pid>/environ`, which holds `GH_TOKEN`. It is the one documented path for a cage's token to
+  reach the agent, and a token that reaches the agent is outside every limit the plugins enforce,
+  `GITHUB_REPOS` included. The operator accepted this gap on 2026-11-01, on the condition that it is
+  documented. Handing gh a path the agent cannot swap, with the body's references rewritten to it,
+  would close it.
 
 ## Decision directives
 
