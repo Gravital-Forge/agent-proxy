@@ -278,24 +278,24 @@ One instance per agent user:
   `credential.useHttpPath=true`, so each request carries the path of the URL git connects to. The
   helper answers with `GH_TOKEN` only when that path names a repository the grant's `GITHUB_REPOS`
   lists, and otherwise answers `quit=1`, so git stops. The helper checks that path, and not the
-  remote a repository's config names, because git builds the URL after `url.<base>.insteadOf` and
-  `remote.<name>.pushurl` rewrite it: a rewritten remote cannot carry the token to an unlisted
-  repository. `plugins/git/README.md` gives the helper's rule and its refusals.
+  remote a repository's config names, because git builds the URL after `remote.<name>.pushurl`
+  rewrites it: a rewritten remote cannot carry the token to an unlisted repository.
+  `plugins/git/README.md` gives the helper's rule and its refusals.
 - The git plugin passes `-c core.hooksPath=/dev/null` on every git run, so no hook runs in a cage. A
   hook planted in a repository would run with the cage's credential and domains: the `push` cage
   holds `GH_TOKEN` and reaches GitHub. A value on the command line outranks the repository's config,
   so the repository cannot turn hooks back on.
-- git never reads a repository's own config in a cage. The agent writes `.git/config` with its file
-  tools, and a key there can name a program for git to run, such as a filter driver or
-  `core.fsmonitor`. That program would run with the cage's credential. So every git action, in a
-  cage with a credential or without one, runs with `GIT_COMMON_DIR` set to a scratch directory in
-  the cage's tmpfs. `GIT_DIR`, the objects, and the refs stay the real ones. The refs stay real
-  through `extensions.refStorage = files://<path>`, which needs git 2.54 or later, and a test runs
-  it on the image's git. The global and system config are off. The plugin builds the scratch config
-  and never filters the agent's: it holds a fixed set of keys the plugin supplies, and the remote
-  and branch keys that carry a remote's URL and a branch's upstream, copied from the real config as
-  data. A key the plugin does not name never reaches git. The plugin's code fixes the copied set,
-  and no instance config changes it.
+- git in a cage never takes its settings from a repository's own config. The agent writes
+  `.git/config` with its file tools, and a key there can name a program for git to run, such as a
+  filter driver or `core.fsmonitor`. That program would run with the cage's credential. So every git
+  action, in a cage with a credential or without one, runs with `GIT_COMMON_DIR` set to a scratch
+  directory in the cage's tmpfs. `GIT_DIR`, the objects, and the refs stay the real ones. The refs
+  stay real through `extensions.refStorage = files://<path>`, which needs git 2.54 or later, and a
+  test runs it on the image's git. The global and system config are off. The plugin builds the
+  scratch config and never filters the agent's: it holds a fixed set of keys the plugin supplies,
+  and the remote and branch keys that carry a remote's URL and a branch's upstream, copied from the
+  real config as data. A key the plugin does not name never reaches git. The plugin's code fixes the
+  copied set, and no instance config changes it.
 - Every git run also denies the `file`, `ext`, and `fd` transports. `ext` runs a program in the
   cage, and `fd` talks to a file descriptor in place of a remote. `file` starts a local
   `upload-pack` or `receive-pack` without the plugin's settings, so the target repository's own

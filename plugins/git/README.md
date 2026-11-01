@@ -256,15 +256,18 @@ past it, as "Config isolation" gives.
 ### Commit identity
 
 Every action that creates a commit takes its identity from the grant's `env` alone: `commit`, a
-`merge` or `pull` that makes a merge commit or rebases, and `stash`. git takes the author from
-`GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL`. For each of `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL`
-that the grant leaves unset, the plugin sets the author's value, so the committer is the author. A
-grant that sets all four keeps its own committer. git reads no `user.name` or `user.email`: the
-repository's config is not read, as "Config isolation" gives, and the cage holds no global config of
-the agent's.
+`merge` that makes a merge commit, and `stash`. git takes the author from `GIT_AUTHOR_NAME` and
+`GIT_AUTHOR_EMAIL`. For each of `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL` that the grant leaves
+unset, the plugin sets the author's value, so the committer is the author. A grant that sets all
+four keeps its own committer. git takes no `user.name` or `user.email` from the repository's config,
+as "Config isolation" gives, and the cage holds no global config of the agent's.
 
-`commit` refuses when `GIT_AUTHOR_NAME` or `GIT_AUTHOR_EMAIL` is unset or empty. `merge`, `pull`,
-and `stash` check no identity themselves, so their grants set the two variables too.
+`commit` refuses when `GIT_AUTHOR_NAME` or `GIT_AUTHOR_EMAIL` is unset or empty. `merge` and `stash`
+check no identity themselves, so their grants set the two variables too.
+
+`pull` creates no commit. git in a cage takes no `pull.rebase` or `pull.ff` from the repository, so
+`pull` only fast-forwards: when the branches have diverged, git fails and asks how to reconcile
+them.
 
 A `git.commit` grant that gives every repository under its roots one identity:
 
@@ -304,9 +307,8 @@ with `-c` wins over the repository's config, so the grant alone decides: a repos
 neither turn signing on nor turn it off. `config_get` reads the repository's own config file, so it
 reports none of these values.
 
-With signing on, git signs each commit that an action creates: the commit that `commit` makes, the
-merge commit that `merge` makes, and each commit that `pull` makes when it merges or rebases. git
-does not sign the commits that `stash` makes.
+With signing on, git signs each commit that an action creates: the commit that `commit` makes, and
+the merge commit that `merge` makes. git does not sign the commits that `stash` makes.
 
 Before git runs, the wrapper and each script action check `GIT_SIGNING_KEY`, whatever the action.
 They refuse the call when the value is set but is not an absolute path, or names no readable regular
@@ -332,8 +334,7 @@ git.commit:
     GIT_SIGNING_KEY: /run/credentials/git-signing-key
 ```
 
-A `git.merge` or `git.pull` grant signs its commits only when it also gives the key and sets
-`GIT_SIGNING_KEY`.
+A `git.merge` grant signs its commits only when it also gives the key and sets `GIT_SIGNING_KEY`.
 
 The key stays a file mounted in each cage whose grant gives it. No code that a repository plants can
 run in the cage to read it: hooks are off, as "Hooks" gives, and git runs no program that the
@@ -348,11 +349,11 @@ constraints".
 
 ### Config isolation
 
-git in a cage never reads the repository's config. The agent writes `.git/config` with its own file
-tools, and a key there can name a program for git to run: a filter driver, a `diff` textconv,
-`core.fsmonitor`, or an LFS custom transfer. So every action, through the wrapper or as a script,
-runs git against a config that the plugin builds for that action. `build_isolation` in
-`scripts/git_plugin/cage.py` builds it, and `docs/design.md` gives the decision under "The git
+git in a cage never takes its settings from the repository's config. The agent writes `.git/config`
+with its own file tools, and a key there can name a program for git to run: a filter driver, a
+`diff` textconv, `core.fsmonitor`, or an LFS custom transfer. So every action, through the wrapper
+or as a script, runs git against a config that the plugin builds for that action. `build_isolation`
+in `scripts/git_plugin/cage.py` builds it, and `docs/design.md` gives the decision under "The git
 plugin's constraints".
 
 Before git runs, the plugin finds the repository's real git directories by reading files, with no
@@ -380,8 +381,9 @@ The scratch config holds two kinds of key, and no other key reaches git:
   `process`, and `required`, which name `/usr/bin/git-lfs`, because the image's system config that
   holds them is off.
 - Transport keys copied from the real config: `url`, `fetch`, and `pushurl` of each `remote.<name>`,
-  and `remote` and `merge` of each `branch.<name>`. None of them names a program. Each copied value
-  is quoted, so no value or name can open a key of its own.
+  and `remote` and `merge` of each `branch.<name>`. None of them names a program for git to run: a
+  remote URL in a form that runs one fails on the transport pins below. Each copied value is quoted,
+  so no value or name can open a key of its own.
 
 The plugin's code fixes both sets. A key it does not name stays in the file git does not read,
 whatever the key does. An `include.path`, a `url.<base>.insteadOf`, a `credential.*` key, or a
