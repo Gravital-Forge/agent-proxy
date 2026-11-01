@@ -50,6 +50,7 @@ REF_STORE = (
     "the git plugin supports only files"
 )
 PARTIAL = "{} is a partial clone; the git plugin does not support partial clones"
+SPARSE = "{} is a sparse checkout; the git plugin does not support sparse checkouts"
 NO_REPOS_STDERR = (
     "git plugin refused: "
     "GITHUB_REPOS is not set or names no repository; the grant's env sets it\n"
@@ -827,6 +828,62 @@ def test_build_isolation_allows_a_remote_marked_not_promisor(
 ) -> None:
     """A promisor setting git reads as false marks no partial clone."""
     _set_real(checkout, "remote.origin.promisor", value)
+
+    env = _build(checkout, scratch_parent)
+
+    assert Path(env["GIT_COMMON_DIR"]).parent == scratch_parent
+
+
+def test_build_isolation_refuses_a_sparse_checkout(
+    checkout: Path, scratch_parent: Path
+) -> None:
+    """A sparse-checkout file in the git dir marks a sparse checkout, and is refused."""
+    (checkout / ".git" / "info").mkdir(exist_ok=True)
+    (checkout / ".git" / "info" / "sparse-checkout").write_text("/*\n")
+
+    with pytest.raises(cage.RefusalError) as refused:
+        _build(checkout, scratch_parent)
+
+    assert str(refused.value) == SPARSE.format(checkout)
+    assert list(scratch_parent.iterdir()) == []
+
+
+def test_build_isolation_refuses_a_sparse_linked_worktree(
+    checkout: Path, scratch_parent: Path, tmp_path: Path
+) -> None:
+    """The sparse-checkout file is read from the worktree's own git dir."""
+    worktree = tmp_path / "root" / "wt"
+    _host_git(checkout, "worktree", "add", "-q", "--orphan", str(worktree))
+    info = checkout / ".git" / "worktrees" / "wt" / "info"
+    info.mkdir()
+    (info / "sparse-checkout").write_text("/*\n")
+
+    with pytest.raises(cage.RefusalError) as refused:
+        _build(worktree, scratch_parent)
+
+    assert str(refused.value) == SPARSE.format(worktree)
+
+
+@pytest.mark.parametrize("value", [None, "true", "Yes"])
+def test_build_isolation_refuses_a_sparse_checkout_config_key(
+    checkout: Path, scratch_parent: Path, value: str | None
+) -> None:
+    """core.sparseCheckout set true in the real config is refused."""
+    setting = "\tSparseCheckout\n" if value is None else f"\tsparseCheckout = {value}\n"
+    with (checkout / ".git" / "config").open("a") as config:
+        config.write(f"[core]\n{setting}")
+
+    with pytest.raises(cage.RefusalError) as refused:
+        _build(checkout, scratch_parent)
+
+    assert str(refused.value) == SPARSE.format(checkout)
+
+
+def test_build_isolation_allows_sparse_checkout_set_false(
+    checkout: Path, scratch_parent: Path
+) -> None:
+    """core.sparseCheckout set false marks no sparse checkout."""
+    _set_real(checkout, "core.sparseCheckout", "false")
 
     env = _build(checkout, scratch_parent)
 

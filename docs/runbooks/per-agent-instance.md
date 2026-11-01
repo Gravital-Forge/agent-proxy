@@ -38,6 +38,8 @@ Start from `examples/instance.yaml`. `docs/design.md` gives the rules a config m
 - Every root names a directory below the tree, never the tree itself.
 - Every grant that holds `github-token` sets `GITHUB_REPOS` in its `env`, or the plugin refuses each
   call under that grant. `plugins/git/README.md` gives the list's form under "The repository list".
+- Every grant for an action that creates a commit sets `GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL` in
+  its `env`. `plugins/git/README.md` names those actions and gives the rule under "Commit identity".
 - A grant that signs commits gives the signing key as a file credential, and sets `GIT_SIGNING_KEY`
   in its `env` to that file's path. Store the key as "The first start" stores each credential.
   `plugins/git/README.md` gives the setting under "Commit signing".
@@ -316,9 +318,10 @@ check runs here and never in the project. Every `docker` command below runs as r
    token can push to. Give a `git.commit` grant and a `git.push` grant whose `roots` name that
    checkout with mode `rw`:
 
-   - The `git.commit` grant gives `git-signing-key` as `{file: /run/credentials/git-signing-key}`,
-     and sets `GIT_SIGNING_KEY: /run/credentials/git-signing-key` in its `env`.
-     `plugins/git/README.md` gives the setting under "Commit signing".
+   - The `git.commit` grant gives `git-signing-key` as `{file: /run/credentials/git-signing-key}`.
+     Its `env` sets `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, and
+     `GIT_SIGNING_KEY: /run/credentials/git-signing-key`. `plugins/git/README.md` gives the setting
+     under "Commit signing".
    - The committer email that `commit` takes is a verified email of the account that holds the
      signing key. `plugins/git/README.md` gives where `commit` takes it from under "Commit
      identity".

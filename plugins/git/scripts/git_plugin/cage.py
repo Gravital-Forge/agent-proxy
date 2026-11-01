@@ -77,6 +77,8 @@ REF_STORE_REASON = (
 )
 SUBMODULES_REASON = "has submodules; the git plugin does not support submodules"
 PARTIAL_REASON = "is a partial clone; the git plugin does not support partial clones"
+SPARSE_REASON = "is a sparse checkout; the git plugin does not support sparse checkouts"
+SPARSE_CHECKOUT = "core.sparsecheckout"
 COMMITTER_FROM_AUTHOR = (
     ("GIT_COMMITTER_NAME", "GIT_AUTHOR_NAME"),
     ("GIT_COMMITTER_EMAIL", "GIT_AUTHOR_EMAIL"),
@@ -347,12 +349,14 @@ def check_shape(repo: str, dirs: GitDirs, entries: Sequence[ConfigEntry]) -> Non
     """Return if repo has a shape the isolation reads correctly.
 
     entries are the real config's. A .gitmodules counts whether git tracks
-    it or not.
+    it or not. git sparse-checkout writes its core.sparseCheckout to
+    config.worktree, which the isolation leaves unread, so the patterns file
+    in the git dir marks a sparse checkout too.
 
     Raises:
         RefusalError: repo is a shallow clone, uses reftable refs, has
-            submodules, is a partial clone, or sets an extension the
-            isolation does not support.
+            submodules, is a sparse checkout, is a partial clone, or sets an
+            extension the isolation does not support.
     """
     if (dirs.common_dir / "shallow").exists():
         reason = SHALLOW_REASON
@@ -360,6 +364,8 @@ def check_shape(repo: str, dirs: GitDirs, entries: Sequence[ConfigEntry]) -> Non
         reason = REFTABLE_REASON
     elif os.path.lexists(Path(repo) / ".gitmodules"):
         reason = SUBMODULES_REASON
+    elif os.path.lexists(dirs.git_dir / "info" / "sparse-checkout"):
+        reason = SPARSE_REASON
     else:
         reason = next(filter(None, map(_config_refusal, entries)), None)
     if reason is not None:
@@ -373,8 +379,9 @@ def _config_refusal(entry: ConfigEntry) -> str | None:
     one the isolation does not reproduce is refused: refStorage other than
     files, and every extension but worktreeConfig, whose config.worktree the
     isolation leaves unread by design. git clone --filter marks a partial
-    clone by a promisor remote, which the scratch config does not carry.
-    Names compare in lower case, as git compares them.
+    clone by a promisor remote, and an older sparse checkout by
+    core.sparseCheckout, neither of which the scratch config carries. Names
+    compare in lower case, as git compares them.
     """
     key, value = entry
     name = key.lower()
@@ -382,6 +389,8 @@ def _config_refusal(entry: ConfigEntry) -> str | None:
     subsection, _, variable = rest.rpartition(".")
     if section == "submodule":
         return SUBMODULES_REASON
+    if name == SPARSE_CHECKOUT:
+        return None if _git_false(value) else SPARSE_REASON
     if section == "remote" and subsection and variable == "promisor":
         return None if _git_false(value) else PARTIAL_REASON
     if name == REF_STORAGE:

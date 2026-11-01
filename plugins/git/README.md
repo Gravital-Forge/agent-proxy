@@ -47,8 +47,8 @@ one exception to both rules: "`diff`" gives its result.
 
 When a git step inside a script fails for a reason other than the outcome that step checks, the
 script stops and returns that step's git result. For example, `push` returns git's own result when
-`repo` is not a repository. One step is the exception: `push` reads a failed `git lfs ls-files` as
-no LFS file, as git-sidecar does, and goes on.
+`repo` does not exist. One step is the exception: `push` reads a failed `git lfs ls-files` as no LFS
+file, as git-sidecar does, and goes on.
 
 ### Refusals
 
@@ -378,8 +378,8 @@ The scratch config holds two kinds of key, and no other key reaches git:
 - Fixed keys that the plugin supplies. `core.repositoryformatversion = 1` and `core.bare = false`.
   `extensions.refStorage = files://<real common directory>`, so refs, reflogs, and `packed-refs`
   resolve in the real store; this needs git 2.54 or later. The `filter.lfs` keys `clean`, `smudge`,
-  `process`, and `required`, which name `/usr/bin/git-lfs`, because the image's system config that
-  holds them is off.
+  `process`, and `required`, because the image's system config that holds them is off. The first
+  three name `/usr/bin/git-lfs`, and `required` is `true`.
 - Transport keys copied from the real config: `url`, `fetch`, and `pushurl` of each `remote.<name>`,
   and `remote` and `merge` of each `branch.<name>`. None of them names a program for git to run: a
   remote URL in a form that runs one fails on the transport pins below. Each copied value is quoted,
@@ -413,6 +413,9 @@ repository's own config and hooks would run in the cage. A remote URL in one of 
 the denied transport. Network transports stay allowed: the egress proxy bounds where they go, as
 `docs/design.md` gives under "The cage".
 
+The pins govern git's transports only. A `.lfsconfig` can set `lfs.url` to a local path. git LFS
+then copies objects with its built-in standalone file adapter, which runs no program.
+
 ### Repository shapes
 
 The plugin acts on a main checkout or a linked worktree, LFS files included. Before git runs, every
@@ -420,10 +423,15 @@ action checks the repository's shape against what the scratch directory reproduc
 rest. The refusal names the shape:
 
 - A shallow clone: the common directory holds a `shallow` file.
-- Refs not in the files store: the common directory holds `reftable/`, or `extensions.refStorage`
-  names a store other than `files`.
+- Refs not in the files store: the common directory holds `reftable/`, or the config holds an
+  `extensions.refStorage` other than the bare value `files`, a `files://<path>` included.
 - Submodules: the working tree holds a `.gitmodules`, tracked or not, or the config holds a
   `submodule.*` key.
+- A sparse checkout: the git directory holds `info/sparse-checkout`, or the config holds a
+  `core.sparseCheckout` that git reads as true. `git sparse-checkout` writes its
+  `core.sparseCheckout` to `config.worktree`, which git in a cage does not read, so `checkout` would
+  fill the whole working tree. A checkout whose sparse mode is off but whose patterns file remains
+  is refused too.
 - A partial clone: the config holds a `remote.<name>.promisor` that git reads as true.
 - Any other extension: the config holds an `extensions.*` key other than `refStorage = files` and
   `worktreeConfig`. A SHA-256 repository and a repository with relative worktree links are refused

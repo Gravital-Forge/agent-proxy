@@ -293,14 +293,16 @@ One instance per agent user:
   stay real through `extensions.refStorage = files://<path>`, which needs git 2.54 or later, and a
   test runs it on the image's git. The global and system config are off. The plugin builds the
   scratch config and never filters the agent's: it holds a fixed set of keys the plugin supplies,
-  and the remote and branch keys that carry a remote's URL and a branch's upstream, copied from the
-  real config as data. A key the plugin does not name never reaches git. The plugin's code fixes the
-  copied set, and no instance config changes it.
+  and the remote and branch keys that carry a remote's URLs and refspec and a branch's upstream,
+  copied from the real config as data. A key the plugin does not name never reaches git. The
+  plugin's code fixes the copied set, and no instance config changes it.
 - Every git run also denies the `file`, `ext`, and `fd` transports. `ext` runs a program in the
   cage, and `fd` talks to a file descriptor in place of a remote. `file` starts a local
   `upload-pack` or `receive-pack` without the plugin's settings, so the target repository's own
   config and hooks would run. Network transports stay allowed, because the egress proxy bounds where
-  they go.
+  they go. These pins govern git's transports only: an `lfs.url` in a `.lfsconfig` can name a local
+  path, which git LFS serves with its built-in standalone file adapter, and that adapter runs no
+  program.
 - Commit identity comes from the grant's env alone, for every action that creates a commit. The
   plugin refuses a repository whose shape the scratch directory cannot reproduce.
   `plugins/git/README.md` gives the scratch config and the transport pins under "Config isolation",
