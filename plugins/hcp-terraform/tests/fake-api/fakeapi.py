@@ -8,10 +8,10 @@ It serves organization o with two workspaces, listed and other, a run in each,
 the listed run's plan, apply, and ingress attributes, and the plan log and the
 apply log.
 
-It prints one JSON line for each request of any method, with the method, the
-Host header, the path with its query, and the Authorization header or null. It
-answers every method but GET with 405 and any unknown GET with 404. It prints
-serving once its socket is bound.
+It prints one JSON line for each GET, HEAD, POST, PUT, PATCH, or DELETE, with
+the method, the Host header, the path with its query, and the Authorization
+header or null. It answers each of those methods but GET with 405, and any
+unknown GET with 404. It prints serving once its socket is bound.
 """
 
 import json
