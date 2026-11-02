@@ -102,10 +102,10 @@ def safe_id(value: object) -> str:
 
 
 def _token() -> str:
-    """Return TFE_TOKEN without the space around it.
+    """Return TFE_TOKEN without the whitespace around it.
 
-    A header cannot carry a character outside visible ASCII, and the error
-    http.client raises for one quotes the whole header, token included.
+    A CR or an LF in a header makes http.client raise an error that quotes
+    the whole header, token included.
 
     Raises:
         RefusalError: TFE_TOKEN is unset or empty, or holds a character
