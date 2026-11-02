@@ -450,6 +450,16 @@ The github plugin is the uv package in `plugins/github/`, placed as `docs/design
 checks the git plugin's. `plugins/github/README.md` gives everything about the plugin itself: its
 actions, its attachments, its egress, its layout, and its tests.
 
+## The hcp-terraform plugin
+
+The hcp-terraform plugin is the uv package in `plugins/hcp-terraform/`, placed as `docs/design.md`
+sets out under "Repository layout". The `manifest-check` job in `.github/workflows/ci.yml` checks
+its image as it checks the git plugin's. Its module is
+`plugins/hcp-terraform/scripts/hcp_terraform_plugin/`: `api.py` sends every request, `workspaces.py`
+holds the workspace list, and `actions.py` holds the five actions. `plugins/hcp-terraform/README.md`
+gives everything about the plugin itself: its actions, its workspace list, where the token goes, its
+egress, its layout, and its tests.
+
 ## Where state lives
 
 Environment variables place everything the admin command reads and writes. The config file places
