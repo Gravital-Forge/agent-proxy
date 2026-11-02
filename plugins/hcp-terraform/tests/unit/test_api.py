@@ -16,13 +16,25 @@ NOT_FOUND = b'{"errors":[{"status":"404","title":"not found"}]}'
 PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 
 
+class StalledBody(io.RawIOBase):
+    """A body stream that times out on its first read."""
+
+    def readable(self) -> bool:
+        """Report that the stream is readable."""
+        return True
+
+    def readinto(self, buffer: memoryview) -> int:
+        """Time out instead of filling buffer."""
+        raise TimeoutError("timed out")
+
+
 class FakeTransport(urllib.request.HTTPSHandler):
     """An HTTPS handler that answers from a table by URL and records each request."""
 
     def __init__(self) -> None:
         """Start with no answers, no requests, and no failure."""
         super().__init__()
-        self.answers: dict[str, tuple[int, dict[str, str], bytes]] = {}
+        self.answers: dict[str, tuple[int, dict[str, str], bytes | StalledBody]] = {}
         self.seen: list[urllib.request.Request] = []
         self.failure: urllib.error.URLError | None = None
 
@@ -35,9 +47,8 @@ class FakeTransport(urllib.request.HTTPSHandler):
         message = Message()
         for name, value in headers.items():
             message[name] = value
-        response = urllib.response.addinfourl(
-            io.BytesIO(body), message, req.full_url, status
-        )
+        stream = io.BytesIO(body) if isinstance(body, bytes) else body
+        response = urllib.response.addinfourl(stream, message, req.full_url, status)
         # urllib's error processor reads the reason phrase from msg.
         response.msg = http.HTTPStatus(status).phrase
         return response
@@ -168,6 +179,19 @@ def test_get_json_names_a_request_that_got_no_answer(
         api.get_json("/runs/run-1")
 
     assert str(raised.value) == "GET /runs/run-1 failed: <urlopen error refused>"
+
+
+@pytest.mark.parametrize("status", [200, 500])
+def test_get_json_names_an_answer_whose_body_never_arrives(
+    transport: FakeTransport, status: int
+) -> None:
+    """A body read that times out fails as a request that got no answer."""
+    transport.answers[f"{BASE}/runs/run-1"] = (status, {}, StalledBody())
+
+    with pytest.raises(ApiError) as raised:
+        api.get_json("/runs/run-1")
+
+    assert str(raised.value) == "GET /runs/run-1 failed: timed out"
 
 
 @pytest.mark.parametrize("body", [b"[]", b"not json", b"\xff"])

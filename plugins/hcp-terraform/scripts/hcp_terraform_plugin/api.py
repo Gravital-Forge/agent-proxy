@@ -110,13 +110,26 @@ def _send(
         ApiError: the answer is not a 2xx, or the request failed.
     """
     try:
-        with opener.open(request, timeout=TIMEOUT_SECONDS) as response:
-            return response.read()
+        return _answer_body(opener, request, path)
+    except (OSError, http.client.HTTPException) as error:
+        raise ApiError(f"GET {path} failed: {error}") from error
+
+
+def _answer_body(
+    opener: urllib.request.OpenerDirector, request: urllib.request.Request, path: str
+) -> bytes:
+    """Send request through opener, and return the body of its 2xx answer.
+
+    Raises:
+        ApiError: the answer is not a 2xx.
+    """
+    try:
+        response = opener.open(request, timeout=TIMEOUT_SECONDS)
     except urllib.error.HTTPError as answer:
         with answer:
             raise ApiError(_answer_reason(path, answer.code, answer.read())) from answer
-    except (OSError, http.client.HTTPException) as error:
-        raise ApiError(f"GET {path} failed: {error}") from error
+    with response:
+        return response.read()
 
 
 def _json_object(path: str, body: bytes) -> dict[str, object]:
