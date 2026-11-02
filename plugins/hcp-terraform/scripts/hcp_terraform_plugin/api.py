@@ -24,6 +24,7 @@ USER_AGENT = "agent-proxy-hcp-terraform-plugin"
 TIMEOUT_SECONDS = 30
 REASON_BODY_CHARACTERS = 200
 ID_PATTERN = re.compile(r"[a-z]+-[A-Za-z0-9]+")
+VISIBLE_ASCII = re.compile(r"[\x21-\x7e]+")
 LOG_FRAMING = str.maketrans("", "", "\x02\x03")
 
 
@@ -49,13 +50,12 @@ def get_json(path: str, query: Mapping[str, str] | None = None) -> dict[str, obj
     to the API host and nowhere else.
 
     Raises:
-        RefusalError: TFE_TOKEN is unset or empty.
+        RefusalError: TFE_TOKEN is unset or empty, or holds a character
+            that is not visible ASCII.
         ApiError: the answer is not a 2xx holding a JSON object, or the
             request failed.
     """
-    token = os.environ.get(CREDENTIAL_ENV_NAME)
-    if not token:
-        raise RefusalError(f"{CREDENTIAL_ENV_NAME} is not set")
+    token = _token()
     url = f"{BASE_URL}{path}"
     if query:
         url = f"{url}?{urllib.parse.urlencode(query)}"
@@ -99,6 +99,26 @@ def safe_id(value: object) -> str:
     if isinstance(value, str) and ID_PATTERN.fullmatch(value):
         return value
     raise ApiError(f"{value!r} is not an HCP Terraform ID")
+
+
+def _token() -> str:
+    """Return TFE_TOKEN without the space around it.
+
+    A header cannot carry a character outside visible ASCII, and the error
+    http.client raises for one quotes the whole header, token included.
+
+    Raises:
+        RefusalError: TFE_TOKEN is unset or empty, or holds a character
+            that is not visible ASCII. The reason never quotes the token.
+    """
+    token = os.environ.get(CREDENTIAL_ENV_NAME, "").strip()
+    if not token:
+        raise RefusalError(f"{CREDENTIAL_ENV_NAME} is not set")
+    if not VISIBLE_ASCII.fullmatch(token):
+        raise RefusalError(
+            f"{CREDENTIAL_ENV_NAME} holds a character that is not visible ASCII"
+        )
+    return token
 
 
 def _send(

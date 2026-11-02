@@ -60,9 +60,9 @@ member named above. In that data, a member that HCP Terraform's answer lacks is 
 "Refusals" gives. A failure is exit code 1 with the reason on `stderr`.
 
 A failed request gives `GET <path> answered <status>: <body>`, with the first 200 characters of the
-answer's body, or `GET <path> failed: <error>` when no answer came. `<path>` is the request's path
-below `https://app.terraform.io/api/v2`, or the path of the `log-read-url` for a log. It never holds
-the token.
+answer's body, or `GET <path> failed: <error>` when no answer came, or when the answer's status came
+but its body did not. `<path>` is the request's path below `https://app.terraform.io/api/v2`, or the
+path of the `log-read-url` for a log. It never holds the token.
 
 Other failures are an answer that is not a JSON object or holds no `data` list, a workspace that
 answers no organization and name, and an ID that is not an HCP Terraform ID. Every ID the plugin
@@ -94,7 +94,9 @@ The plugin refuses a call with exit code 2 and a `stderr` that begins
   `HCP_TERRAFORM_WORKSPACES entry '<entry>' is not organization/name or organization/*`
 - A workspace is not in the list:
   `workspace '<organization>/<name>' is not in HCP_TERRAFORM_WORKSPACES`
-- `TFE_TOKEN` is unset or empty: `TFE_TOKEN is not set`
+- `TFE_TOKEN` is unset, or empty once the plugin strips the space around it: `TFE_TOKEN is not set`
+- `TFE_TOKEN` holds a character other than visible ASCII, `!` through `~`:
+  `TFE_TOKEN holds a character that is not visible ASCII`. The reason never quotes the token.
 - A `log-read-url` is not `https` on `archivist.terraform.io`:
   `log-read-url '<url>' is not an https URL on archivist.terraform.io`
 - The image's executable runs under a name that is no action's: `no action is named '<name>'`. This
@@ -108,6 +110,10 @@ calls fail it: a `run_id`, `organization`, or `workspace` in another form, a `li
 
 - The credential is `TFE_TOKEN`. Each action declares `{"env": "TFE_TOKEN"}` in `manifest.json`;
   give each grant the token as `TFE_TOKEN`.
+- The plugin strips the space around the token before it uses it, so a token stored with a trailing
+  newline still works. It refuses a token that then holds any character other than visible ASCII,
+  before it sends a request, because a header cannot carry that character and the error would quote
+  the token. No result holds the token.
 - The token travels only to `app.terraform.io`, in the `Authorization` header of a GET.
   `https://app.terraform.io/api/v2` is a constant in `api.py`, never read from input or the
   environment.

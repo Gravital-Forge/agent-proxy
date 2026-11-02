@@ -251,6 +251,37 @@ def test_get_json_refuses_without_a_token_before_any_request(
     assert transport.seen == []
 
 
+@pytest.mark.parametrize("token", [f"{TOKEN}\n", f" {TOKEN}\r\n"])
+def test_get_json_strips_the_space_around_the_token(
+    transport: FakeTransport, monkeypatch: pytest.MonkeyPatch, token: str
+) -> None:
+    """A token stored with space around it is sent without that space."""
+    monkeypatch.setenv("TFE_TOKEN", token)
+    transport.answers[f"{BASE}/runs/run-1"] = (200, {}, b'{"data": {"id": "run-1"}}')
+
+    api.get_json("/runs/run-1")
+
+    [request] = transport.seen
+    assert request.headers["Authorization"] == f"Bearer {TOKEN}"
+
+
+@pytest.mark.parametrize(
+    "token",
+    [f"{TOKEN}\r\nX: y", f"{TOKEN} x", f"{TOKEN}\x7f", f"{TOKEN}\u00e9"],
+)
+def test_get_json_refuses_a_token_outside_visible_ascii_before_any_request(
+    transport: FakeTransport, monkeypatch: pytest.MonkeyPatch, token: str
+) -> None:
+    """A token holding a character other than visible ASCII is refused unquoted."""
+    monkeypatch.setenv("TFE_TOKEN", token)
+
+    with pytest.raises(RefusalError) as raised:
+        api.get_json("/runs/run-1")
+
+    assert str(raised.value) == "TFE_TOKEN holds a character that is not visible ASCII"
+    assert transport.seen == []
+
+
 def test_get_log_returns_the_body_without_its_framing_characters(
     transport: FakeTransport,
 ) -> None:

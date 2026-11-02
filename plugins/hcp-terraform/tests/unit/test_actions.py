@@ -1,3 +1,4 @@
+import http.client
 import json
 from collections.abc import Mapping
 
@@ -28,6 +29,8 @@ VALID_INPUTS: dict[str, dict[str, object]] = {
     "apply_log": {"run_id": "run-1"},
 }
 RUN_ACTIONS = ["run_view", "plan_log", "apply_log"]
+SECRET = "secret-token"
+PROXY_VARIABLES = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
 
 Query = tuple[tuple[str, str], ...]
 
@@ -205,6 +208,23 @@ def fake(monkeypatch: pytest.MonkeyPatch) -> FakeApi:
     return fake_api
 
 
+@pytest.fixture
+def offline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail every HTTPS connection, clear the proxies, and list o/listed.
+
+    The real HTTP layer still builds each request, so a header the token
+    cannot form fails here as it would on the network.
+    """
+
+    def refuse(_connection: http.client.HTTPSConnection) -> None:
+        raise OSError("no network")
+
+    monkeypatch.setattr(http.client.HTTPSConnection, "connect", refuse)
+    for name in PROXY_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("HCP_TERRAFORM_WORKSPACES", "o/listed")
+
+
 def test_the_actions_are_the_five_reads() -> None:
     """ACTIONS names exactly the five read actions."""
     assert set(actions.ACTIONS) == set(VALID_INPUTS)
@@ -226,6 +246,35 @@ def test_an_api_error_becomes_exit_code_1(fake: FakeApi) -> None:
     assert _call("run_view", {"run_id": "run-1"}) == _failure(
         "GET /runs/run-1 answered 404: no\n"
     )
+
+
+@pytest.mark.usefixtures("offline")
+def test_a_token_with_a_trailing_newline_reaches_the_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token stored with a trailing newline is used, and no result quotes it."""
+    monkeypatch.setenv("TFE_TOKEN", f"{SECRET}\n")
+
+    result = _call("run_view", {"run_id": "run-abc"})
+
+    assert result == _failure("GET /runs/run-abc failed: <urlopen error no network>\n")
+    assert SECRET not in result["stderr"]
+
+
+@pytest.mark.usefixtures("offline")
+def test_a_token_that_could_split_a_header_is_refused_unquoted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token holding CR LF is a refusal whose stderr does not quote it."""
+    monkeypatch.setenv("TFE_TOKEN", f"{SECRET}\r\nX: y")
+
+    result = _call("run_view", {"run_id": "run-abc"})
+
+    assert result == _refusal(
+        "hcp-terraform plugin refused: TFE_TOKEN holds a character that is not "
+        "visible ASCII\n"
+    )
+    assert SECRET not in result["stderr"]
 
 
 def test_workspace_list_pages_through_each_organization(

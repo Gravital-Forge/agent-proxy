@@ -377,14 +377,13 @@ check runs here and never in the project. Every `docker` command below runs as r
     `hcp-terraform-token`, as "The first start" stores each credential. Take two workspaces the
     token can read, `<listed>` and `<unlisted>`, each as `organization/name`, and one run of each
     whose plan has finished, `<listed run>` and `<unlisted run>`. Pick `<listed run>` from the
-    workspace's 20 newest runs, the number `run_list` returns by default. Give
-    `hcp-terraform.run_list` and `hcp-terraform.plan_log` grants shaped like those in
-    `examples/instance.yaml`, with `HCP_TERRAFORM_WORKSPACES: "<listed>"`. Put the config in force
-    as "The first start" does.
+    workspace's 20 newest runs. Give `hcp-terraform.run_list` and `hcp-terraform.plan_log` grants
+    shaped like those in `examples/instance.yaml`, with `HCP_TERRAFORM_WORKSPACES: "<listed>"`. Put
+    the config in force as "The first start" does.
 
     1. Through the agent's MCP client, call `hcp-terraform_run_list` with `organization` and
-       `workspace` set to those of `<listed>`. The result's `exit_code` is 0, and its `runs` holds
-       `<listed run>`.
+       `workspace` set to those of `<listed>`, and `limit` set to 20. The result's `exit_code` is 0,
+       and its `runs` holds `<listed run>`.
     2. Call `hcp-terraform_run_list` with `organization` and `workspace` set to those of
        `<unlisted>`. The result's `exit_code` is 2, and its `stderr` holds
        `hcp-terraform plugin refused: workspace '<unlisted>' is not in HCP_TERRAFORM_WORKSPACES`.
