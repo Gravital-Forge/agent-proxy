@@ -375,10 +375,12 @@ check runs here and never in the project. Every `docker` command below runs as r
 
 11. **The workspace list with a real token.** Store a real HCP Terraform API token as the credential
     `hcp-terraform-token`, as "The first start" stores each credential. Take two workspaces the
-    token can read, `<listed>` and `<unlisted>`, each as `organization/name`, and a run of each
-    whose plan has finished, `<listed run>` and `<unlisted run>`. Give `hcp-terraform.run_list` and
-    `hcp-terraform.plan_log` grants shaped like those in `examples/instance.yaml`, with
-    `HCP_TERRAFORM_WORKSPACES: "<listed>"`. Put the config in force as "The first start" does.
+    token can read, `<listed>` and `<unlisted>`, each as `organization/name`, and one run of each
+    whose plan has finished, `<listed run>` and `<unlisted run>`. Pick `<listed run>` from the
+    workspace's 20 newest runs, the number `run_list` returns by default. Give
+    `hcp-terraform.run_list` and `hcp-terraform.plan_log` grants shaped like those in
+    `examples/instance.yaml`, with `HCP_TERRAFORM_WORKSPACES: "<listed>"`. Put the config in force
+    as "The first start" does.
 
     1. Through the agent's MCP client, call `hcp-terraform_run_list` with `organization` and
        `workspace` set to those of `<listed>`. The result's `exit_code` is 0, and its `runs` holds

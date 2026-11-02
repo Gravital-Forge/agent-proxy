@@ -454,10 +454,9 @@ actions, its attachments, its egress, its layout, and its tests.
 
 The hcp-terraform plugin is the uv package in `plugins/hcp-terraform/`, placed as `docs/design.md`
 sets out under "Repository layout". The `manifest-check` job in `.github/workflows/ci.yml` checks
-its image as it checks the git plugin's. Its module is
-`plugins/hcp-terraform/scripts/hcp_terraform_plugin/`: `api.py` sends every request, `workspaces.py`
-holds the workspace list, and `actions.py` holds the five actions. `plugins/hcp-terraform/README.md`
-gives everything about the plugin itself: its actions, its workspace list, where the token goes, its
+its image as it checks the git plugin's. Its code is in
+`plugins/hcp-terraform/scripts/hcp_terraform_plugin/`. `plugins/hcp-terraform/README.md` gives
+everything about the plugin itself: its actions, its workspace list, where the token goes, its
 egress, its layout, and its tests.
 
 ## Where state lives

@@ -1,8 +1,8 @@
 # The hcp-terraform plugin
 
 The hcp-terraform plugin reads HCP Terraform runs and their logs, for the workspaces a grant lists,
-and does nothing else. It offers five script actions. `docs/writing-a-plugin.md` gives the plugin
-model this follows.
+and does nothing else. Each of its actions is a script action. `docs/writing-a-plugin.md` gives the
+plugin model this follows.
 
 ## Why it only reads
 
@@ -14,11 +14,10 @@ a GET, and no action reads state, state outputs, variables, or plan JSON.
 
 ## The actions
 
-A config pins the image as `hcp-terraform` and grants each action under `hcp-terraform.<action>`.
-`docs/design.md` gives MCP tool names as `<plugin>_<action>`, so the agent calls
-`hcp-terraform_workspace_list`, `hcp-terraform_run_list`, `hcp-terraform_run_view`,
-`hcp-terraform_plan_log`, and `hcp-terraform_apply_log`. `manifest.json` declares every action, its
-input schema, its credential, and its timeout of `2m`.
+A config that pins the image as `hcp-terraform`, as "A grant" does, serves each action as the MCP
+tool `hcp-terraform_<action>`, by the rule `<plugin>_<action>` that `docs/design.md` gives:
+`run_list` becomes `hcp-terraform_run_list`. `manifest.json` declares every action, its input
+schema, its credential, and its timeout of `2m`.
 
 ### `workspace_list`
 
@@ -46,18 +45,19 @@ is null when the run has no configuration version or its ingress attributes answ
 
 ### `plan_log` and `apply_log`
 
-Each takes `run_id` and returns `log`, the plan's or the apply's log as text, with the framing
-characters `\x02` and `\x03` removed and nothing else changed. HCP Terraform does not document the
-log's format. The deployment acceptance check in `docs/runbooks/per-agent-instance.md` confirms it
-against a real run. Each fails with exit code 1 when the run has no such log yet.
-
-A member that HCP Terraform's answer lacks is null in the result.
+Each takes `run_id` and returns `log`, the plan's or the apply's log as text: decoded as UTF-8, with
+each invalid byte replaced by U+FFFD, and with the framing characters `\x02` and `\x03` removed. HCP
+Terraform does not document the log's format. The deployment acceptance check in
+`docs/runbooks/per-agent-instance.md` confirms it against a real run. Each fails with exit code 1
+when the run has no such log yet.
 
 ### What an action returns
 
-Every result holds `exit_code`, `stdout`, and `stderr`, as `docs/design.md` gives under "Results",
-and `stdout` is always empty. A success is exit code 0 with its data in the member named above. A
-refusal is exit code 2, as "Refusals" gives. A failure is exit code 1 with the reason on `stderr`.
+Every result holds `exit_code`, `stdout`, and `stderr`, as each action's `output_schema` in
+`manifest.json` states, and `stdout` is always empty. A success is exit code 0 with its data in the
+member named above. In that data, a member that HCP Terraform's answer lacks is null, and
+`workspace_list` leaves out a workspace whose answer holds no name. A refusal is exit code 2, as
+"Refusals" gives. A failure is exit code 1 with the reason on `stderr`.
 
 A failed request gives `GET <path> answered <status>: <body>`, with the first 200 characters of the
 answer's body, or `GET <path> failed: <error>` when no answer came. `<path>` is the request's path
@@ -128,9 +128,10 @@ proxy, which `HTTPS_PROXY` names. Its default TLS context reads `SSL_CERT_FILE`.
 refuses a host the grant does not name.
 
 `workspace_list`, `run_list`, and `run_view` reach only `app.terraform.io`. `plan_log` and
-`apply_log` reach `app.terraform.io` and `archivist.terraform.io`, and a log redirect to any other
-host is refused. "A grant" names both hosts for every action, as `examples/instance.yaml` does. A
-grant of the first three may name `app.terraform.io` alone.
+`apply_log` reach `app.terraform.io` and `archivist.terraform.io`. The egress proxy blocks a log
+redirect to any other host, and the action then fails with exit code 1. "A grant" names both hosts
+for every action, as `examples/instance.yaml` does. A grant of the first three may name
+`app.terraform.io` alone.
 
 ## A grant
 
@@ -160,7 +161,7 @@ has `roots: []`, because no action reads a file.
 
 - `scripts/hcp_terraform_plugin/` is the module. `errors.py` holds the refusal and the failure,
   `workspaces.py` the workspace list, `api.py` the HTTP layer and its checks of the token, the log
-  URL, and each ID, `actions.py` the five actions and `run_script`, which turns their errors into
+  URL, and each ID, `actions.py` the actions and `run_script`, which turns their errors into
   results, and `entry.py` runs the action the executable's name names.
 - `scripts/entry` is the one executable every action runs.
 - `Dockerfile` builds the image on the Alpine base the git plugin pins, with Python 3 from apk. The
@@ -171,8 +172,8 @@ has `roots: []`, because no action reads a file.
   Docker.
 - `tests/fake-api/` builds a fake `app.terraform.io` and `archivist.terraform.io`, which runs on an
   internal network under both names, with a certificate for both from its own test CA. It serves the
-  organization `o` with the workspaces `listed` and `other`, answers every method but GET with 405,
-  and logs each request's method, host, path, and `Authorization` header.
+  organization `o` with the workspaces `listed` and `other`, answers HEAD, POST, PUT, PATCH, and
+  DELETE with 405, and logs each request's method, host, path, and `Authorization` header.
 - `tests/integration/` builds the plugin image, the core's verifier image, and the fake, and runs
   each action in a real cage through the core's runner, a cage that trusts the fake's CA through
   `SSL_CERT_FILE`. It shows that every request is a GET, that the token reaches only the API host,
