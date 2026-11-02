@@ -127,7 +127,9 @@ def _answer_body(
         response = opener.open(request, timeout=TIMEOUT_SECONDS)
     except urllib.error.HTTPError as answer:
         with answer:
-            raise ApiError(_answer_reason(path, answer.code, answer.read())) from answer
+            raise ApiError(
+                _answer_reason(path, answer.code, answer.read()), status=answer.code
+            ) from answer
     with response:
         return response.read()
 

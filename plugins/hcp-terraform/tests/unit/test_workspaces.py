@@ -135,6 +135,27 @@ def test_check_workspace_refuses_an_unlisted_workspace(
     )
 
 
+@pytest.mark.parametrize(
+    ("organization", "name", "value", "allowed"),
+    [
+        ("o", "a", "o/a", True),
+        ("o", "a", "o/*", True),
+        ("o", "a", "p/*,o/a", True),
+        ("o", "a", "o/b", False),
+        ("O", "a", "o/a", False),
+        ("o", "A", "o/a", False),
+        ("op", "a", "o/*", False),
+    ],
+)
+def test_is_allowed_tells_whether_an_entry_names_the_workspace(
+    organization: str, name: str, value: str, allowed: bool
+) -> None:
+    """A workspace an entry names is allowed, compared exactly; no other is."""
+    entries = workspaces.allowed_workspaces({"HCP_TERRAFORM_WORKSPACES": value})
+
+    assert workspaces.is_allowed(organization, name, entries) is allowed
+
+
 def test_organizations_lists_each_organization_once_in_entry_order() -> None:
     """The organizations of the entries come out once each, in first-seen order."""
     entries = workspaces.allowed_workspaces(

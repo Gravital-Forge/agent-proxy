@@ -157,6 +157,19 @@ def test_get_json_names_the_status_and_body_of_a_failed_answer(
     assert str(raised.value) == f"GET /runs/run-1 answered {status}: no"
 
 
+@pytest.mark.parametrize("status", [301, 404, 500])
+def test_get_json_carries_the_status_of_a_failed_answer(
+    transport: FakeTransport, status: int
+) -> None:
+    """A non-2xx answer's error holds the answer's status."""
+    transport.answers[f"{BASE}/runs/run-1"] = (status, {}, b"no")
+
+    with pytest.raises(ApiError) as raised:
+        api.get_json("/runs/run-1")
+
+    assert raised.value.status == status
+
+
 def test_get_json_names_200_characters_of_a_failed_answers_body(
     transport: FakeTransport,
 ) -> None:
@@ -179,6 +192,18 @@ def test_get_json_names_a_request_that_got_no_answer(
         api.get_json("/runs/run-1")
 
     assert str(raised.value) == "GET /runs/run-1 failed: <urlopen error refused>"
+
+
+def test_get_json_carries_no_status_when_no_answer_came(
+    transport: FakeTransport,
+) -> None:
+    """A transport failure's error holds no status."""
+    transport.failure = urllib.error.URLError("refused")
+
+    with pytest.raises(ApiError) as raised:
+        api.get_json("/runs/run-1")
+
+    assert raised.value.status is None
 
 
 @pytest.mark.parametrize("status", [200, 500])

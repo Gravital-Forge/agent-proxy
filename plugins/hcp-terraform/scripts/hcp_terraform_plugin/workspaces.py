@@ -61,20 +61,26 @@ def _workspace_entry(entry: str) -> WorkspaceEntry:
     return WorkspaceEntry(organization=organization, name=name)
 
 
+def is_allowed(organization: str, name: str, entries: Sequence[WorkspaceEntry]) -> bool:
+    """Return whether one of entries names the workspace organization/name.
+
+    Names are compared exactly: a refusal is the safe side of a case mismatch.
+    """
+    return any(
+        entry.organization == organization and entry.name in (ANY_NAME, name)
+        for entry in entries
+    )
+
+
 def check_workspace(
     organization: str, name: str, entries: Sequence[WorkspaceEntry]
 ) -> None:
     """Return if one of entries names the workspace organization/name.
 
-    Names are compared exactly: a refusal is the safe side of a case mismatch.
-
     Raises:
         RefusalError: no entry names the workspace.
     """
-    if not any(
-        entry.organization == organization and entry.name in (ANY_NAME, name)
-        for entry in entries
-    ):
+    if not is_allowed(organization, name, entries):
         raise RefusalError(
             f"workspace '{organization}/{name}' is not in {WORKSPACES_ENV_NAME}"
         )
