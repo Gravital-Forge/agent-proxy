@@ -1,0 +1,128 @@
+{
+  "actions": {
+    "workspace_list": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "credentials": [{"env": "TFE_TOKEN"}],
+      "timeout": "2m",
+      "executable": "/plugin/bin/workspace_list",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"},
+          "workspaces": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
+    "run_list": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "organization": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"},
+          "workspace": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]*$"},
+          "limit": {"type": "integer", "minimum": 1, "maximum": 100}
+        },
+        "required": ["organization", "workspace"],
+        "additionalProperties": false
+      },
+      "credentials": [{"env": "TFE_TOKEN"}],
+      "timeout": "2m",
+      "executable": "/plugin/bin/run_list",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"},
+          "runs": {"type": "array", "items": {"type": "object"}}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
+    "run_view": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "run_id": {"type": "string", "pattern": "^run-[A-Za-z0-9]+$"}
+        },
+        "required": ["run_id"],
+        "additionalProperties": false
+      },
+      "credentials": [{"env": "TFE_TOKEN"}],
+      "timeout": "2m",
+      "executable": "/plugin/bin/run_view",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"},
+          "run": {"type": "object"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
+    "plan_log": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "run_id": {"type": "string", "pattern": "^run-[A-Za-z0-9]+$"}
+        },
+        "required": ["run_id"],
+        "additionalProperties": false
+      },
+      "credentials": [{"env": "TFE_TOKEN"}],
+      "timeout": "2m",
+      "executable": "/plugin/bin/plan_log",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"},
+          "log": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    },
+    "apply_log": {
+      "kind": "script",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "run_id": {"type": "string", "pattern": "^run-[A-Za-z0-9]+$"}
+        },
+        "required": ["run_id"],
+        "additionalProperties": false
+      },
+      "credentials": [{"env": "TFE_TOKEN"}],
+      "timeout": "2m",
+      "executable": "/plugin/bin/apply_log",
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "exit_code": {"type": "integer"},
+          "stdout": {"type": "string"},
+          "stderr": {"type": "string"},
+          "log": {"type": "string"}
+        },
+        "required": ["exit_code", "stdout", "stderr"],
+        "additionalProperties": false
+      }
+    }
+  }
+}

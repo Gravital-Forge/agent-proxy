@@ -172,6 +172,11 @@ scopes:
   The plugin's image takes gh from its release tarball, pinned by its SHA-256, because Alpine's
   `github-cli` package lacks `--attach`. `plugins/github/README.md` gives the detail under
   "Attachments".
+- The hcp-terraform plugin only reads: its actions read HCP Terraform runs and their logs for the
+  workspaces a grant lists, and send nothing but GETs. Its tool surface is the whole read-only
+  limit, because every token an HCP Terraform Free organization mints is broad.
+  `plugins/hcp-terraform/README.md` gives why, its actions, its workspace list, and where the token
+  goes.
 
 ## The cage
 
@@ -326,7 +331,8 @@ agent-proxy/
 │   └── verifier/         # the in-cage root verifier: Go source, its tests, and the Dockerfile that builds it
 └── plugins/
     ├── git/              # Dockerfile, describe and the manifest it prints, scripts/, tests/, README.md
-    └── github/           # Dockerfile, describe, manifest.json, scripts/, tests/ with a stub gh and a fake API, README.md
+    ├── github/           # Dockerfile, describe, manifest.json, scripts/, tests/ with a stub gh and a fake API, README.md
+    └── hcp-terraform/    # Dockerfile, describe, manifest.json, scripts/, tests/ with a fake API, README.md
 ```
 
 The core is Python on uv and FastMCP, reusing git-sidecar's auth, transport, and test patterns. One
@@ -377,6 +383,9 @@ are the design's, and `docs/runbooks/per-agent-instance.md` carries them as step
   render for the operator on the pull request's page. The agent writes both files itself, in a
   worktree below the grant's root, so the check also shows that the cage reads the agent's own files
   there. With the setting `off`, the same call is refused.
+- With a real token and a grant whose `HCP_TERRAFORM_WORKSPACES` names one workspace, the
+  hcp-terraform plugin's `run_list` and `plan_log` succeed on that workspace, and each is refused on
+  another workspace the token reaches.
 
 The `S` checks need no counterpart on the agent's daemon: in a deployment, cages never run there.
 

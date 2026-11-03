@@ -46,6 +46,7 @@ STAT_SCRIPT = "import os, sys; s = os.stat(sys.argv[1]); print(s.st_dev, s.st_in
 CALL_TIMEOUT_SECONDS = 120
 AUDIT_LINES = "50"
 CALLED_TOOLS = ("git_status", "github_pr_view", "probe_read_credential")
+UNBUILT_PLUGIN = "hcp-terraform"
 
 
 @dataclass(frozen=True)
@@ -96,9 +97,20 @@ def _make_tree(tmp_path: Path) -> _Tree:
 def _full_config(
     agent_tree: Path, git_plugin: str, github_plugin: str, probe_plugin: str
 ) -> dict[str, object]:
-    """Return the sample config for agent_tree, with the pushed plugins and a probe."""
+    """Return the sample config for agent_tree, with the pushed plugins and a probe.
+
+    The config leaves out the hcp-terraform plugin and every grant of its
+    actions, because the test builds no image for it.
+    """
     text = EXAMPLE_CONFIG.read_text(encoding="utf-8")
     config = yaml.safe_load(text.replace(EXAMPLE_TREE, str(agent_tree)))
+    del config["plugins"][UNBUILT_PLUGIN]
+    for scope in config["scopes"].values():
+        scope["grants"] = {
+            action: grant
+            for action, grant in scope["grants"].items()
+            if not action.startswith(f"{UNBUILT_PLUGIN}.")
+        }
     config["plugins"]["git"] = git_plugin
     config["plugins"]["github"] = github_plugin
     config["plugins"]["probe"] = probe_plugin
@@ -227,7 +239,9 @@ def test_the_instance_serves_both_plugins_on_the_agents_daemon(
         assert seen == [str(host_stat.st_dev), str(host_stat.st_ino)]
 
         viewed = _content(
-            _call(url, dev_token, "github_pr_view", {"repo": "o/n", "pr": "77"})
+            _call(
+                url, dev_token, "github_pr_view", {"repo": "example-org/n", "pr": "77"}
+            )
         )
         assert json.loads(viewed["stdout"])["gh_token"] == github_token
 

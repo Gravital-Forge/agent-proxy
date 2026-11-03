@@ -5,7 +5,7 @@ import pytest
 from agent_proxy.config import ConfigError, load_config
 
 EXAMPLE_CONFIG = Path(__file__).parents[4] / "examples" / "instance.yaml"
-CREDENTIAL_NAMES = frozenset({"github-token"})
+CREDENTIAL_NAMES = frozenset({"github-token", "hcp-terraform-token"})
 
 
 def test_example_config_loads_with_its_paths() -> None:
@@ -35,6 +35,26 @@ def test_example_github_grants_name_the_hosts_their_actions_reach() -> None:
         "github.pr_create": ["api.github.com", "uploads.github.com"],
         "github.pr_edit": ["api.github.com", "uploads.github.com"],
         "github.pr_checks": ["api.github.com"],
+    }
+
+
+def test_example_hcp_terraform_grants_name_its_two_hosts() -> None:
+    """Each example hcp-terraform grant names the API host and the log host."""
+    config = load_config(EXAMPLE_CONFIG, CREDENTIAL_NAMES)
+
+    hcp_terraform_domains = {
+        key: grant.domains
+        for scope in config.scopes.values()
+        for key, grant in scope.grants.items()
+        if key.startswith("hcp-terraform.")
+    }
+    hosts = ["app.terraform.io", "archivist.terraform.io"]
+    assert hcp_terraform_domains == {
+        "hcp-terraform.workspace_list": hosts,
+        "hcp-terraform.run_list": hosts,
+        "hcp-terraform.run_view": hosts,
+        "hcp-terraform.plan_log": hosts,
+        "hcp-terraform.apply_log": hosts,
     }
 
 
