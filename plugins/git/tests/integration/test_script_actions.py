@@ -73,14 +73,13 @@ def test_add_then_commit_on_a_repository_another_uid_owns(
     stdout_of(run_action("commit", {"repo": repo, "message": "add b"}, roots))
 
 
-def test_commit_takes_the_grants_identity_when_the_repo_has_none(
+def test_commit_takes_the_grants_identity_over_the_repos(
     run_action: RunAction, host_repo: Path
 ) -> None:
-    """With no identity in the repository, commit takes the one the grant's env sets."""
+    """Author and committer are the grant env's, though the repository sets user.*."""
     repo = str(host_repo)
     roots = [host_repo.parent]
-    host_git(host_repo, "config", "--unset", "user.name")
-    host_git(host_repo, "config", "--unset", "user.email")
+    assert host_git(host_repo, "config", "user.email") == f"{FIXTURE_EMAIL}\n"
     (host_repo / "b.txt").write_text("new\n")
     identity = {"GIT_AUTHOR_NAME": AGENT_NAME, "GIT_AUTHOR_EMAIL": AGENT_EMAIL}
 

@@ -17,6 +17,7 @@ AGENT_NAME = "Agent One"
 AGENT_EMAIL = "agent-01@example.com"
 SIGNING_KEY_PATH = "/run/credentials/git-signing-key"
 _ISOLATED_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+_ISOLATED_GIT_PROGRAM = Path(__file__).with_name("isolated_git.py")
 
 type GrantedCredentials = Mapping[str, tuple[EnvMount | FileMount, bytes]]
 type RootMode = Literal["ro", "rw"]
@@ -33,6 +34,11 @@ class RunAction(Protocol):
         mode: RootMode = "rw",
     ) -> Outcome:
         """Run the named action in a cage whose grant has the roots in mode, and env."""
+
+
+class RunInImage(Protocol):
+    def __call__(self, root: Path, command: Sequence[str]) -> str:
+        """Run command in the plugin image, root bound and no cage, for its stdout."""
 
 
 @dataclass(frozen=True)
@@ -71,6 +77,15 @@ def host_git(repo: Path, *args: str) -> str:
         env={**os.environ, **_ISOLATED_GIT},
     )
     return completed.stdout
+
+
+def isolated_git(repo: Path, *args: str) -> list[str]:
+    """Return the command that runs git on repo in the plugin image's isolation.
+
+    git runs in the environment the plugin's isolation builder returns, with
+    none of the plugin's -c values; a RunInImage runs the command.
+    """
+    return ["python3", "-c", _ISOLATED_GIT_PROGRAM.read_text(), str(repo), *args]
 
 
 def make_signing_key(directory: Path) -> tuple[bytes, str]:

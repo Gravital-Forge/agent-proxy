@@ -78,17 +78,12 @@ READ_ACTIONS: dict[str, tuple[tuple[str, ...], tuple[Parameter, ...]]] = {
         (Parameter(name="file", placement="positional", flag=None),),
     ),
     "tag": (("git-cage", "tag"), ()),
-    "config_get": (
-        ("git-cage", "config", "--get"),
-        (Parameter(name="key", placement="positional", flag=None),),
-    ),
     "lfs_ls_files": (("git-cage", "lfs", "ls-files"), ()),
     "lfs_status": (("git-cage", "lfs", "status"), ()),
 }
 REQUIRED_BEYOND_REPO = {
     "rev_parse": {"ref"},
     "blame": {"file"},
-    "config_get": {"key"},
     "merge": {"branch"},
     "stash": {"action"},
 }
@@ -226,6 +221,10 @@ SCRIPT_ACTIONS: dict[str, tuple[dict[str, dict[str, object]], set[str]]] = {
             "create_branch": {"type": "boolean", "default": True},
         },
         {"repo", "action"},
+    ),
+    "config_get": (
+        {"repo": REPO_PROPERTY, "key": {"type": "string", "minLength": 1}},
+        {"repo", "key"},
     ),
 }
 # A script action's credentials and timeout, where they are not none and a minute.

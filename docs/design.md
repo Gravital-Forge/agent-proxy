@@ -277,20 +277,41 @@ One instance per agent user:
   `-c safe.directory=<root>` and `-c safe.directory=<root>/*` on the command line for each root
   (`S7`): the first trusts a repository whose top level is the root, and the second every repository
   beneath it, linked worktrees included. The check this turns off guards against configuration a
-  repository plants; inside the cage that risk is the known gap about planted code, and the cage
-  bounds it.
+  repository plants, and git in a cage reads none: the config isolation below gives why.
 - `gh` reads `GH_TOKEN` as it is. git does not, so the git plugin supplies `GH_TOKEN` through its
   own credential helper. Every git run clears every inherited helper, then names the plugin's, with
   `credential.useHttpPath=true`, so each request carries the path of the URL git connects to. The
   helper answers with `GH_TOKEN` only when that path names a repository the grant's `GITHUB_REPOS`
   lists, and otherwise answers `quit=1`, so git stops. The helper checks that path, and not the
-  remote a repository's config names, because git builds the URL after `url.<base>.insteadOf` and
-  `remote.<name>.pushurl` rewrite it: a rewritten remote cannot carry the token to an unlisted
-  repository. `plugins/git/README.md` gives the helper's rule and its refusals.
+  remote a repository's config names, because git builds the URL after `remote.<name>.pushurl`
+  rewrites it: a rewritten remote cannot carry the token to an unlisted repository.
+  `plugins/git/README.md` gives the helper's rule and its refusals.
 - The git plugin passes `-c core.hooksPath=/dev/null` on every git run, so no hook runs in a cage. A
   hook planted in a repository would run with the cage's credential and domains: the `push` cage
   holds `GH_TOKEN` and reaches GitHub. A value on the command line outranks the repository's config,
   so the repository cannot turn hooks back on.
+- git in a cage never takes its settings from a repository's own config. The agent writes
+  `.git/config` with its file tools, and a key there can name a program for git to run, such as a
+  filter driver or `core.fsmonitor`. That program would run with the cage's credential. So every git
+  action, in a cage with a credential or without one, runs with `GIT_COMMON_DIR` set to a scratch
+  directory in the cage's tmpfs. `GIT_DIR`, the objects, and the refs stay the real ones. The refs
+  stay real through `extensions.refStorage = files://<path>`, which needs git 2.54 or later, and a
+  test runs it on the image's git. The global and system config are off. The plugin builds the
+  scratch config and never filters the agent's: it holds a fixed set of keys the plugin supplies,
+  and the remote and branch keys that carry a remote's URLs and refspec and a branch's upstream,
+  copied from the real config as data. A key the plugin does not name never reaches git. The
+  plugin's code fixes the copied set, and no instance config changes it.
+- Every git run also denies the `file`, `ext`, and `fd` transports. `ext` runs a program in the
+  cage, and `fd` talks to a file descriptor in place of a remote. `file` starts a local
+  `upload-pack` or `receive-pack` without the plugin's settings, so the target repository's own
+  config and hooks would run. Network transports stay allowed, because the egress proxy bounds where
+  they go. These pins govern git's transports only: an `lfs.url` in a `.lfsconfig` can name a local
+  path, which git LFS serves with its built-in standalone file adapter, and that adapter runs no
+  program.
+- Commit identity comes from the grant's env alone, for every action that creates a commit. The
+  plugin refuses a repository whose shape the scratch directory cannot reproduce.
+  `plugins/git/README.md` gives the scratch config and the transport pins under "Config isolation",
+  the identity rule under "Commit identity", and each refused shape under "Repository shapes".
 
 ## Repository layout
 
@@ -384,12 +405,6 @@ The `S` checks need no counterpart on the agent's daemon: in a deployment, cages
 ## Known gaps
 
 - A bug in the instance's own code reaches that agent's tree and that instance's credentials.
-- Hooks are off in every cage, but code planted in a repository still runs there through
-  `.git/config`, for example `core.fsmonitor` and filter drivers. Such code can read that cage's
-  credential. A credentialed git cage mounts the repository read-write, so the code can also write
-  the credential to a file the agent reads, and the domain allowlist does not bound that. Such code
-  gets past the repository list the same way: it can use the token on any repository the token
-  reaches.
 - Traverse on the agent's home lets `agentproxy-<agent>` open any world-readable file there by path.
 - A file created with an explicit restrictive mode (for example a mode-preserving copy of a `0644`
   file) is read-only to the other side; the ACL cannot widen it.
@@ -402,11 +417,11 @@ The `S` checks need no counterpart on the agent's daemon: in a deployment, cages
   the agent fetches the log itself. `plugins/github/README.md` gives the detail.
 - A file swapped for a symlink between the github plugin's check of an `attach` path and gh's open
   of it uploads whatever the symlink then names. Inside the cage that includes files such as
-  `/proc/<pid>/environ`, which holds `GH_TOKEN`. Where the git and github grants carry the same
-  token, as `examples/instance.yaml` does, this adds no reach to the `.git/config` gap above: code
-  planted in a repository already reads a credentialed git cage's token. The operator accepted this
-  gap on 2026-10-17, on the condition that it is documented. Handing gh a path the agent cannot
-  swap, with the body's references rewritten to it, would close it.
+  `/proc/<pid>/environ`, which holds `GH_TOKEN`. It is the one documented path for a cage's token to
+  reach the agent, and a token that reaches the agent is outside every limit the plugins enforce,
+  `GITHUB_REPOS` included. The operator accepted this gap on 2026-11-01, on the condition that it is
+  documented. Handing gh a path the agent cannot swap, with the body's references rewritten to it,
+  would close it.
 
 ## Decision directives
 

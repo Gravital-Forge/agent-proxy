@@ -116,12 +116,16 @@ def test_tag_lists_v1(run_action: RunAction, host_repo: Path) -> None:
 
 
 def test_config_get_prints_the_value(run_action: RunAction, host_repo: Path) -> None:
-    """config_get prints a value from the repository's own config."""
+    """config_get prints a value from the repository's own config file."""
     outcome = run_action(
         "config_get", {"repo": str(host_repo), "key": "user.email"}, [host_repo.parent]
     )
 
-    assert stdout_of(outcome) == f"{FIXTURE_EMAIL}\n"
+    assert outcome.content == {
+        "exit_code": 0,
+        "stdout": f"{FIXTURE_EMAIL}\n",
+        "stderr": "",
+    }
 
 
 def test_lfs_ls_files_exits_zero(run_action: RunAction, host_repo: Path) -> None:

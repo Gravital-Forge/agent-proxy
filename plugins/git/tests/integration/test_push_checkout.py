@@ -67,6 +67,31 @@ def test_push_sends_a_task_branch_to_origin(
     assert host_git(remote_pair.remote, "rev-parse", "refs/heads/task/p") == pushed
 
 
+def test_a_pull_after_a_push_follows_the_upstream_the_push_wrote(
+    run_action: RunAction, remote_pair: RemotePair
+) -> None:
+    """The push writes task/u's tracking to work's real config; a pull follows it.
+
+    git's own push -u would write the tracking to the cage's scratch config,
+    which the next cage never sees.
+    """
+    work, peer = remote_pair.work, remote_pair.peer
+    _commit_on_branch(work, "task/u")
+    stdout_of(_push(run_action, remote_pair))
+    host_git(peer, "fetch", "-q", "origin")
+    host_git(peer, "checkout", "-q", "-b", "task/u", "origin/task/u")
+    (peer / "a.txt").write_text("from peer\n")
+    host_git(peer, "commit", "-q", "-am", "from peer")
+    host_git(peer, "push", "-q", "origin", "task/u")
+    pulled = host_git(peer, "rev-parse", "HEAD")
+
+    stdout_of(run_action("pull", {"repo": str(work)}, [remote_pair.root]))
+
+    assert host_git(work, "config", "branch.task/u.remote") == "origin\n"
+    assert host_git(work, "config", "branch.task/u.merge") == "refs/heads/task/u\n"
+    assert host_git(work, "rev-parse", "HEAD") == pulled
+
+
 def test_push_runs_no_pre_push_hook(
     run_action: RunAction, remote_pair: RemotePair
 ) -> None:
@@ -156,18 +181,16 @@ def test_push_does_not_force_through_a_planted_push_refspec(
     assert host_git(remote_pair.remote, "rev-parse", "refs/heads/task/p") == pushed
 
 
-def test_push_fails_with_a_planted_mirror(
+def test_push_ignores_a_planted_mirror(
     run_action: RunAction, remote_pair: RemotePair
 ) -> None:
-    """remote.origin.mirror makes the explicit refspec fail, and no remote ref moves."""
-    _commit_on_branch(remote_pair.work, "task/p")
+    """remote.origin.mirror is never copied, so the explicit-refspec push proceeds."""
+    pushed = _commit_on_branch(remote_pair.work, "task/p")
     host_git(remote_pair.work, "config", "remote.origin.mirror", "true")
-    refs = host_git(remote_pair.remote, "for-each-ref")
 
-    outcome = _push(run_action, remote_pair)
+    stdout_of(_push(run_action, remote_pair))
 
-    assert outcome.content["exit_code"] != 0
-    assert host_git(remote_pair.remote, "for-each-ref") == refs
+    assert host_git(remote_pair.remote, "rev-parse", "refs/heads/task/p") == pushed
 
 
 def test_push_uploads_a_new_lfs_object(

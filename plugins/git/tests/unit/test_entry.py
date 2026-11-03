@@ -7,11 +7,10 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from git_plugin import entry
+from git_plugin import cage, entry
 
 ENTRY = Path(__file__).parents[2] / "scripts" / "entry"
 ISOLATED_GIT = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
-HELPER_VALUE = "/plugin/bin/git-credential-agent-proxy"
 REQUEST = "protocol=https\nhost=github.com\npath=octo/hello.git\n"
 GRANTED = "username=x-access-token\npassword=dummy\n"
 
@@ -54,85 +53,6 @@ def _run(
 def _roots(*roots: Path) -> dict[str, str]:
     """Return AGENT_PROXY_ROOTS naming roots, as the core sets it."""
     return {"AGENT_PROXY_ROOTS": json.dumps([str(root) for root in roots])}
-
-
-def test_git_cage_runs_git_in_the_repo(git_cage: Path, repo: Path) -> None:
-    """git-cage runs git -C the repo, so git reports the repo's top level."""
-    completed = _run(
-        git_cage,
-        _roots(repo.parent),
-        "rev-parse",
-        "--repo",
-        str(repo),
-        "--show-toplevel",
-    )
-
-    assert (completed.returncode, completed.stdout) == (0, f"{repo}\n")
-
-
-def test_git_cage_trusts_each_root_and_what_lies_beneath(
-    git_cage: Path, repo: Path
-) -> None:
-    """Git sees the root and the root's /* as safe.directory values."""
-    completed = _run(
-        git_cage,
-        _roots(repo.parent),
-        "config",
-        "--get-all",
-        "--repo",
-        str(repo),
-        "safe.directory",
-    )
-
-    assert completed.stdout == f"{repo.parent}\n{repo.parent}/*\n"
-
-
-def test_git_cage_clears_inherited_helpers_then_sets_its_own(
-    git_cage: Path, repo: Path
-) -> None:
-    """Git sees an empty helper, which clears any other, then the plugin's helper."""
-    completed = _run(
-        git_cage,
-        _roots(repo.parent),
-        "config",
-        "--get-all",
-        "--repo",
-        str(repo),
-        "credential.helper",
-    )
-
-    assert completed.stdout == f"\n{HELPER_VALUE}\n"
-
-
-def test_git_cage_hands_the_helper_the_url_path(git_cage: Path, repo: Path) -> None:
-    """Git sees credential.useHttpPath true, so the helper gets the URL's path."""
-    completed = _run(
-        git_cage,
-        _roots(repo.parent),
-        "config",
-        "--get",
-        "--repo",
-        str(repo),
-        "credential.useHttpPath",
-    )
-
-    assert completed.stdout == "true\n"
-
-
-def test_git_cage_exits_with_gits_code(git_cage: Path, repo: Path) -> None:
-    """Git's exit code and stderr are the wrapper's, since git replaced it."""
-    completed = _run(
-        git_cage,
-        _roots(repo.parent),
-        "rev-parse",
-        "--repo",
-        str(repo),
-        "--verify",
-        "missing",
-    )
-
-    assert completed.returncode == 128
-    assert completed.stderr.startswith("fatal: ")
 
 
 def test_git_cage_refuses_without_roots(git_cage: Path, repo: Path) -> None:
@@ -203,7 +123,7 @@ def test_a_script_link_prints_its_result_as_compact_json(
 ) -> None:
     """A link named for a script action prints one JSON line and exits 0.
 
-    The repository and the environment hold no identity, so commit is refused,
+    The environment holds no identity, so commit is refused before git runs,
     and the refusal is the printed result.
     """
     for variable in ("GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL"):
@@ -218,15 +138,20 @@ def test_a_script_link_prints_its_result_as_compact_json(
     assert (completed.returncode, completed.stdout) == (
         0,
         '{"exit_code":2,"stdout":"","stderr":'
-        '"git plugin refused: git config user.name is not set, '
-        "nor is GIT_AUTHOR_NAME in the grant's env\\n\"}\n",
+        '"git plugin refused: '
+        "GIT_AUTHOR_NAME is not set in the grant's env\\n\"}\n",
     )
 
 
 def test_main_sends_a_script_name_to_its_action(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], repo: Path
 ) -> None:
-    """The main function reads the input on stdin and prints the action's result."""
+    """The main function reads the input on stdin and prints the action's result.
+
+    The builder is replaced by one that leaves the environment as it is: the
+    host's git predates the files:// form of extensions.refStorage.
+    """
+    monkeypatch.setattr(cage, "build_isolation", lambda _repo, environ: dict(environ))
     for name, value in ISOLATED_GIT.items():
         monkeypatch.setenv(name, value)
     monkeypatch.setenv("AGENT_PROXY_ROOTS", json.dumps([str(repo.parent)]))
