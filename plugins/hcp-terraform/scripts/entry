@@ -1,0 +1,8 @@
+#!/usr/bin/python3
+import sys
+
+sys.path.insert(0, "/plugin")
+
+from hcp_terraform_plugin import entry
+
+sys.exit(entry.main(sys.argv))

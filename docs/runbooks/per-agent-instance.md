@@ -38,6 +38,9 @@ Start from `examples/instance.yaml`. `docs/design.md` gives the rules a config m
 - Every root names a directory below the tree, never the tree itself.
 - Every grant that holds `github-token` sets `GITHUB_REPOS` in its `env`, or the plugin refuses each
   call under that grant. `plugins/git/README.md` gives the list's form under "The repository list".
+- Every grant that holds `hcp-terraform-token` sets `HCP_TERRAFORM_WORKSPACES` in its `env`, or the
+  plugin refuses each call under that grant. `plugins/hcp-terraform/README.md` gives the list's form
+  under "The workspace list".
 - A grant that signs commits gives the signing key as a file credential, and sets `GIT_SIGNING_KEY`
   in its `env` to that file's path. Store the key as "The first start" stores each credential.
   `plugins/git/README.md` gives the setting under "Commit signing".
@@ -369,3 +372,26 @@ check runs here and never in the project. Every `docker` command below runs as r
     The check passes when each result is as given and both files render in step 3. Afterwards, close
     the scratch pull request, and remove the worktree with
     `git -C <checkout> worktree remove <root>/attach-check`.
+
+11. **The workspace list with a real token.** Store a real HCP Terraform API token as the credential
+    `hcp-terraform-token`, as "The first start" stores each credential. Take two workspaces the
+    token can read, `<listed>` and `<unlisted>`, each as `organization/name`, and one run of each
+    whose plan has finished, `<listed run>` and `<unlisted run>`. Pick `<listed run>` from the
+    workspace's 20 newest runs. Give `hcp-terraform.run_list` and `hcp-terraform.plan_log` grants
+    shaped like those in `examples/instance.yaml`, with `HCP_TERRAFORM_WORKSPACES: "<listed>"`. Put
+    the config in force as "The first start" does.
+
+    1. Through the agent's MCP client, call `hcp-terraform_run_list` with `organization` and
+       `workspace` set to those of `<listed>`, and `limit` set to 20. The result's `exit_code` is 0,
+       and its `runs` holds `<listed run>`.
+    2. Call `hcp-terraform_run_list` with `organization` and `workspace` set to those of
+       `<unlisted>`. The result's `exit_code` is 2, and its `stderr` holds
+       `hcp-terraform plugin refused: workspace '<unlisted>' is not in HCP_TERRAFORM_WORKSPACES`.
+    3. Call `hcp-terraform_plan_log` with `run_id` set to `<listed run>`. The result's `exit_code`
+       is 0, and its `log` reads as the plan's output on the run's page in HCP Terraform, with no
+       stray control characters. This confirms the log format that `plugins/hcp-terraform/README.md`
+       gives under "The actions".
+    4. Call `hcp-terraform_plan_log` with `run_id` set to `<unlisted run>`. The result's `exit_code`
+       is 2, and its `stderr` holds the refusal of step 2.
+
+    The check passes when each result is as given.

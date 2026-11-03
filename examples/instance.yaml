@@ -8,6 +8,7 @@ max_cages: 4
 plugins:
   git: registry.example.com/agent-proxy/git@sha256:0000000000000000000000000000000000000000000000000000000000000000
   github: registry.example.com/agent-proxy/github@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  hcp-terraform: registry.example.com/agent-proxy/hcp-terraform@sha256:0000000000000000000000000000000000000000000000000000000000000000
 
 scopes:
   dev-agent:
@@ -59,3 +60,29 @@ scopes:
         domains: [api.github.com]
         credentials: {github-token: {env: GH_TOKEN}}
         env: {GITHUB_REPOS: *repos}
+      hcp-terraform.workspace_list:
+        roots: []
+        domains: [app.terraform.io, archivist.terraform.io]
+        credentials: {hcp-terraform-token: {env: TFE_TOKEN}}
+        # Every grant that holds hcp-terraform-token sets HCP_TERRAFORM_WORKSPACES.
+        env: {HCP_TERRAFORM_WORKSPACES: &workspaces "example-org/example-workspace"}
+      hcp-terraform.run_list:
+        roots: []
+        domains: [app.terraform.io, archivist.terraform.io]
+        credentials: {hcp-terraform-token: {env: TFE_TOKEN}}
+        env: {HCP_TERRAFORM_WORKSPACES: *workspaces}
+      hcp-terraform.run_view:
+        roots: []
+        domains: [app.terraform.io, archivist.terraform.io]
+        credentials: {hcp-terraform-token: {env: TFE_TOKEN}}
+        env: {HCP_TERRAFORM_WORKSPACES: *workspaces}
+      hcp-terraform.plan_log:
+        roots: []
+        domains: [app.terraform.io, archivist.terraform.io]
+        credentials: {hcp-terraform-token: {env: TFE_TOKEN}}
+        env: {HCP_TERRAFORM_WORKSPACES: *workspaces}
+      hcp-terraform.apply_log:
+        roots: []
+        domains: [app.terraform.io, archivist.terraform.io]
+        credentials: {hcp-terraform-token: {env: TFE_TOKEN}}
+        env: {HCP_TERRAFORM_WORKSPACES: *workspaces}
