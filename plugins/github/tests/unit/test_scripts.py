@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
-from github_plugin import scripts
+from github_plugin import attachments, scripts
 
 STUB_DIR = Path(__file__).parents[1] / "stub"
 TOKEN = "unit-token"
@@ -84,6 +84,7 @@ def attach_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         (root / name).write_bytes(b"x")
     monkeypatch.setenv("AGENT_PROXY_ROOTS", json.dumps([str(root)]))
     monkeypatch.delenv("GITHUB_PR_ATTACHMENTS", raising=False)
+    monkeypatch.setattr(attachments, "TREE_PARENT", str(tmp_path))
     return root
 
 
@@ -176,6 +177,19 @@ def raw_api(monkeypatch: pytest.MonkeyPatch, direct: None) -> Iterator[RawApi]:
 def _calls(log: Path) -> list[list[str]]:
     """Return each argv the stub gh logged, in the order it ran."""
     return [json.loads(line) for line in log.read_text().splitlines()]
+
+
+def _normalized_item(argument: str) -> str:
+    """Return argument, with the path of an --attach= item normalized."""
+    if not argument.startswith("--attach="):
+        return argument
+    path, hash_mark, alt = argument.removeprefix("--attach=").partition("#")
+    return f"--attach={os.path.normpath(path)}{hash_mark}{alt}"
+
+
+def _normalized_calls(log: Path) -> list[list[str]]:
+    """Return each argv the stub gh logged, with --attach= paths normalized."""
+    return [[_normalized_item(argument) for argument in call] for call in _calls(log)]
 
 
 def _echo(*argv: str) -> scripts.ScriptResult:
@@ -280,7 +294,7 @@ def test_pr_create_passes_each_attachment_after_the_other_flags(
 
     scripts.pr_create(arguments)
 
-    assert _calls(gh_log) == [
+    assert _normalized_calls(gh_log) == [
         [
             "pr",
             "create",
@@ -308,7 +322,7 @@ def test_pr_create_passes_an_attachments_alt_after_a_hash(
 
     scripts.pr_create(arguments)
 
-    assert _calls(gh_log)[0][-1] == f"--attach={png}#The demo"
+    assert _normalized_calls(gh_log)[0][-1] == f"--attach={png}#The demo"
 
 
 def test_pr_edit_passes_each_attachment_after_the_other_flags(
@@ -326,7 +340,7 @@ def test_pr_edit_passes_each_attachment_after_the_other_flags(
         }
     )
 
-    assert _calls(gh_log) == [
+    assert _normalized_calls(gh_log) == [
         [
             "pr",
             "edit",
@@ -348,7 +362,55 @@ def test_pr_edit_with_attach_alone_passes_no_other_field(
 
     scripts.pr_edit({"repo": "o/n", "pr_number": 5, "attach": [{"path": str(png)}]})
 
-    assert _calls(gh_log) == [["pr", "edit", "5", "--repo", "o/n", f"--attach={png}"]]
+    assert _normalized_calls(gh_log) == [
+        ["pr", "edit", "5", "--repo", "o/n", f"--attach={png}"]
+    ]
+
+
+@pytest.mark.parametrize("name", ["pr_create", "pr_edit"])
+def test_gh_gets_a_private_path_and_the_result_names_the_entrys_path(
+    attach_root: Path, gh_log: Path, name: str
+) -> None:
+    """The argv holds the private path, and the stub's echo of it comes back undone."""
+    png = attach_root / "demo.png"
+    arguments = {**SCRIPT_INPUTS[name], "attach": [{"path": str(png)}]}
+
+    result = scripts.ACTIONS[name](arguments)
+
+    assert _calls(gh_log)[0][-1] != f"--attach={png}"
+    assert f"--attach={png}" in result["stdout"]
+    assert _calls(gh_log)[0][-1] not in result["stdout"]
+
+
+@pytest.mark.parametrize("name", ["pr_create", "pr_edit"])
+def test_a_failed_uploads_stderr_holds_no_private_path(
+    attach_root: Path, gh_log: Path, name: str
+) -> None:
+    """The message about a failed upload names the entry's path alone."""
+    fails = attach_root / "upload-fails.png"
+    arguments = {**SCRIPT_INPUTS[name], "attach": [{"path": str(fails)}]}
+
+    result = scripts.ACTIONS[name](arguments)
+
+    private = _calls(gh_log)[0][-1].removeprefix("--attach=")
+    assert private not in result["stderr"]
+    assert f"could not upload {fails}:" in result["stderr"]
+
+
+def test_a_refused_attach_entry_never_runs_gh(attach_root: Path, gh_log: Path) -> None:
+    """A path that fails its check is the refusal, and gh never runs."""
+    missing = str(attach_root / "missing.png")
+    arguments = {**SCRIPT_INPUTS["pr_create"], "attach": [{"path": missing}]}
+
+    result = scripts.run_script("pr_create", json.dumps(arguments).encode())
+
+    assert result == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": "github plugin refused: "
+        f"attach path '{missing}' is not a regular file\n",
+    }
+    assert not gh_log.exists()
 
 
 @pytest.mark.parametrize("setting", ["off", "yes"])

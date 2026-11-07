@@ -131,9 +131,7 @@ def pr_create(arguments: CreateInput) -> PullRequestResult:
         f"--title={arguments['title']}",
         f"--body={arguments['body']}",
     ]
-    if "attach" in arguments:
-        args.extend(_attach_args(arguments["attach"]))
-    return _with_pull_request(run_gh(args))
+    return _with_pull_request(_run_gh_attaching(args, arguments))
 
 
 def pr_edit(arguments: EditInput) -> PullRequestResult:
@@ -149,20 +147,31 @@ def pr_edit(arguments: EditInput) -> PullRequestResult:
         args.append(f"--body={arguments['body']}")
     if "base" in arguments:
         args.append(f"--base={arguments['base']}")
-    if "attach" in arguments:
-        args.extend(_attach_args(arguments["attach"]))
-    return _with_pull_request(run_gh(args))
+    return _with_pull_request(_run_gh_attaching(args, arguments))
 
 
-def _attach_args(entries: Sequence[AttachEntry]) -> list[str]:
-    """Return the --attach= items for entries, checked against the grant.
+def _run_gh_attaching(
+    args: Sequence[str], arguments: CreateInput | EditInput
+) -> ScriptResult:
+    """Run gh with args and an --attach= item for each attach entry in arguments.
+
+    Each item holds a private path, so each stream comes back naming the entry's
+    path in its place. Without attach, gh runs with args alone.
 
     Raises:
         RefusalError: the grant's setting or roots refuse attach, or an entry
             fails a check.
     """
-    pairs = [(entry["path"], entry.get("alt")) for entry in entries]
-    return attachments.attach_args(pairs, os.environ)
+    if "attach" not in arguments:
+        return run_gh(args)
+    pairs = [(entry["path"], entry.get("alt")) for entry in arguments["attach"]]
+    attached = attachments.attach_args(pairs, os.environ)
+    result = run_gh([*args, *attached.args])
+    return {
+        "exit_code": result["exit_code"],
+        "stdout": attached.restore(result["stdout"]),
+        "stderr": attached.restore(result["stderr"]),
+    }
 
 
 def _with_pull_request(result: ScriptResult) -> PullRequestResult:
