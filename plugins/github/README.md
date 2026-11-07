@@ -231,9 +231,10 @@ The script resolves each path with symlinks followed. The real path must lie bel
 one of the roots that the core passes in `AGENT_PROXY_ROOTS`, so a symlink that leads out of every
 root is refused. The script then opens the path and judges the file it opened: that file's own path
 must lie below a root, and the file must be regular. A path the kernel will not open is refused as
-not a regular file. The extension check applies to the path as given and to the opened file's path,
-compared lowercase, because gh picks the content type from the name it is given. SVG is not
-accepted. The type list keeps a source file or an env file from reaching GitHub by mistake.
+not a regular file, and so is an entry whose normalized path needs one name to be both a file and a
+directory, given another entry. The extension check applies to the path as given and to the opened
+file's path, compared lowercase, because gh picks the content type from the name it is given. SVG is
+not accepted. The type list keeps a source file or an env file from reaching GitHub by mistake.
 
 ### Body references
 
