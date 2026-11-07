@@ -381,8 +381,9 @@ The `pr_create` grant allows `attach`: its root holds the files to upload, and i
 ## Layout
 
 - `scripts/github_plugin/` is the module. `scripts.py` holds the script actions, `attachments.py`
-  holds the checks of `attach` and builds its private paths, `repos.py` holds the repository list, `cage.py` holds the `gh-cage`
-  wrapper, and `entry.py` runs the wrapper or the script action that the executable's name names.
+  holds the checks of `attach` and builds its private paths, `repos.py` holds the repository list,
+  `cage.py` holds the `gh-cage` wrapper, and `entry.py` runs the wrapper or the script action that
+  the executable's name names.
 - `scripts/entry` is the one executable every action runs.
 - `Dockerfile` builds the image on the Alpine base the git plugin pins, with git and Python 3 from
   apk. It installs gh from gh's release tarball, which it checks against a pinned SHA-256: the
@@ -409,8 +410,8 @@ The `pr_create` grant allows `attach`: its root holds the files to upload, and i
   redirect fails. It also answers gh's pull-request lookup, project-items query, and update, and
   each upload, which it refuses for a file named `upload-fails.png`. It logs each upload, each
   upload's bytes, and each update's body as JSON lines, which a test reads back. It holds its answer
-  to a lookup of pull request 2 until the test releases it. `test_actions.py` runs every action in an
-  image whose gh is the stub, in place of the real one, built from `tests/stub/Dockerfile`. Its
+  to a lookup of pull request 2 until the test releases it. `test_actions.py` runs every action in
+  an image whose gh is the stub, in place of the real one, built from `tests/stub/Dockerfile`. Its
   `pr_checks` test joins the fake's network and gets the fake's log URLs. `test_actions.py` also
   shows `attach` refused in a real cage, with the setting `off` and with a path outside the roots.
   `test_pinned_gh.py` runs the plugin image against the fake, and checks claims this plugin rests
