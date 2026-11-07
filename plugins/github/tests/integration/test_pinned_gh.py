@@ -1,9 +1,12 @@
+import time
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
 from agent_proxy.config import Root
 from agent_proxy.egress import CageNetwork
+from docker.models.containers import Container
 from harness import GITHUB_TOKEN, FakeApiLog, RunAction
 
 FAILED_STEP_LOG = (
@@ -31,6 +34,9 @@ The page shows the new button. Recorded at `abc1234`, 1280x720 viewport.
 
 </details>
 """
+PLANTED_TEXT = "32 bytes the agent planted here\n"
+RELEASE_LOOKUP_COMMAND = ["touch", "/tmp/release-lookup"]  # noqa: S108 - a path in the fake's container
+LOOKUP_HELD_SECONDS = 30
 
 type EditWithAttachments = Callable[[str, Sequence[str]], Mapping[str, object]]
 
@@ -93,6 +99,22 @@ def logged_update_body(fake_api_log: FakeApiLog) -> str:
     ]
     assert isinstance(body, str)
     return body
+
+
+def wait_for_held_lookup(fake_api_log: FakeApiLog) -> None:
+    """Return once the fake's log shows it holds a pull-request lookup.
+
+    Raises:
+        TimeoutError: the log shows no hold within LOOKUP_HELD_SECONDS.
+    """
+    deadline = time.monotonic() + LOOKUP_HELD_SECONDS
+    while not any("lookup_held" in entry for entry in fake_api_log()):
+        if time.monotonic() > deadline:
+            raise TimeoutError(
+                f"the fake held no lookup in {LOOKUP_HELD_SECONDS}s; "
+                f"its log: {fake_api_log()!r}"
+            )
+        time.sleep(0.1)
 
 
 def test_pr_create_with_a_head_and_no_checkout_gets_past_the_branch_and_git_steps(
@@ -347,3 +369,50 @@ def test_pr_edit_applies_the_edit_when_an_upload_fails_partway(
     assert f"![one]({ASSET_URL}demo.png)" in update_body
     assert f"{media_dir}/upload-fails.png" in update_body
     assert f"{media_dir}/demo.mp4" in update_body
+
+
+def test_a_file_swapped_during_the_lookup_still_uploads_the_planted_bytes(
+    run_action: RunAction,
+    plugin_image: str,
+    fake_api_container: Container,
+    fake_api_network: str,
+    fake_api_ca: Path,
+    fake_api_log: FakeApiLog,
+    media_dir: Path,
+) -> None:
+    """A symlink to gh's environment, swapped in while gh waits, uploads nothing of it.
+
+    gh stats the file at flag parse and opens it after the lookup, so a swap
+    during the lookup lands between the two. The assertion reads upload_bytes
+    alone, because the upload event logs the Authorization header by design.
+    """
+    planted = media_dir / "planted.png"
+    planted.write_text(PLANTED_TEXT)
+    network = CageNetwork(
+        name=fake_api_network, environment={"SSL_CERT_FILE": str(fake_api_ca)}
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        call = executor.submit(
+            run_action,
+            "pr_edit",
+            {"repo": "o/n", "pr_number": 2, "attach": [{"path": str(planted)}]},
+            image=plugin_image,
+            roots=[
+                Root(path=str(fake_api_ca.parent), mode="ro"),
+                Root(path=str(media_dir), mode="ro"),
+            ],
+            network=network,
+            env=LISTED,
+        )
+        wait_for_held_lookup(fake_api_log)
+        planted.unlink()
+        planted.symlink_to("/proc/self/environ")
+        fake_api_container.exec_run(RELEASE_LOOKUP_COMMAND)
+        outcome = call.result()
+
+    uploaded = [
+        entry["upload_bytes"] for entry in fake_api_log() if "upload_bytes" in entry
+    ]
+    assert uploaded == [PLANTED_TEXT]
+    assert outcome.content["exit_code"] == 0

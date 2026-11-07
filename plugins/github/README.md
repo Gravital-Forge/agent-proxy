@@ -172,9 +172,16 @@ command action, whose stdout past the cap goes to an overflow file.
 `pr_create` and `pr_edit` take an optional `attach`, a list of local image and video files. gh's
 `--attach` uploads each file to GitHub, and rewrites the body's references to it as the uploaded
 asset's URL. The script checks every entry against the grant before gh runs, and passes each entry
-as one argv item after every other flag: `--attach=<path>`, or `--attach=<path>#<alt>` when the
-entry has `alt`. `attachments.py` holds the checks. Both actions' timeout is `10m`, because a video
-of up to 100 MiB uploads through the egress proxy within the call.
+as one argv item after every other flag: `--attach=<private path>`, or
+`--attach=<private path>#<alt>` when the entry has `alt`. `attachments.py` holds the checks. Both
+actions' timeout is `10m`, because a video of up to 100 MiB uploads through the egress proxy within
+the call.
+
+The script holds each checked file open until it exits. A private path lies on the cage's tmpfs,
+which the agent cannot reach, and leads to the open file. So a later change to what the agent's name
+leads to does not change what uploads. A private path cleans lexically to the agent's path, so gh's
+body matching and upload name work as "Body references" gives. The script replaces each private path
+with the entry's `path` in `stdout` and `stderr`, so a result names only the agent's paths.
 
 ### The `attach` input
 
@@ -222,10 +229,11 @@ the refusal.
 
 The script resolves each path with symlinks followed. The real path must lie below the real path of
 one of the roots that the core passes in `AGENT_PROXY_ROOTS`, so a symlink that leads out of every
-root is refused. The extension check applies to the path as given and to its real path, compared
-lowercase, because gh picks the content type from the name it is given. SVG is not accepted. The
-type list keeps a source file or an env file from reaching GitHub by mistake. `docs/design.md`
-gives, under "Known gaps", what these checks cannot stop.
+root is refused. The script then opens the path and judges the file it opened: that file's own path
+must lie below a root, and the file must be regular. A path the kernel will not open is refused as
+not a regular file. The extension check applies to the path as given and to the opened file's path,
+compared lowercase, because gh picks the content type from the name it is given. SVG is not
+accepted. The type list keeps a source file or an env file from reaching GitHub by mistake.
 
 ### Body references
 
@@ -373,7 +381,7 @@ The `pr_create` grant allows `attach`: its root holds the files to upload, and i
 ## Layout
 
 - `scripts/github_plugin/` is the module. `scripts.py` holds the script actions, `attachments.py`
-  holds the checks of `attach`, `repos.py` holds the repository list, `cage.py` holds the `gh-cage`
+  holds the checks of `attach` and builds its private paths, `repos.py` holds the repository list, `cage.py` holds the `gh-cage`
   wrapper, and `entry.py` runs the wrapper or the script action that the executable's name names.
 - `scripts/entry` is the one executable every action runs.
 - `Dockerfile` builds the image on the Alpine base the git plugin pins, with git and Python 3 from
@@ -399,8 +407,9 @@ The `pr_create` grant allows `attach`: its root holds the files to upload, and i
   internal network under both names, with a certificate for both. It answers a known job's log
   request with a redirect to a host the network cannot resolve, so a client that follows the
   redirect fails. It also answers gh's pull-request lookup, project-items query, and update, and
-  each upload, which it refuses for a file named `upload-fails.png`. It logs each upload and each
-  update's body as a JSON line, which a test reads back. `test_actions.py` runs every action in an
+  each upload, which it refuses for a file named `upload-fails.png`. It logs each upload, each
+  upload's bytes, and each update's body as JSON lines, which a test reads back. It holds its answer
+  to a lookup of pull request 2 until the test releases it. `test_actions.py` runs every action in an
   image whose gh is the stub, in place of the real one, built from `tests/stub/Dockerfile`. Its
   `pr_checks` test joins the fake's network and gets the fake's log URLs. `test_actions.py` also
   shows `attach` refused in a real cage, with the setting `off` and with a path outside the roots.
@@ -414,7 +423,8 @@ The `pr_create` grant allows `attach`: its root holds the files to upload, and i
   `uploads.github.com` with the token, and rewrites the body's references in place, and a body that
   nests images in a numbered list inside a `<details>` block keeps its structure and indents. When
   an upload fails, gh uploads no later file, still applies the edit, and the result holds `pr_url`
-  and `pr_number`.
+  and `pr_number`. A file swapped for a symlink to `/proc/self/environ` during gh's lookup still
+  uploads the bytes the script checked.
 
 ## Build and test
 

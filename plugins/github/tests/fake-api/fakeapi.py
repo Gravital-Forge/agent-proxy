@@ -22,15 +22,22 @@ names: upload-fails.png answers 422, and any other name answers 201 with the
 asset URL https://github.com/user-attachments/assets/fake-<name>.
 
 It prints one JSON line for each upload, with the file's name and the
-request's Host and Authorization headers, and one for each update, with the
-body it sets. It answers any other request with 404.
+request's Host and Authorization headers, one with the upload's bytes as text
+under upload_bytes, and one for each update, with the body it sets. It answers
+any other request with 404.
+
+It holds the answer to a pull-request lookup whose GraphQL variable pr_number
+is 2: it prints {"lookup_held": true}, then waits for the file
+/tmp/release-lookup, for up to 30 seconds, so a test can act while gh waits.
 """
 
 import io
 import json
 import ssl
+import time
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs
 
 ADDRESS = ("", 443)
@@ -137,6 +144,10 @@ UPLOAD_PATH = "/user-attachments/assets"
 FAILING_UPLOAD_NAME = "upload-fails.png"
 ASSET_URL_PREFIX = "https://github.com/user-attachments/assets/fake-"
 VALIDATION_FAILED = {"message": "Validation Failed"}
+HELD_PULL_REQUEST_NUMBER = 2
+LOOKUP_RELEASE_PATH = Path("/tmp/release-lookup")  # noqa: S108 - the test touches it in this container
+LOOKUP_HOLD_SECONDS = 30
+LOOKUP_POLL_SECONDS = 0.05
 
 
 def logs_archive() -> bytes:
@@ -167,6 +178,14 @@ def log_event(event: dict[str, object]) -> None:
     print(json.dumps(event))
 
 
+def hold_lookup() -> None:
+    """Log the hold, then return once the release file exists or the hold times out."""
+    log_event({"lookup_held": True})
+    deadline = time.monotonic() + LOOKUP_HOLD_SECONDS
+    while not LOOKUP_RELEASE_PATH.exists() and time.monotonic() < deadline:
+        time.sleep(LOOKUP_POLL_SECONDS)
+
+
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -187,7 +206,7 @@ class Handler(BaseHTTPRequestHandler):
         body = self._read_body()
         path, _, query = self.path.partition("?")
         if path == UPLOAD_PATH:
-            self._answer_upload(parse_qs(query).get("name", [""])[0])
+            self._answer_upload(parse_qs(query).get("name", [""])[0], body)
         elif path == GRAPHQL_PATH:
             self._answer_graphql(body.decode())
         else:
@@ -209,7 +228,7 @@ class Handler(BaseHTTPRequestHandler):
             pass
         return b"".join(chunks)
 
-    def _answer_upload(self, name: str) -> None:
+    def _answer_upload(self, name: str, body: bytes) -> None:
         log_event(
             {
                 "upload": name,
@@ -217,6 +236,7 @@ class Handler(BaseHTTPRequestHandler):
                 "authorization": self.headers.get("Authorization"),
             }
         )
+        log_event({"upload_bytes": body.decode(errors="replace")})
         if name == FAILING_UPLOAD_NAME:
             self._send_json(422, VALIDATION_FAILED)
         else:
@@ -227,6 +247,12 @@ class Handler(BaseHTTPRequestHandler):
             log_event(
                 {"update_body": json.loads(body)["variables"]["input"].get("body")}
             )
+        if (
+            PULL_REQUEST_QUERY in body
+            and json.loads(body)["variables"].get("pr_number")
+            == HELD_PULL_REQUEST_NUMBER
+        ):
+            hold_lookup()
         answer = graphql_answer(body)
         if answer is None:
             self._send_json(404, NOT_FOUND)
