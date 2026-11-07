@@ -75,7 +75,8 @@ A command action returns `{exit_code, stdout, stderr}`, as `docs/design.md` give
 script action prints the same three members, and its `output_schema` states them. The script exits 0
 whenever it runs to its end, and gh's exit code goes in `exit_code`. `job_log_url` runs no gh, so
 its exit code is its own, as given below. Each action returns gh's stdout as gh prints it, except
-for `pr_fetch`, `pr_checks`, and `job_log_url`.
+for `pr_fetch`, `pr_checks`, and `job_log_url`, and for `pr_create` and `pr_edit` with `attach`,
+where the script replaces each private path, as "Attachments" gives.
 
 `pr_create` and `pr_edit` add two members when the last non-empty line of gh's stdout is a pull
 request's URL, `https://github.com/<owner>/<name>/pull/<number>`: `pr_url`, that URL, and
@@ -225,7 +226,9 @@ is the entry's `path` as given:
 - `attach path '<path>' is a video, and a video takes no alt`
 
 The checks run in that order: the setting, the roots, then each entry in order. The first failure is
-the refusal.
+the refusal, with one exception. The refusal of two entries that need one name to be both a file and
+a directory comes after every entry has passed its own checks, and its reason names the later of the
+two entries, the one that met the conflict.
 
 The script resolves each path with symlinks followed. The real path must lie below the real path of
 one of the roots that the core passes in `AGENT_PROXY_ROOTS`, so a symlink that leads out of every
