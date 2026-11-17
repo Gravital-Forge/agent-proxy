@@ -1,8 +1,7 @@
 # agent-proxy design
 
-This is the operator's closed design for the agent-proxy proof of concept, revised after the spike
-that `spike/FINDINGS.md` records. The Plan job prices its consequences and does not reopen it. Who
-may change this document, and how, is set in `.dev/documentation.md`.
+This is the operator's closed design for agent-proxy. Who may change this document, and how, is set
+in `.dev/documentation.md`.
 
 ## The ask
 
@@ -50,12 +49,11 @@ Lines from the grilling that sharpened it:
 
 ## Why
 
-git-sidecar authorizes by a `.git-sidecar-token` file inside each repository: any reader of the
-repository holds the token, and the token cannot be narrowed to particular operations. Its tool
-surface is hardcoded to git and GitHub, and the git it runs executes repository-controlled code
-(hooks, `.git/config` drivers) with the sidecar's full reach. agent-proxy replaces it with minted,
-policy-bound tokens, a plugin surface for any credentialed tool, and a per-action cage that bounds
-what executed code can touch.
+A token kept as a file inside a repository is held by any reader of that repository, and it cannot
+be narrowed to particular operations. A tool surface hardcoded to git and GitHub serves nothing
+else. A git that runs repository-controlled code (hooks, `.git/config` drivers) gives that code the
+proxy's full reach. agent-proxy answers with minted, policy-bound tokens, a plugin surface for any
+credentialed tool, and a per-action cage that bounds what executed code can touch.
 
 ## Concepts
 
@@ -146,7 +144,7 @@ scopes:
 - A grant maps each credential it uses to an environment variable (`{env: NAME}`, the default form)
   or to a file path inside the cage (`{file: /run/credentials/<name>}`) for tools that only read
   files. The cage receives only its grant's credentials.
-- At rest, credentials are plain files protected by uid, as in git-sidecar.
+- At rest, credentials are plain files protected by uid.
 
 ## Plugins and actions
 
@@ -335,12 +333,11 @@ agent-proxy/
     └── hcp-terraform/    # Dockerfile, describe, manifest.json, scripts/, tests/ with a fake API, README.md
 ```
 
-The core is Python on uv and FastMCP, reusing git-sidecar's auth, transport, and test patterns. One
-part of the core is Go: the in-cage root verifier, built with `CGO_ENABLED=0` into a static
-executable, so it runs in any image with no libc or runtime in the cage. The Go toolchain is a build
-dependency for that verifier alone. Plugins may be written in any language. CI builds each plugin
-image and runs `manifest check` on it. Publishing images to a registry is deployment, and out of
-scope.
+The core is Python on uv and FastMCP. One part of the core is Go: the in-cage root verifier, built
+with `CGO_ENABLED=0` into a static executable, so it runs in any image with no libc or runtime in
+the cage. The Go toolchain is a build dependency for that verifier alone. Plugins may be written in
+any language. CI builds each plugin image and runs `manifest check` on it. Publishing images to a
+registry is deployment, and out of scope.
 
 ## Verification
 
@@ -353,8 +350,7 @@ bars that run them.
   demonstrate each cage property: an unmounted path is absent, an unlisted domain is unreachable, an
   ungranted credential is absent, a direct connection to an outside address fails, and a cage cannot
   change the mode of a file its user namespace does not own.
-- A transport test that starts the real server and drives it with an MCP client, as git-sidecar's
-  `test_transport.py` does.
+- A transport test that starts the real server and drives it with an MCP client.
 - Every plugin passes `agent-proxy manifest check` in CI, plus its own tests against fixture
   repositories.
 
@@ -369,8 +365,9 @@ are the design's, and `docs/runbooks/per-agent-instance.md` carries them as step
 - A second agent cannot read created files. With traverse granted on the agent's home, it still
   cannot read a cage-made file, which separates the file's own barrier from the home's (`S11`).
 - The agent cannot reach the service user's Docker socket.
-- `H1` to `H4` hold on the service user's daemon, and the cage cost that `C1` and `C2` measure is
-  measured there.
+- On the service user's daemon, the cage's root filesystem refuses a write, `/tmp` takes one, the
+  cage holds no effective capability, and `no_new_privs` is set. The cage cost that `C1` and `C2`
+  measure is measured there.
 - `E12` passes with a real credential: git over HTTPS, through the credential helper, reaches a
   private repository.
 - With a real credential, the github plugin's `run_view` with `log_failed` returns a failed run's
@@ -391,7 +388,6 @@ The `S` checks need no counterpart on the agent's daemon: in a deployment, cages
 
 ## Out of scope
 
-- git-sidecar itself, including the credential exposure of its per-agent same-uid deployment.
 - Token self-service: agents cannot mint, narrow, or refresh tokens.
 - Streaming output as MCP progress notifications.
 - Config layering or shared config across instances.
@@ -400,7 +396,7 @@ The `S` checks need no counterpart on the agent's daemon: in a deployment, cages
 - Deployment. The operator, on 2026-09-30: "deployment is out of scope. Focus on implementation".
   The project builds the application and its deployment artifacts, and runs neither on a host.
   Provisioning a host, running the deployment acceptance checks, configuring an instance for a real
-  agent, switching the harness to agent-proxy, and retiring git-sidecar come after the project.
+  agent, and switching the harness to agent-proxy come after the project.
 
 ## Known gaps
 
@@ -425,5 +421,4 @@ The fork walk applies these in order.
 3. What the design does not name is not built.
 4. A claim about Docker, iron-proxy, git, or `gh` behavior that a decision rests on gets a test that
    runs it on the pinned version.
-5. git-sidecar's auth, transport, and test patterns are reused where this design does not differ.
-6. A new vendor, credential, or runtime dependency outside this design goes to the operator.
+5. A new vendor, credential, or runtime dependency outside this design goes to the operator.
