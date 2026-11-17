@@ -198,8 +198,9 @@ inside the proxy process.
     arrive. Every other listener the proxy binds — DNS, plain HTTP, TLS, and management — is
     unreachable from the internal network or enforces the same allowlist.
   - The core never uses iron-proxy's management reload and never writes a `source_ip` rule:
-    iron-proxy accepts such a rule and ignores it, which widens access (`E9`).
-  - iron-proxy is pinned by digest. An upgrade repeats `E9` first.
+    iron-proxy accepts such a rule and ignores it, which widens access.
+  - iron-proxy is pinned by digest. An upgrade runs `test_iron_proxy_ignores_a_rules_source_ip`
+    first.
   - Config: the core bind-mounts a config directory, never a single file, because a replaced file
     under a single-file mount keeps its old inode. It sets `dns.proxy_ip`, which iron-proxy requires
     while its DNS listener is enabled, and passes `-config` on every run, because the image's
@@ -366,8 +367,7 @@ are the design's, and `docs/runbooks/per-agent-instance.md` carries them as step
   cannot read a cage-made file, which separates the file's own barrier from the home's (`S11`).
 - The agent cannot reach the service user's Docker socket.
 - On the service user's daemon, the cage's root filesystem refuses a write, `/tmp` takes one, the
-  cage holds no effective capability, and `no_new_privs` is set. The cage cost that `C1` and `C2`
-  measure is measured there.
+  cage holds no effective capability, and `no_new_privs` is set. The cage cost is measured there.
 - `E12` passes with a real credential: git over HTTPS, through the credential helper, reaches a
   private repository.
 - With a real credential, the github plugin's `run_view` with `log_failed` returns a failed run's

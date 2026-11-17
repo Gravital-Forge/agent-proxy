@@ -20,8 +20,8 @@ Update a kept document whenever a change affects what it describes. The enumerat
 the set is closed. Only the operator adds a kept document; never add one as a default home for new
 prose.
 
-Every document in the set is kept whether or not it exists. The first pull request with something to
-describe creates it.
+Every document in the list above is kept whether or not it exists. The first pull request with
+something to describe creates it.
 
 ## What each document holds
 

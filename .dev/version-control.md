@@ -10,9 +10,9 @@ Two checkouts serve the project, each at a fixed place under `<workspace root>/p
 
 - Native `git` and `gh` carry every operation, as the workspace root's `version-control` topic sets
   out. Run each `git` command as `git -C <checkout>` on the checkout it acts on, by absolute path.
-- Every pull of `main` and every worktree add and remove run in the primary clone, because an item
-  branch is cut from the primary clone's `main`. Every command on the item's branch runs in the item
-  worktree: status, add, commit, push, and diff.
+- Every pull of `main` and every item worktree add and remove run in the primary clone, because an
+  item branch is cut from the primary clone's `main`. Every command on the item's branch runs in the
+  item worktree: status, add, commit, push, and diff.
 - The CI watch runs on the root topic's inconclusive threshold, because this project's CI waits on
   no outside build.
 

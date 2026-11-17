@@ -18,7 +18,7 @@ MANIFEST_PATH = Path(__file__).parents[2] / "manifest.json"
 DOCKERFILE_PATH = Path(__file__).parents[2] / "Dockerfile"
 GH_CAGE_LINK = "ln -s /plugin/entry /usr/local/bin/gh-cage"
 LINKED_ACTIONS = re.compile(r"for action in ([^;]+); do")
-ACTIONS = {
+MANIFEST_ACTIONS = {
     "pr_create",
     "pr_edit",
     "pr_view",
@@ -209,7 +209,7 @@ def test_manifest_parses_with_no_warning(manifest: Manifest) -> None:
 
 def test_manifest_declares_every_action(manifest: Manifest) -> None:
     """The manifest declares the 11 GitHub actions and no other."""
-    assert set(manifest.actions) == ACTIONS
+    assert set(manifest.actions) == MANIFEST_ACTIONS
 
 
 @pytest.mark.parametrize("name", sorted(COMMAND_ACTIONS))
