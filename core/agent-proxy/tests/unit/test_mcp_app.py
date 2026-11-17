@@ -89,8 +89,7 @@ CONFIG = InstanceConfig.model_validate(
             "dev": {"grants": {"tools.echo": _grant(), "tools.inspect": _grant()}},
             "ops": {"grants": {"other.status": _grant()}},
         },
-    },
-    context={"credential_names": frozenset()},
+    }
 )
 SNAPSHOT = Snapshot(
     config=CONFIG,

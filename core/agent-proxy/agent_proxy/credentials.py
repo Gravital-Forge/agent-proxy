@@ -3,12 +3,36 @@
 import os
 import re
 import secrets
+from collections.abc import Iterable, Set
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from agent_proxy.config import NAME_PATTERN, check_name
+from agent_proxy.config import NAME_PATTERN, Scope, check_name
 from agent_proxy.errors import ProxyError
+
+
+def unset_message(name: str) -> str:
+    """Return the text that says credential name is unset and how to store it."""
+    return (
+        f"credential {name!r} is not set; the operator stores it with"
+        f" 'agent-proxy credential set {name}'"
+    )
+
+
+def unset_warnings(scopes: Iterable[Scope], stored: Set[str]) -> tuple[str, ...]:
+    """Return unset_message of each credential the scopes grant and stored lacks.
+
+    Each name appears once, in the order the scopes and their grants first
+    name it.
+    """
+    granted = dict.fromkeys(
+        name
+        for scope in scopes
+        for grant in scope.grants.values()
+        for name in grant.credentials
+    )
+    return tuple(unset_message(name) for name in granted if name not in stored)
 
 
 class EmptyCredentialError(ProxyError):

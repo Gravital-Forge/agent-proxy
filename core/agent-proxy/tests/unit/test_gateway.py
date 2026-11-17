@@ -15,6 +15,7 @@ from egress_fakes import RecordingEgress
 from agent_proxy.audit import AuditError, AuditRecord, AuditWriter, tail
 from agent_proxy.auth import TokenStore
 from agent_proxy.config import InstanceConfig
+from agent_proxy.credentials import unset_message
 from agent_proxy.egress import cage_network
 from agent_proxy.errors import ProxyError
 from agent_proxy.mcp import (
@@ -26,7 +27,13 @@ from agent_proxy.mcp import (
 from agent_proxy.plugins import parse_manifest
 from agent_proxy.reload import LiveConfig, Snapshot
 from agent_proxy.results import CALL_ID_PATTERN
-from agent_proxy.runner import CageCall, CageTimeoutError, InputError, Outcome
+from agent_proxy.runner import (
+    CageCall,
+    CageTimeoutError,
+    CredentialError,
+    InputError,
+    Outcome,
+)
 
 MINTED_AT = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
 LATER = MINTED_AT + timedelta(minutes=5)
@@ -95,8 +102,7 @@ CONFIG = InstanceConfig.model_validate(
             },
             "ops": {"grants": {"other.echo": _grant([])}},
         },
-    },
-    context={"credential_names": frozenset()},
+    }
 )
 SNAPSHOT = Snapshot(
     config=CONFIG,
@@ -571,6 +577,18 @@ def test_a_runner_refusals_line_carries_the_cage_calls_id(harness: Harness) -> N
     assert line["stdout_bytes"] is None
     assert line["stderr_bytes"] is None
     assert line["truncated"] is False
+
+
+def test_an_unset_credential_is_refused_by_name_and_audited(
+    harness: Harness,
+) -> None:
+    """The client and the one audit line both get the unset-credential text."""
+    harness.runner.result = CredentialError(unset_message("api-token"))
+
+    assert _refusal(harness, _bearer(harness.token)) == unset_message("api-token")
+
+    [line] = _audit_lines(harness)
+    assert line["refusal"] == unset_message("api-token")
 
 
 def test_a_failed_audit_write_withholds_the_result_and_the_next_call_succeeds(

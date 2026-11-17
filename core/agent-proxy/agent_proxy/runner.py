@@ -22,7 +22,11 @@ from docker.models.containers import Container
 from jsonschema import Draft202012Validator
 
 from agent_proxy.config import ROOTS_ENV_NAME, EnvMount, FileMount, Grant, Root
-from agent_proxy.credentials import CredentialStore, UnknownCredentialError
+from agent_proxy.credentials import (
+    CredentialStore,
+    UnknownCredentialError,
+    unset_message,
+)
 from agent_proxy.egress import CageNetwork
 from agent_proxy.errors import ProxyError
 from agent_proxy.plugins import (
@@ -232,7 +236,9 @@ def cage_environment(
     """Return the environment variables the grant's env credentials give a cage.
 
     Raises:
-        CredentialError: a credential is not stored, is not UTF-8, or holds a NUL.
+        CredentialError: a credential is not stored, is not UTF-8, or holds a
+            NUL. For one not stored, the message is unset_message of the first
+            such credential in grant order.
     """
     return {
         mount.env: _environment_value(name, store)
@@ -242,7 +248,7 @@ def cage_environment(
 
 
 def _environment_value(name: str, store: CredentialStore) -> str:
-    with _known_credentials():
+    with _stored_credential(name):
         stored_bytes = store.read(name)
     try:
         value = stored_bytes.decode("utf-8")
@@ -268,7 +274,8 @@ def cage_mounts(
     """Return the bind mounts of the grant's roots, then of its file credentials.
 
     Raises:
-        CredentialError: a file credential is not stored.
+        CredentialError: a file credential is not stored; the message is
+            unset_message of the first such credential in grant order.
     """
     root_mounts = [
         docker.types.Mount(
@@ -279,28 +286,32 @@ def cage_mounts(
         )
         for root in roots
     ]
-    with _known_credentials():
-        # The SDK serialises a mount with json.dumps, which refuses a Path.
-        credential_mounts = [
-            docker.types.Mount(
-                target=mount.file,
-                source=str(store.path(name)),
-                type="bind",
-                read_only=True,
-            )
-            for name, mount in credentials.items()
-            if isinstance(mount, FileMount)
-        ]
+    credential_mounts = [
+        _credential_mount(name, mount, store)
+        for name, mount in credentials.items()
+        if isinstance(mount, FileMount)
+    ]
     return root_mounts + credential_mounts
 
 
+def _credential_mount(
+    name: str, mount: FileMount, store: CredentialStore
+) -> docker.types.Mount:
+    with _stored_credential(name):
+        source = store.path(name)
+    # The SDK serialises a mount with json.dumps, which refuses a Path.
+    return docker.types.Mount(
+        target=mount.file, source=str(source), type="bind", read_only=True
+    )
+
+
 @contextmanager
-def _known_credentials() -> Iterator[None]:
-    """Turn the store's refusal of an unknown name into a CredentialError."""
+def _stored_credential(name: str) -> Iterator[None]:
+    """Turn the store's refusal of name into a CredentialError of unset_message."""
     try:
         yield
     except UnknownCredentialError as error:
-        raise CredentialError(str(error)) from error
+        raise CredentialError(unset_message(name)) from error
 
 
 class CageLimiter:
@@ -384,7 +395,9 @@ class CageRunner:
                 a missing component; or a root in the cage is not the directory
                 the runner checked.
             CredentialError: a granted credential is not stored or cannot be
-                placed in the cage.
+                placed in the cage. For one not stored, the message is
+                unset_message of the first env credential in grant order that
+                is not stored, else of the first such file credential.
             CageStartError: the cage cannot be created, attached, or started,
                 or the verifier cannot start the action.
             CageTimeoutError: the cage runs past its timeout.
@@ -476,6 +489,9 @@ def _set_up(call: CageCall, store: CredentialStore, held: ExitStack) -> _CageSet
         RootError: a root's path holds a symbolic link, a non-directory, or a
             missing component.
         CredentialError: a granted credential is not stored or cannot be placed.
+            For one not stored, the message is unset_message of the first env
+            credential in grant order that is not stored, else of the first
+            such file credential.
     """
     if re.fullmatch(CALL_ID_PATTERN, call.call_id) is None:
         raise InputError(f"call ID {call.call_id!r} does not match {CALL_ID_PATTERN!r}")

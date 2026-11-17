@@ -163,8 +163,7 @@ def _instance_config(scopes: dict[str, dict[str, list[str]]]) -> InstanceConfig:
                 }
                 for scope, grants in scopes.items()
             },
-        },
-        context={"credential_names": frozenset()},
+        }
     )
 
 

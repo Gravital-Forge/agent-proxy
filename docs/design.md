@@ -108,12 +108,13 @@ returns only the actions the token's scope grants. MCP tool names are `<plugin>_
   store holds none of them.
 - Validation checks: every grant names an action a pinned plugin's manifest declares; every grant
   states `roots`, `domains`, and `credentials` explicitly, empty values included — an omitted field
-  is an error; every credential a grant names exists in the credential store; every root lies inside
-  the instance's agent tree; every plugin image is present, pulled at reload by digest; every `env`
-  name begins with an upper-case letter or `_`, holds only upper-case letters, digits, and `_`, and
-  is neither `HTTPS_PROXY`, `AGENT_PROXY_ROOTS`, nor an env name that a credential of the same grant
-  takes; no `env` value holds a NUL; every action declaring pass-through `args` is reported as a
-  warning.
+  is an error; every root lies inside the instance's agent tree; every plugin image is present,
+  pulled at reload by digest; every `env` name begins with an upper-case letter or `_`, holds only
+  upper-case letters, digits, and `_`, and is neither `HTTPS_PROXY`, `AGENT_PROXY_ROOTS`, nor an env
+  name that a credential of the same grant takes; no `env` value holds a NUL; every action declaring
+  pass-through `args` is reported as a warning; every credential a grant names that the credential
+  store lacks is reported as a warning at start, at `reload`, and at `token mint`, so the instance
+  starts and tokens mint before the operator stores it.
 - There are no scope-level defaults and no layering between files. Repetition across grants and
   across agents is accepted.
 
@@ -144,6 +145,15 @@ scopes:
 - A grant maps each credential it uses to an environment variable (`{env: NAME}`, the default form)
   or to a file path inside the cage (`{file: /run/credentials/<name>}`) for tools that only read
   files. The cage receives only its grant's credentials.
+- A call under a grant whose credential is not set is refused before a cage starts, and audited like
+  any other refusal. The refusal names the credential and the command the operator stores it with:
+
+  ```text
+  agent-proxy refused: credential 'github-token' is not set; the operator stores it with 'agent-proxy credential set github-token'
+  ```
+
+  The grant's tools stay listed for the token. A credential that the operator stores with
+  `credential set` takes effect on the next call, with no reload.
 - At rest, credentials are plain files protected by uid.
 
 ## Plugins and actions

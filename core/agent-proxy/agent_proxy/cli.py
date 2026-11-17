@@ -4,7 +4,7 @@ import argparse
 import os
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -15,7 +15,7 @@ import uvicorn
 from agent_proxy.audit import tail
 from agent_proxy.auth import TokenStore
 from agent_proxy.config import ConfigError, load_config, parse_duration
-from agent_proxy.credentials import CredentialStore
+from agent_proxy.credentials import CredentialStore, unset_warnings
 from agent_proxy.errors import ProxyError
 from agent_proxy.mcp import Instance, _Server
 from agent_proxy.plugins import ManifestError, check_image
@@ -75,6 +75,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 def _report_refusal(messages: Sequence[str]) -> None:
     for message in messages:
         print(f"agent-proxy: {message}", file=sys.stderr)
+
+
+def _report_warnings(warnings: Iterable[str]) -> None:
+    for warning in warnings:
+        print(f"agent-proxy: warning: {warning}", file=sys.stderr)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -187,12 +192,15 @@ def _port(text: str) -> int:
 
 def _mint_token(args: argparse.Namespace) -> None:
     expires_in = None if args.expires is None else parse_duration(args.expires)
-    config = load_config(_config_path(), _credential_store().names())
+    config = load_config(_config_path())
     if args.scope not in config.scopes:
         raise UnknownScopeError(
             f"scope {args.scope!r} is not defined in the config;"
             f" defined scopes are {sorted(config.scopes)!r}"
         )
+    _report_warnings(
+        unset_warnings(config.scopes.values(), _credential_store().names())
+    )
     print(_token_store().mint(args.name, args.scope, expires_in))
 
 
@@ -242,8 +250,7 @@ def _tail_audit(args: argparse.Namespace) -> None:
 
 def _check_manifest(args: argparse.Namespace) -> None:
     manifest = check_image(_docker_client(), args.image)
-    for warning in manifest.warnings():
-        print(f"agent-proxy: warning: {warning}", file=sys.stderr)
+    _report_warnings(manifest.warnings())
     print(f"manifest ok: {args.image} declares {len(manifest.actions)} actions")
 
 
@@ -251,14 +258,14 @@ def _reload(args: argparse.Namespace) -> None:
     reply = request_reload(_state_dir() / CONTROL_SOCKET_NAME)
     if not reply.ok:
         raise ReloadRefusedError(*reply.errors)
-    for warning in reply.warnings:
-        print(f"agent-proxy: warning: {warning}", file=sys.stderr)
+    _report_warnings(reply.warnings)
     print("reloaded")
 
 
 def _serve(args: argparse.Namespace) -> None:
     instance = Instance.start(_state_dir(), _config_path(), _docker_client())
     try:
+        _report_warnings(instance.warnings)
         _Server(uvicorn.Config(instance.app, host=args.host, port=args.port)).run()
     finally:
         instance.close()

@@ -56,13 +56,15 @@ sudo core/docker/provision-instance.sh agent-01 <port> <config-file>
 ```
 
 `<port>` is the loopback port the instance serves on, and `<config-file>` is the config to install.
-Read "The first start" below before you choose the config.
+The config may name credentials that the operator has not stored yet; "The first start" below stores
+them.
 
 The script runs the steps below in order, and reports each step as it runs it. Each step leaves its
 object alone when it is already in place, so a second run with the same config changes nothing.
-Every run installs `<config-file>` over the installed config, so once "The first start" has put the
-full config in place, run the script with the full config. A step that fails stops the script; after
-the fix, run the script again from the top. To debug a step, run its commands by hand.
+Every run installs `<config-file>` over the installed config. An instance that is already running
+keeps its config in force until a reload, as the end of "The first start" gives. A step that fails
+stops the script; after the fix, run the script again from the top. To debug a step, run its
+commands by hand.
 
 Three phrases below stand for the way the script reaches the service user and the agent:
 
@@ -148,27 +150,33 @@ Three phrases below stand for the way the script reaches the service user and th
 
 ## The first start
 
-The instance does not start from a config that names a credential its store lacks, and the store is
-empty until the instance runs. So provision with a first config that names no credential: the full
-config with every grant that names a credential removed. Then:
+Provision with the full config. The instance starts even though its credential store is still empty.
+It logs one warning for each credential that a grant names and the store lacks, and each warning
+gives the command that the operator stores the credential with. `docker logs agent-proxy` shows the
+warnings. Then:
 
-1. Store each credential the full config names. The command reads the value from stdin:
+1. Store each credential the config names. The command reads the value from stdin:
 
    ```sh
    docker exec -i agent-proxy agent-proxy credential set <name>
    ```
 
-2. Install the full config over the first one:
-
-   ```sh
-   install -o root -g root -m 0644 <full-config> /etc/agent-proxy/agent-01/config.yaml
-   ```
-
-3. Put the full config in force with `docker exec agent-proxy agent-proxy reload`. If it refuses, it
-   prints each error, and the running config stays.
-4. Mint a token for the agent with
+   Each credential takes effect on the next call, with no reload. Until the operator stores it, a
+   call under a grant that names it is refused, and the refusal gives the warning's text.
+2. Mint a token for the agent with
    `docker exec agent-proxy agent-proxy token mint --name <name> --scope <scope>`. The token prints
-   once; give it to the agent's MCP client.
+   once; give it to the agent's MCP client. The mint also prints a warning for each credential that
+   is still not stored, and mints the token all the same.
+
+To put a changed config in force later, install it over the installed config:
+
+```sh
+install -o root -g root -m 0644 <config-file> /etc/agent-proxy/agent-01/config.yaml
+```
+
+Then run `docker exec agent-proxy agent-proxy reload`. When it refuses the config, it prints each
+error, and the running config stays. When it accepts the config, it prints `reloaded` and each
+warning, such as one for each credential that is still not stored.
 
 Every `docker` command here runs as root with `DOCKER_HOST=unix:///run/user/<uid>/docker.sock`.
 `docs/architecture.md` gives every verb of the admin command under "The admin command".

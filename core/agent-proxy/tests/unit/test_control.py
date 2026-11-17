@@ -74,7 +74,7 @@ def _snapshot(tmp_path: Path, warnings: tuple[str, ...] = ()) -> Snapshot:
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(CONFIG), encoding="utf-8")
     return Snapshot(
-        config=load_config(path, frozenset()),
+        config=load_config(path),
         manifests=MappingProxyType({}),
         warnings=warnings,
     )
