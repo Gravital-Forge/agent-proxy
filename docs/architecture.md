@@ -60,10 +60,10 @@ grants. `read_yaml` parses the file with a safe loader that also refuses a key r
 mapping and a YAML merge key (`<<`). The pydantic models refuse unknown fields and check each
 field's form. The `InstanceConfig` validator then checks the rules that span fields, such as a root
 lying inside the agent tree. `docs/design.md` sets the validation rules under "Config". The models
-and the validator together check each rule that the file and the credential store can settle. For
-example, the models make a grant state `roots`, `domains`, and `credentials`, because `Grant` gives
-none of them a default. A grant's `env` is optional and defaults to an empty map. It maps each name,
-which must match `ENV_NAME_PATTERN`, to a string value.
+and the validator together check each rule that the file can settle. For example, the models make a
+grant state `roots`, `domains`, and `credentials`, because `Grant` gives none of them a default. A
+grant's `env` is optional and defaults to an empty map. It maps each name, which must match
+`ENV_NAME_PATTERN`, to a string value.
 
 Two fields of `InstanceConfig` serve the cage runner. `max_cages` is the instance's cap on running
 cages, an integer of 1 or more; `docs/design.md` gives the cap under "The cage". `overflow_dir` is
@@ -87,7 +87,9 @@ These failures join the grant's other rule failures.
 A config that fails raises `ConfigError`, which holds one message per failure. Each message names
 the file, and a failure inside the file also names its location.
 
-`load_config` takes the credential names as an argument and does not open the credential store.
+Config validation does not consult the credential store. A credential that a grant names and the
+store lacks is a warning, not a failure, and the callers of `load_config` compute it with
+`unset_warnings` from `credentials.py`.
 
 ### `credentials.py`
 
@@ -96,10 +98,22 @@ holding its value verbatim. `set` writes a value through `write_owner_only`, whi
 file whose name begins with a dot, with mode `0o600`, then renames it over the target, so `entries`
 never lists a half-written credential. `egress.py` writes each proxy config through the same
 function. `entries` reports each name with its set time, read from the file's modification time.
-`names` returns the stored names, which is the set `load_config` checks grants against. `read`
-returns a stored value as bytes, and `path` returns the file that holds it. Each refuses a name that
-breaks `NAME_PATTERN` with `InvalidNameError`, and a name the store does not hold with
-`UnknownCredentialError`. `docs/design.md` gives the credential model under "Credentials".
+`names` returns the stored names. `read` returns a stored value as bytes, and `path` returns the
+file that holds it. Each refuses a name that breaks `NAME_PATTERN` with `InvalidNameError`, and a
+name the store does not hold with `UnknownCredentialError`. `docs/design.md` gives the credential
+model under "Credentials".
+
+`unset_message` forms the one text that says a credential is not set and gives the command the
+operator stores it with. The warnings at start, at reload, and at token mint use it, and so does the
+runner's refusal. For `github-token`, the text is:
+
+```text
+credential 'github-token' is not set; the operator stores it with 'agent-proxy credential set github-token'
+```
+
+`unset_warnings` takes scopes and the stored names. It returns `unset_message` of each credential a
+grant of the scopes names that the stored names lack, each name once, in the order the scopes and
+their grants first name it.
 
 ### `auth.py`
 
@@ -267,9 +281,13 @@ and returns an `Outcome`. It refuses a bad call before it takes a slot under the
    order as a compact JSON array. `cage_environment` reads each credential the grant gives as an
    environment variable. The grant's `env` adds each of its pairs as given. `cage_mounts` binds each
    root at its own path with the grant's mode, then binds each credential the grant gives as a file,
-   read-only, from its file in the credential store. A credential that is not stored, or a
-   credential's environment value that is not UTF-8 or holds a NUL, raises `CredentialError`.
-   `_create` adds one more mount to these: the verifier image, read-only, at `VERIFIER_MOUNT`.
+   read-only, from its file in the credential store. A credential that is not stored raises
+   `CredentialError` with `unset_message` of its name. When several are not stored, the refusal
+   names the first env credential in grant order that is not stored, else the first such file
+   credential. A credential's environment value that is not UTF-8 or holds a NUL also raises
+   `CredentialError`. The runner reads the store on every call, so a credential that the operator
+   stores takes effect on the next call, with no reload. `_create` adds one more mount to these: the
+   verifier image, read-only, at `VERIFIER_MOUNT`.
 
 The run then waits for a slot, creates the cage, starts it, and removes it by force whatever
 happens. The slot stays taken until the cage is removed. The cage's entrypoint is the verifier's
@@ -311,14 +329,15 @@ the credential store, and the limiter; the module opens none of them.
 
 This module holds the config in force and replaces it on request.
 
-A `Snapshot` holds an `InstanceConfig`, the manifest of each of its plugins, and the warnings of
-those manifests. `build_snapshot` loads the config file with `load_config`, then loads each plugin's
-manifest through the `load_manifest` callable it takes. A `load_config` refusal propagates
-unchanged, and no plugin loads. Otherwise `build_snapshot` gathers each plugin that fails to load
-and each grant whose action its plugin's manifest does not declare into one `ConfigError`, and every
-message names the config file. It checks a grant only against a plugin whose manifest loaded. The
-callable is the seam to Docker: a caller binds `plugins.load_manifest` to a client, and a unit test
-passes a fake.
+A `Snapshot` holds an `InstanceConfig`, the manifest of each of its plugins, and its warnings. The
+warnings are those of the manifests, then one per credential a grant names that the credential store
+lacks, from `unset_warnings` over the stored names that `build_snapshot` takes. `build_snapshot`
+loads the config file with `load_config`, then loads each plugin's manifest through the
+`load_manifest` callable it takes. A `load_config` refusal propagates unchanged, and no plugin
+loads. Otherwise `build_snapshot` gathers each plugin that fails to load and each grant whose action
+its plugin's manifest does not declare into one `ConfigError`, and every message names the config
+file. It checks a grant only against a plugin whose manifest loaded. The callable is the seam to
+Docker: a caller binds `plugins.load_manifest` to a client, and a unit test passes a fake.
 
 `LiveConfig` holds the snapshot in force and an egress collaborator, an object with the `ensure` and
 `prune` of the `Egress` protocol, as `EgressProxies` has. `LiveConfig.start` builds the first
@@ -393,16 +412,17 @@ directory. It then starts the live config with `EgressProxies` over `egress/`, t
 `control.sock`, and the overflow sweeper, in that order. A step that fails closes what the steps
 before it started, except that the egress proxies that `LiveConfig.start` made ready stay, and then
 its error propagates. The calls of one instance share one `CageLimiter`. `Instance.app` is the app
-that `build_app` returns. `Instance.close` closes the control socket, stops the sweeper, and closes
-the audit writer. The egress proxies stay, and the next `LiveConfig.start` keeps or prunes them.
+that `build_app` returns. `Instance.warnings` holds the warnings of the snapshot that the live
+config started with. `Instance.close` closes the control socket, stops the sweeper, and closes the
+audit writer. The egress proxies stay, and the next `LiveConfig.start` keeps or prunes them.
 
 ### `cli.py`
 
 This module is the admin command, and it is the one module that reads the environment. Outside
-`serve`, it opens each store under the state directory itself, and hands the credential store's
-names to `load_config`. It opens the Docker client for `manifest check` and `serve`, and calls
-`request_reload` for `reload`. For `serve --host HOST --port PORT`, it starts an `Instance` from
-`mcp.py`, which opens the stores, and serves its app on that address. No store imports another;
+`serve`, it opens each store under the state directory itself, and `token mint` hands the credential
+store's names to `unset_warnings`. It opens the Docker client for `manifest check` and `serve`, and
+calls `request_reload` for `reload`. For `serve --host HOST --port PORT`, it starts an `Instance`
+from `mcp.py`, which opens the stores, and serves its app on that address. No store imports another;
 within the package, the stores import only `config.py` and `errors.py`.
 
 ## The root verifier
@@ -538,11 +558,13 @@ each of their steps.
 
 The `agent-proxy` command is `agent_proxy.cli:run`. The admin runs its verbs through `docker exec`
 into the instance container. Its `serve` verb is the instance image's process, which "The instance"
-above describes. Each other verb but `reload` takes a noun:
+above describes. `serve` prints the warnings of the instance's start before it serves, so the
+operator reads them in the container's log. Each other verb but `reload` takes a noun:
 
 - `token mint --name NAME --scope SCOPE [--expires DURATION]` loads the config, refuses a scope the
   config does not define, and prints the new token. A token minted without `--expires` never
-  expires.
+  expires. Before the token, it prints a warning for each credential the config names that the store
+  lacks, and it still mints the token and exits 0.
 - `token list` prints each token's name, scope, created time, last-used time, and expiry, never the
   token.
 - `token revoke NAME` deletes a token.
@@ -561,7 +583,8 @@ A listing prints a header row, then one tab-separated row per entry, with `-` fo
 set.
 
 The command exits 0 on success. A refusal prints one line per failure to stderr, each beginning
-`agent-proxy:`, and exits 1. A usage error exits 2. A warning is not a failure: `manifest check` and
-`reload` print each warning to stderr as a line beginning `agent-proxy: warning:`, and exit 0.
+`agent-proxy:`, and exits 1. A usage error exits 2. A warning is not a failure: `manifest check`,
+`reload`, `token mint`, and `serve` print each warning to stderr as a line beginning
+`agent-proxy: warning:`, and go on as they would with no warning. A command that only warns exits 0.
 `docs/design.md` gives who runs the command and how under "Tokens", "Credentials", "Audit",
 "Config", and "Plugins and actions".
