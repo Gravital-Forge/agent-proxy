@@ -18,17 +18,18 @@ MANIFEST_PATH = Path(__file__).parents[2] / "manifest.json"
 DOCKERFILE_PATH = Path(__file__).parents[2] / "Dockerfile"
 GH_CAGE_LINK = "ln -s /plugin/entry /usr/local/bin/gh-cage"
 LINKED_ACTIONS = re.compile(r"for action in ([^;]+); do")
-GIT_SIDECAR_GH_TOOLS = {
-    "gh_pr_create",
-    "gh_pr_edit",
-    "gh_pr_view",
-    "gh_pr_list",
-    "gh_pr_fetch",
-    "gh_pr_reply",
-    "gh_pr_checks",
-    "gh_pr_close",
-    "gh_run_view",
-    "gh_run_list",
+MANIFEST_ACTIONS = {
+    "pr_create",
+    "pr_edit",
+    "pr_view",
+    "pr_list",
+    "pr_fetch",
+    "pr_reply",
+    "pr_checks",
+    "pr_close",
+    "run_view",
+    "run_list",
+    "job_log_url",
 }
 GH_TOKEN = (EnvMount(env="GH_TOKEN"),)
 MINUTE = timedelta(seconds=60)
@@ -206,13 +207,9 @@ def test_manifest_parses_with_no_warning(manifest: Manifest) -> None:
     assert manifest.warnings() == ()
 
 
-def test_manifest_declares_git_sidecars_gh_tools_and_job_log_url(
-    manifest: Manifest,
-) -> None:
-    """The actions are git-sidecar's GitHub tools without gh_, and job_log_url."""
-    assert set(manifest.actions) == {
-        tool.removeprefix("gh_") for tool in GIT_SIDECAR_GH_TOOLS
-    } | {"job_log_url"}
+def test_manifest_declares_every_action(manifest: Manifest) -> None:
+    """The manifest declares the 11 GitHub actions and no other."""
+    assert set(manifest.actions) == MANIFEST_ACTIONS
 
 
 @pytest.mark.parametrize("name", sorted(COMMAND_ACTIONS))

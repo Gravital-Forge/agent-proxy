@@ -2,4 +2,4 @@
 
 
 class ProxyError(Exception):
-    """An error the admin command reports to its user."""
+    """An error the operator command reports to the operator."""

@@ -250,10 +250,10 @@ check runs here and never in the project. Every `docker` command below runs as r
 4. **The agent cannot reach the service user's socket.**
    `sudo -u agent-01 docker -H unix:///run/user/<uid>/docker.sock version` fails with permission
    denied.
-5. **`H1` to `H4` and the cage cost.** Run the core package's `tests/integration/test_runner.py` as
-   the service user against its own daemon. The service user needs uv on the `PATH` that `sudo`
-   gives it, and its own copy of the checkout, because uv writes the package's environment inside
-   it:
+5. **The cage hardening and the cage cost.** Run the core package's
+   `tests/integration/test_runner.py` as the service user against its own daemon. The service user
+   needs uv on the `PATH` that `sudo` gives it, and its own copy of the checkout, because uv writes
+   the package's environment inside it:
 
    ```sh
    cp -r <checkout> <service home>/agent-proxy
@@ -264,9 +264,9 @@ check runs here and never in the project. Every `docker` command below runs as r
 
    The check passes when every test passes and, afterwards, the label checks in
    `.dev/verification.md` print nothing on the service user's daemon. Read the cage-cost median from
-   the `MEASURE cage-cost` line the run prints. `spike/FINDINGS.md` gives what `H1` to `H4`, `C1`,
-   and `C2` each check, and the cost the spike measured. Remove the copy with
-   `rm -rf <service home>/agent-proxy`.
+   the `MEASURE cage-cost` line the run prints. `test_the_cage_passes_the_hardening_probes` checks
+   that the cage's root filesystem refuses a write, `/tmp` takes one, the cage holds no effective
+   capability, and `no_new_privs` is set. Remove the copy with `rm -rf <service home>/agent-proxy`.
 6. **`E12` with a real credential.** Store a real `github-token`, as "The first start" does, and
    give a `git.fetch` grant shaped like the `git.push` grant in `examples/instance.yaml`. Through
    the agent's MCP client, call `git_fetch` on a repository below the tree whose remote is a private

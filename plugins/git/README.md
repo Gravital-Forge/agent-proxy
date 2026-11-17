@@ -1,16 +1,15 @@
 # The git plugin
 
-The git plugin runs git and git LFS in a cage. It offers one action for each git and git LFS tool
-that git-sidecar offers, and it keeps git-sidecar's branch rules. `docs/writing-a-plugin.md` gives
-the plugin model this follows, and `docs/design.md` gives the decisions behind it under "The git
-plugin's constraints".
+The git plugin runs git and git LFS in a cage. It offers git and git LFS actions, and it applies
+branch rules to `push` and `checkout`. `docs/writing-a-plugin.md` gives the plugin model this
+follows, and `docs/design.md` gives the decisions behind it under "The git plugin's constraints".
 
 ## The actions
 
-Each action is named as its git-sidecar tool, without the `git_` prefix: `git_status` becomes
-`status`, and `git_lfs_pull` becomes `lfs_pull`. A config that pins the plugin as `git` therefore
-serves the MCP tool names that git-sidecar serves. `manifest.json` declares every action, its input
-schema, its credentials, and its timeout.
+Each action's MCP tool name is `<plugin>_<action>`, where `<plugin>` is the name a config pins the
+image as. A config that pins the image as `git`, as "A grant" does, serves `status` as `git_status`
+and `lfs_pull` as `git_lfs_pull`. `manifest.json` declares every action, its input schema, its
+credentials, and its timeout.
 
 An action is a command action when its git argv is a fixed prefix plus typed parameters. It is a
 script action when it does more than that:
@@ -48,7 +47,7 @@ one exception to both rules: "`diff`" gives its result.
 When a git step inside a script fails for a reason other than the outcome that step checks, the
 script stops and returns that step's git result. For example, `push` returns git's own result when
 `repo` does not exist. One step is the exception: `push` reads a failed `git lfs ls-files` as no LFS
-file, as git-sidecar does, and goes on.
+file, and goes on.
 
 ### Refusals
 
@@ -76,9 +75,8 @@ gives the reason. The wrapper refuses as its own exit; a script refuses through 
 - The image's executable runs under a name that is not `git-cage`, `git-credential-agent-proxy`, or
   a script action's.
 
-The refusal text of a broken branch rule uses git-sidecar's wording. The credential helper refuses
-in its own way: it writes the refusal to stderr and answers git `quit=1`, so git fails with its own
-exit code, and the action's `stderr` holds the refusal.
+The credential helper refuses in its own way: it writes the refusal to stderr and answers git
+`quit=1`, so git fails with its own exit code, and the action's `stderr` holds the refusal.
 
 ### Output past the cap
 
@@ -142,7 +140,7 @@ host path exists in the cage. A `git.worktree` grant names a root of mode `rw` a
 ### `stash`
 
 `stash` passes `message` and `index` to git whatever its `action` is. git refuses a combination it
-does not take, such as a `message` with `pop`. git-sidecar ignores such a member instead.
+does not take, such as a `message` with `pop`.
 
 ### `config_get`
 
@@ -207,7 +205,7 @@ keys on `GH_TOKEN` and not on the action. Give each grant of such an action a cr
 
 ### Branch rules
 
-`scripts/git_plugin/rules.py` holds git-sidecar's rules. The protected branches are `main` and
+`scripts/git_plugin/rules.py` holds the branch rules. The protected branches are `main` and
 `master`, and no config changes them. The allowed branch prefixes come from `GIT_BRANCH_PREFIXES` in
 the cage's environment, which the grant's `env` sets. Its value is a comma-separated list: each
 entry is stripped of whitespace, and an empty entry is ignored, so `task/, dependabot/` names

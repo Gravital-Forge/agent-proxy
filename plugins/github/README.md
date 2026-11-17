@@ -1,17 +1,15 @@
 # The github plugin
 
-The github plugin runs gh, the GitHub CLI, in a cage. It offers one action for each GitHub tool that
-git-sidecar offers, and `job_log_url`, which git-sidecar lacks. `docs/writing-a-plugin.md` gives the
-plugin model this follows.
+The github plugin runs gh, the GitHub CLI, in a cage. It offers actions on pull requests, workflow
+runs, and job logs. `docs/writing-a-plugin.md` gives the plugin model this follows.
 
 ## The actions
 
-Each action that git-sidecar has is named as its git-sidecar tool, without the `gh_` prefix:
-`gh_pr_create` becomes `pr_create`, and `gh_run_view` becomes `run_view`. The name a config pins the
-image as sets the MCP tool names, which `docs/design.md` gives as `<plugin>_<action>`. A config that
-pins the image as `github`, as "A grant" does, serves `github_pr_create` and the rest. A config that
-pins it as `gh` instead serves the names that git-sidecar serves, and `gh_job_log_url`.
-`manifest.json` declares every action, its input schema, its credentials, and its timeout.
+Each action's MCP tool name is `<plugin>_<action>`, as `docs/design.md` gives, where `<plugin>` is
+the name a config pins the image as. A config that pins the image as `github`, as "A grant" does,
+serves `pr_create` as `github_pr_create`. A config that pins it as `gh` instead serves it as
+`gh_pr_create`. `manifest.json` declares every action, its input schema, its credentials, and its
+timeout.
 
 An action is a command action when its argv is `gh-cage`, a fixed gh prefix, and typed parameters,
 as for `pr_list`, `run_view`, and `run_list`. "The repository list" gives what `gh-cage` does. The
@@ -44,9 +42,9 @@ The input schema takes an owner of letters, digits, and `-` that begins with a l
 then one slash, then a name of letters, digits, `_`, `.`, and `-` that is not only dots. A script
 builds each `gh api` path from `repo`, so the path stays under `repos/<owner>/<name>/`.
 
-`pr_create` takes a required `head`, the branch the pull request comes from. git-sidecar takes that
-branch from the checkout, and gh runs outside any checkout, because neither the core nor the image
-sets a working directory.
+`pr_create` takes a required `head`, the branch the pull request comes from. gh cannot read that
+branch from a checkout, because it runs outside any checkout: neither the core nor the image sets a
+working directory.
 
 ### The repository list
 

@@ -52,7 +52,7 @@ def test_manifest_check_passes_the_pulled_plugin(
     pinned_plugin: str,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The admin command runs a local plugin's describe and prints the pass line."""
+    """The operator command runs a local plugin's describe and prints the pass line."""
     docker_client.images.pull(pinned_plugin)
 
     status = cli.main(["manifest", "check", pinned_plugin])

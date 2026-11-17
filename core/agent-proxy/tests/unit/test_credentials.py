@@ -229,5 +229,5 @@ def test_remove_never_reaches_outside_the_store(
     "error", [InvalidNameError, EmptyCredentialError, UnknownCredentialError]
 )
 def test_errors_are_proxy_errors(error: type[Exception]) -> None:
-    """The admin command catches every credential error as a ProxyError."""
+    """The operator command catches every credential error as a ProxyError."""
     assert issubclass(error, ProxyError)

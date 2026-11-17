@@ -50,12 +50,12 @@ class ReloadRefusedError(ProxyError):
 
 
 def run() -> None:
-    """Run the admin command on the process arguments and exit with its status."""
+    """Run the operator command on the process arguments and exit with its status."""
     sys.exit(main())
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the admin command on argv and return its exit status.
+    """Run the operator command on argv and return its exit status.
 
     A refusal prints one stderr line per failure and returns 1. A usage error
     exits 2 inside argparse.

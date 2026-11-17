@@ -18,6 +18,3 @@ Work lands on `main` through pull requests the operator merges.
 - `plugins/github/README.md` describes the github plugin, which runs gh in a cage.
 - `plugins/hcp-terraform/README.md` describes the hcp-terraform plugin, which reads HCP Terraform
   runs and their logs in a cage.
-- `docs/roadmap.md` is the ordered list of work items that build the proof of concept.
-- `docs/pipeline/index.md` is how baton sessions build it, one job at a time.
-- `spike/FINDINGS.md` is the dated record of the spike that tested the design's load-bearing claims.

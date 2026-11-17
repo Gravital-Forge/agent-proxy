@@ -2,8 +2,6 @@
 line-length = 100
 cache = false
 extend-enable = ["MD060"]
-# spike/ holds a dated record wrapped at 78 columns, which the reflow rule would flag; it is never edited.
-exclude = ["spike/"]
 
 [MD013]
 line-length = 100
