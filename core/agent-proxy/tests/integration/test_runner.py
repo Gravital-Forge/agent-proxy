@@ -39,12 +39,17 @@ ECHO = MANIFEST.actions["echo"]
 COUNT = MANIFEST.actions["count"]
 ECHO_HELLO = {"exit_code": 0, "stdout": "hello\n", "stderr": ""}
 DEFAULT_MAX_CAGES = 4
-# The probes of spike/cage.py's run_hardening_checks.
+# Probes whether the root filesystem and /tmp take a write, and reads the
+# effective capabilities and the no_new_privs flag.
 HARDEN_PROBE = (
-    "if touch /probe 2>/dev/null; then echo H1=written; else echo H1=refused; fi; "
-    "if touch /tmp/probe 2>/dev/null; then echo H2=written; else echo H2=refused; fi; "
-    'awk \'/^CapEff:/ {print "H3=" $2} /^NoNewPrivs:/ {print "H4=" $2}\' '
-    "/proc/self/status"
+    "if touch /probe 2>/dev/null; "
+    "then echo root=written; else echo root=refused; fi; "
+    "if touch /tmp/probe 2>/dev/null; "
+    "then echo tmp=written; else echo tmp=refused; fi; "
+    "awk '"
+    '/^CapEff:/ {print "capeff=" $2} '
+    '/^NoNewPrivs:/ {print "nonewprivs=" $2}'
+    "' /proc/self/status"
 )
 OVERFLOW_BYTES = 1048576
 OVERFLOW_LINE = b"abcdefg\n"
@@ -321,11 +326,15 @@ def test_the_cage_receives_its_grant_s_env(cages: _Cages) -> None:
 
 
 def test_the_cage_passes_the_hardening_probes(cages: _Cages) -> None:
-    """H1 to H4 print the values spike/FINDINGS.md records as passing."""
+    """The cage is hardened.
+
+    The root filesystem refuses a write, /tmp takes one, no capability is
+    effective, and no_new_privs is set.
+    """
     outcome = cages.run(_shell(HARDEN_PROBE), {}, _grant())
 
     assert outcome.content["stdout"] == (
-        "H1=refused\nH2=written\nH3=0000000000000000\nH4=1\n"
+        "root=refused\ntmp=written\ncapeff=0000000000000000\nnonewprivs=1\n"
     )
 
 

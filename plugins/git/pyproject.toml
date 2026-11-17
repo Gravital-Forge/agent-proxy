@@ -2,7 +2,8 @@
 name = "agent-proxy-git-plugin"
 version = "0.0.1"
 description = "The agent-proxy plugin that runs git and git LFS in a cage"
-authors = [{name = "Matt Krainski", email = "matt@gravitalforge.com"}]
+authors = [{name = "Gravital Forge"}]
+license = "MIT"
 requires-python = ">=3.12,<3.13"
 dependencies = []
 

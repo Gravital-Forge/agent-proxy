@@ -2,7 +2,8 @@
 name = "agent-proxy"
 version = "0.0.1"
 description = "Per-agent MCP proxy that runs scoped, credentialed actions in cages"
-authors = [{name = "Matt Krainski", email = "matt@gravitalforge.com"}]
+authors = [{name = "Gravital Forge"}]
+license = "MIT"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "anyio>=4.15.1,<5.0.0",

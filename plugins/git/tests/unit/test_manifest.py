@@ -18,7 +18,7 @@ from jsonschema import Draft202012Validator
 MANIFEST_PATH = Path(__file__).parents[2] / "manifest.json"
 DOCKERFILE_PATH = Path(__file__).parents[2] / "Dockerfile"
 LINKED_ACTIONS = re.compile(r"for action in ([^;]+); do")
-GIT_SIDECAR_TOOLS = {
+ACTIONS = {
     "status",
     "diff",
     "log",
@@ -425,7 +425,7 @@ def test_merge_states_branch_as_a_non_empty_string(manifest: Manifest) -> None:
 
 
 def test_stash_states_each_parameter(manifest: Manifest) -> None:
-    """The stash action is one of git-sidecar's five; its index is not negative."""
+    """The stash action takes one of five subcommands; its index is not negative."""
     assert _properties(manifest.actions["stash"]) == {
         "repo": REPO_PROPERTY,
         "action": {
@@ -611,9 +611,9 @@ def test_script_action_accepts_an_input_inside_its_schema(
     validate_input(manifest.actions[name], {"repo": "/repo", **arguments})
 
 
-def test_manifest_declares_one_action_per_git_sidecar_tool(manifest: Manifest) -> None:
-    """The actions are git-sidecar's 29 git tools, each without its git_ prefix."""
-    assert set(manifest.actions) == GIT_SIDECAR_TOOLS
+def test_manifest_declares_every_action(manifest: Manifest) -> None:
+    """The manifest declares the 29 git actions and no other."""
+    assert set(manifest.actions) == ACTIONS
 
 
 def test_dockerfile_links_each_script_action(manifest: Manifest) -> None:

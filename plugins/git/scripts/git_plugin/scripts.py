@@ -445,7 +445,7 @@ def _current_branch(repo: str, roots: Sequence[str]) -> str:
 def _push_lfs_objects(repo: str, roots: Sequence[str], branch: str) -> None:
     """Upload branch's LFS objects to origin when repo tracks any LFS file.
 
-    A failed ls-files counts as no LFS file, as git-sidecar has it.
+    A failed ls-files counts as no LFS file.
 
     Raises:
         _GitFailedError: the LFS push failed.

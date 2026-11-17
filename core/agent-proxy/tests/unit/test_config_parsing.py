@@ -40,7 +40,7 @@ def test_parse_duration_refuses_a_count_too_large(text: str) -> None:
 
 
 def test_duration_error_is_a_proxy_error_and_a_value_error() -> None:
-    """The admin command catches it as ProxyError; pydantic, as ValueError."""
+    """The operator command catches it as ProxyError; pydantic, as ValueError."""
     with pytest.raises(DurationError) as excinfo:
         parse_duration("10w")
 
@@ -112,7 +112,7 @@ def test_read_yaml_refuses_a_duplicate_key_two_levels_down(tmp_path: Path) -> No
     ids=["malformed", "duplicate-key"],
 )
 def test_read_yaml_refusal_is_one_line(tmp_path: Path, source: str) -> None:
-    """A YAML error reads as one line, so the admin command prints it as one."""
+    """A YAML error reads as one line, so the operator command prints it as one."""
     path = tmp_path / "config.yaml"
     path.write_text(source)
 

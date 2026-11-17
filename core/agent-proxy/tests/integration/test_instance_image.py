@@ -114,7 +114,7 @@ def test_the_image_serves_on_all_interfaces_with_the_instance_environment(
     assert environment["PATH"].split(":")[0] == VENV_BIN
 
 
-def test_the_image_prints_the_admin_usage_when_hardened(
+def test_the_image_prints_the_operator_usage_when_hardened(
     docker_client: DockerClient, instance_image: str
 ) -> None:
     """Root, read-only, no capabilities, no new privileges: --help exits 0."""
