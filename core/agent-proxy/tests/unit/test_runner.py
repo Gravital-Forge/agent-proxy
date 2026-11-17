@@ -16,7 +16,7 @@ import requests
 
 from agent_proxy import runner
 from agent_proxy.config import EnvMount, FileMount, Grant, Root
-from agent_proxy.credentials import CredentialStore
+from agent_proxy.credentials import CredentialStore, unset_message
 from agent_proxy.egress import CageNetwork
 from agent_proxy.errors import ProxyError
 from agent_proxy.plugins import CommandAction, Parameter, ScriptAction, parse_manifest
@@ -553,13 +553,13 @@ def test_cage_environment_refuses_a_value_that_holds_a_nul(
 def test_cage_environment_refuses_an_unknown_credential(
     store: CredentialStore,
 ) -> None:
-    """A credential the store lacks refuses with the store's message."""
+    """A credential the store lacks refuses by name, naming no stored credential."""
+    store.set("other-token", b"s3cret")
+
     with pytest.raises(CredentialError) as excinfo:
         cage_environment({"api-token": EnvMount(env="API_TOKEN")}, store)
 
-    assert str(excinfo.value) == (
-        "no credential named 'api-token'; stored names are []"
-    )
+    assert str(excinfo.value) == unset_message("api-token")
 
 
 def test_cage_mounts_binds_each_root_at_its_own_path(store: CredentialStore) -> None:
@@ -616,11 +616,15 @@ def test_cage_mounts_gives_a_file_credential_a_str_source(
 def test_cage_mounts_refuses_an_unknown_file_credential(
     store: CredentialStore,
 ) -> None:
-    """A file credential the store lacks refuses, naming it."""
-    with pytest.raises(CredentialError, match="'deploy-key'"):
+    """A file credential the store lacks refuses by name, naming no stored one."""
+    store.set("other-key", b"key")
+
+    with pytest.raises(CredentialError) as excinfo:
         cage_mounts(
             [], {"deploy-key": FileMount(file="/run/credentials/deploy")}, store
         )
+
+    assert str(excinfo.value) == unset_message("deploy-key")
 
 
 def test_the_cage_constants_are_the_spec_s() -> None:
@@ -1368,6 +1372,31 @@ def test_run_refuses_before_it_takes_a_slot_or_creates_a_cage(
             _cage_call(_echo(), arguments, grant=make_grant(tmp_path))
         )
 
+    limiter.slot.assert_not_called()
+    client.containers.create.assert_not_called()
+
+
+def test_run_names_the_unset_env_credential_before_an_unset_file_one(
+    store: CredentialStore,
+) -> None:
+    """With an env and a file credential both unset, the refusal names the env one."""
+    grant = Grant(
+        roots=[],
+        domains=[],
+        credentials={
+            "deploy-key": FileMount(file="/run/credentials/deploy"),
+            "api-token": EnvMount(env="API_TOKEN"),
+        },
+    )
+    client = _client()
+    limiter = MagicMock()
+
+    with pytest.raises(CredentialError) as excinfo:
+        CageRunner(client, store, limiter).run(
+            _cage_call(_echo(), {"text": "hi"}, grant=grant)
+        )
+
+    assert str(excinfo.value) == unset_message("api-token")
     limiter.slot.assert_not_called()
     client.containers.create.assert_not_called()
 
