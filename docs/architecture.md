@@ -105,11 +105,7 @@ model under "Credentials".
 
 `unset_message` forms the one text that says a credential is not set and gives the command the
 operator stores it with. The warnings at start, at reload, and at token mint use it, and so does the
-runner's refusal. For `github-token`, the text is:
-
-```text
-credential 'github-token' is not set; the operator stores it with 'agent-proxy credential set github-token'
-```
+runner's refusal. `docs/design.md` gives the text under "Credentials".
 
 `unset_warnings` takes scopes and the stored names. It returns `unset_message` of each credential a
 grant of the scopes names that the stored names lack, each name once, in the order the scopes and
