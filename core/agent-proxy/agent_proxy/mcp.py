@@ -374,9 +374,11 @@ class Instance:
         control: ControlServer,
         sweeper: OverflowSweeper,
         audit: AuditWriter,
+        warnings: tuple[str, ...],
     ) -> None:
-        """Hold the app, and the parts close stops."""
+        """Hold the app, the start's warnings, and the parts close stops."""
         self.app = app
+        self.warnings = warnings
         self._control = control
         self._sweeper = sweeper
         self._audit = audit
@@ -387,7 +389,8 @@ class Instance:
 
         The order is the stores, the live config, the control socket, and the
         overflow sweeper. A step that fails closes what the steps before it
-        started, then its error propagates.
+        started, then its error propagates. The instance's warnings are those
+        of the first snapshot.
 
         Raises:
             ProxyError: the audit log cannot be prepared, the config cannot be
@@ -411,7 +414,9 @@ class Instance:
             started.callback(sweeper.stop)
             runner = CageRunner(client, credentials, CageLimiter())
             gateway = CallGateway(tokens, live, runner, audit, _utc_now)
-            instance = cls(build_app(gateway), control, sweeper, audit)
+            instance = cls(
+                build_app(gateway), control, sweeper, audit, live.current.warnings
+            )
             started.pop_all()
         return instance
 

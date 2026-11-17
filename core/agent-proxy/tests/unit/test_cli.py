@@ -23,6 +23,7 @@ from agent_proxy.audit import AuditRecord, AuditWriter
 from agent_proxy.auth import TokenStore
 from agent_proxy.cli import main, run
 from agent_proxy.config import ConfigError, load_config
+from agent_proxy.credentials import unset_message
 from agent_proxy.mcp import Instance, _Server
 from agent_proxy.reload import CONTROL_SOCKET_NAME, ControlServer, LiveConfig, Snapshot
 
@@ -161,7 +162,7 @@ def _snapshot(tmp_path: Path, warnings: tuple[str, ...] = ()) -> Snapshot:
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(CONFIG), encoding="utf-8")
     return Snapshot(
-        config=load_config(path, frozenset()),
+        config=load_config(path),
         manifests=MappingProxyType({}),
         warnings=warnings,
     )
@@ -187,6 +188,7 @@ class FakeInstance:
     def __init__(self) -> None:
         """Hold a stand-in app; not started, not closed."""
         self.app = object()
+        self.warnings: tuple[str, ...] = ()
         self.started_with: tuple[Path, Path, object] | None = None
         self.closed = False
 
@@ -230,6 +232,29 @@ def test_token_mint_prints_the_token_alone(
     assert lines[0].startswith("apx_")
     assert captured.out == lines[0] + "\n"
     assert captured.err == ""
+
+
+def test_token_mint_under_an_unstored_credential_warns_and_prints_the_token(
+    state: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The mint exits 0 with the token on stdout and the warning on stderr."""
+    grant = {
+        "roots": [],
+        "domains": [],
+        "credentials": {"github-token": {"env": "GH_TOKEN"}},
+    }
+    document = CONFIG | {
+        "plugins": {"github": "ghcr.io/example/github@sha256:" + "c" * 64},
+        "scopes": {"ci": {"grants": {"github.pr_view": grant}}},
+    }
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    assert main(["token", "mint", "--name", "ci-bot", "--scope", "ci"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out.startswith("apx_")
+    assert len(captured.out.splitlines()) == 1
+    assert captured.err == f"{PREFIX}warning: {unset_message('github-token')}\n"
 
 
 def test_token_mint_of_a_taken_name_exits_1_naming_it(
@@ -815,6 +840,31 @@ def test_serve_runs_the_app_on_host_and_port_then_closes_the_instance(
     assert instance.started_with == (state, state.parent / "config.yaml", client)
     assert runs == [("127.0.0.1", 8765, instance.app, False)]
     assert instance.closed is True
+
+
+def test_serve_prints_the_start_warnings_before_the_server_runs(
+    fake_instance: tuple[FakeInstance, mock.MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Each of the instance's warnings is on stderr by the time the server runs."""
+    instance, _ = fake_instance
+    instance.warnings = (
+        "plugins.git.actions.raw: declares pass-through args",
+        unset_message("github-token"),
+    )
+    err_at_run: list[str] = []
+
+    def run(self: _Server, sockets: object = None) -> None:
+        err_at_run.append(capsys.readouterr().err)
+
+    monkeypatch.setattr(_Server, "run", run)
+
+    assert main(SERVE) == 0
+
+    assert err_at_run == [
+        "".join(f"{PREFIX}warning: {line}\n" for line in instance.warnings)
+    ]
 
 
 def test_serve_closes_the_instance_when_run_raises(

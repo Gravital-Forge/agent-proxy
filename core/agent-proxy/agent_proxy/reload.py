@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import Protocol, Self
 
 from agent_proxy.config import ConfigError, InstanceConfig, load_config
+from agent_proxy.credentials import unset_warnings
 from agent_proxy.egress import domain_lists
 from agent_proxy.errors import ProxyError
 from agent_proxy.plugins import Manifest
@@ -27,7 +28,11 @@ _REPLY_FORM = '{"ok": true, "warnings": [...]} or {"ok": false, "errors": [...]}
 
 @dataclass(frozen=True)
 class Snapshot:
-    """A config, the manifest of each of its plugins, and their warnings."""
+    """A config, the manifest of each of its plugins, and their warnings.
+
+    The warnings are the manifests' warnings, then one per credential a grant
+    names that the credential store lacked.
+    """
 
     config: InstanceConfig
     manifests: MappingProxyType[str, Manifest]
@@ -43,7 +48,9 @@ def build_snapshot(
 
     Args:
         path: the config file.
-        credential_names: the names the credential store holds.
+        credential_names: the names the credential store holds; each
+            credential a grant names that is not among them adds a warning,
+            after the manifest warnings.
         load_manifest: returns the manifest of the image at a pinned
             reference, making the image present first.
 
@@ -53,7 +60,7 @@ def build_snapshot(
             grant names an action its plugin's manifest does not declare. It
             holds one message per failure.
     """
-    config = load_config(path, credential_names)
+    config = load_config(path)
     manifests, failures = _load_manifests(config, load_manifest)
     failures.extend(_undeclared_action_failures(config, manifests))
     if failures:
@@ -62,7 +69,10 @@ def build_snapshot(
     return Snapshot(
         config=config,
         manifests=MappingProxyType(manifests),
-        warnings=tuple(_warnings(manifests)),
+        warnings=(
+            *_manifest_warnings(manifests),
+            *unset_warnings(config.scopes.values(), credential_names),
+        ),
     )
 
 
@@ -97,7 +107,7 @@ def _undeclared_action_failures(
                 )
 
 
-def _warnings(manifests: Mapping[str, Manifest]) -> Iterator[str]:
+def _manifest_warnings(manifests: Mapping[str, Manifest]) -> Iterator[str]:
     for plugin, manifest in manifests.items():
         for warning in manifest.warnings():
             yield f"plugins.{plugin}.{warning}"

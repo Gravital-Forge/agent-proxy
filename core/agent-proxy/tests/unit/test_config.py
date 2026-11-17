@@ -22,7 +22,6 @@ AGENT_TREE = "/srv/agents/alpha"
 OVERFLOW_DIR = f"{AGENT_TREE}/overflow"
 MAX_CAGES = 4
 IMAGE = "ghcr.io/example/git@sha256:" + "a" * 64
-CREDENTIAL_NAMES = frozenset({"gh-token", "ssh-key"})
 LONG_DOMAIN = ".".join(["a" * 63] * 4)
 OMIT = object()
 
@@ -65,7 +64,7 @@ def _with_grant(**overrides: object) -> dict[str, object]:
 def _load(tmp_path: Path, document: object) -> InstanceConfig:
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(document))
-    return load_config(path, CREDENTIAL_NAMES)
+    return load_config(path)
 
 
 def _refusal(tmp_path: Path, document: object) -> ConfigError:
@@ -132,6 +131,15 @@ def test_load_config_returns_the_overflow_dir_and_the_cage_cap(tmp_path: Path) -
 def test_load_config_accepts_a_cage_cap_of_one(tmp_path: Path) -> None:
     """The smallest cap max_cages allows is 1."""
     assert _load(tmp_path, _config(max_cages=1)).max_cages == 1
+
+
+def test_load_config_accepts_a_credential_outside_any_store(tmp_path: Path) -> None:
+    """A grant may name any credential; the config load consults no store."""
+    config = _load(tmp_path, _with_grant(credentials={"npm-token": {"env": "NPM"}}))
+
+    assert config.scopes["dev"].grants["git.clone"].credentials == {
+        "npm-token": EnvMount(env="NPM")
+    }
 
 
 def test_load_config_accepts_empty_grant_fields(tmp_path: Path) -> None:
@@ -250,11 +258,6 @@ REFUSALS = [
         _with_grant(credentials={"GH": {"env": "GH_TOKEN"}}),
         "'GH'",
         id="credential-name-uppercase",
-    ),
-    pytest.param(
-        _with_grant(credentials={"npm-token": {"env": "NPM_TOKEN"}}),
-        "'npm-token'",
-        id="credential-not-in-store",
     ),
     pytest.param(
         _with_grant(
@@ -586,35 +589,35 @@ def test_load_config_reports_every_field_failure_together(tmp_path: Path) -> Non
 
 
 def test_load_config_reports_every_rule_failure_together(tmp_path: Path) -> None:
-    """A root outside agent_tree and a missing credential are both reported."""
+    """A root outside agent_tree and a repeated domain are both reported."""
     error = _refusal(
         tmp_path,
         _with_grant(
             roots=[{"path": "/srv/other", "mode": "ro"}],
-            credentials={"npm-token": {"env": "NPM_TOKEN"}},
+            domains=["github.com", "github.com"],
         ),
     )
 
     assert len(error.errors) == 2
     assert any("'/srv/other'" in message for message in error.errors)
-    assert any("'npm-token'" in message for message in error.errors)
+    assert any("'github.com' is named more than once" in m for m in error.errors)
 
 
 def test_load_config_reports_an_env_failure_beside_the_other_rule_failures(
     tmp_path: Path,
 ) -> None:
-    """A reserved env name and a missing credential are both reported."""
+    """A reserved env name and a repeated domain are both reported."""
     error = _refusal(
         tmp_path,
         _with_grant(
-            credentials={"npm-token": {"env": "NPM_TOKEN"}},
+            domains=["github.com", "github.com"],
             env={"HTTPS_PROXY": "http://elsewhere:1080"},
         ),
     )
 
     assert len(error.errors) == 2
     assert any("env must not name 'HTTPS_PROXY'" in m for m in error.errors)
-    assert any("'npm-token'" in m for m in error.errors)
+    assert any("'github.com' is named more than once" in m for m in error.errors)
 
 
 def test_load_config_names_a_domain_named_three_times_once(tmp_path: Path) -> None:

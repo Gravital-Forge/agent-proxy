@@ -95,8 +95,7 @@ CONFIG = InstanceConfig.model_validate(
             },
             "ops": {"grants": {"other.echo": _grant([])}},
         },
-    },
-    context={"credential_names": frozenset()},
+    }
 )
 SNAPSHOT = Snapshot(
     config=CONFIG,
