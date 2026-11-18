@@ -361,7 +361,7 @@ agent-proxy/
 ├── examples/             # a sample instance config
 ├── core/
 │   ├── agent-proxy/      # the core uv package (Python, FastMCP, Docker SDK)
-│   │   ├── agent_proxy/  # cli, config, auth, credentials, plugins, reload, mcp, runner, egress, results, audit, errors, schemas
+│   │   ├── agent_proxy/  # cli, config, auth, credentials, plugins, reload, mcp, selfcheck, runner, egress, results, audit, errors, schemas
 │   │   └── tests/        # unit/, integration/
 │   ├── docker/           # the proxy's Dockerfile and provisioning; the iron-proxy pin is in egress
 │   └── verifier/         # the in-cage root verifier: Go source, its tests, and the Dockerfile that builds it
