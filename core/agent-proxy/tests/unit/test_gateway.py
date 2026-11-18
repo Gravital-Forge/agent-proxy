@@ -34,6 +34,12 @@ from agent_proxy.runner import (
     InputError,
     Outcome,
 )
+from agent_proxy.selfcheck import (
+    SELF_CHECK_INPUT_SCHEMA,
+    SELF_CHECK_TOOL,
+    CheckEntry,
+    CheckReport,
+)
 
 MINTED_AT = datetime(2026, 9, 30, 12, 0, tzinfo=UTC)
 LATER = MINTED_AT + timedelta(minutes=5)
@@ -139,6 +145,21 @@ LATCH_RECORD = AuditRecord(
     truncated=False,
     refusal="latch",
 )
+CHECKS = (
+    CheckEntry(
+        check="credential",
+        subject="api-token",
+        ok=False,
+        detail=unset_message("api-token"),
+    ),
+    CheckEntry(
+        check="overflow_dir",
+        subject=OVERFLOW_DIR,
+        ok=True,
+        detail="the instance can create a file in it",
+    ),
+)
+SELF_CHECK_SPEC = ToolSpec(SELF_CHECK_TOOL, SELF_CHECK_INPUT_SCHEMA)
 
 
 class Clock:
@@ -173,10 +194,25 @@ class FakeRunner:
         return self.result
 
 
+class FakeSelfCheck:
+    """A self-check that records each run and the use held while it runs."""
+
+    def __init__(self, live: LiveConfig) -> None:
+        """Report CHECKS for every scope it runs."""
+        self.runs: list[tuple[Snapshot, str, int]] = []
+        self._live = live
+
+    def run(self, snapshot: Snapshot, scope_name: str) -> CheckReport:
+        """Record the run and the snapshot's use count, then return a report."""
+        self.runs.append((snapshot, scope_name, self._live._uses[id(snapshot)].count))
+        return CheckReport(scope=scope_name, checks=CHECKS)
+
+
 @dataclass
 class Harness:
     gateway: CallGateway
     runner: FakeRunner
+    self_check: FakeSelfCheck
     store: TokenStore
     clock: Clock
     live: LiveConfig
@@ -196,9 +232,11 @@ def harness(tmp_path: Path) -> Harness:
     audit = AuditWriter(audit_dir)
     live = LiveConfig(SNAPSHOT, RecordingEgress())
     runner = FakeRunner(live)
+    self_check = FakeSelfCheck(live)
     return Harness(
-        gateway=CallGateway(store, live, runner, audit, clock),
+        gateway=CallGateway(store, live, runner, self_check, audit, clock),
         runner=runner,
+        self_check=self_check,
         store=store,
         clock=clock,
         live=live,
@@ -297,10 +335,11 @@ def test_a_refusal_is_a_proxy_error() -> None:
 def test_the_listing_holds_the_scopes_grants_sorted_with_their_schemas(
     harness: Harness,
 ) -> None:
-    """Each grant of the scope lists as plugin_action with its manifest schema."""
+    """Each grant lists as plugin_action with its schema, beside the self-check."""
     listed = harness.gateway.list_tools(_bearer(harness.token))
 
     assert listed == [
+        SELF_CHECK_SPEC,
         ToolSpec(
             "tools_count_bytes", TOOLS_MANIFEST.actions["count_bytes"].input_schema
         ),
@@ -315,7 +354,11 @@ def test_the_bearer_scheme_is_matched_case_insensitively(
     """The scheme's case does not matter."""
     listed = harness.gateway.list_tools(f"{scheme} {harness.token}")
 
-    assert [spec.name for spec in listed] == ["tools_count_bytes", "tools_echo"]
+    assert [spec.name for spec in listed] == [
+        SELF_CHECK_TOOL,
+        "tools_count_bytes",
+        "tools_echo",
+    ]
 
 
 @pytest.mark.parametrize("make_authorization", BAD_AUTHORIZATIONS)
@@ -326,13 +369,13 @@ def test_the_listing_is_empty_for_a_token_that_does_not_authenticate(
     assert harness.gateway.list_tools(make_authorization(harness)) == []
 
 
-def test_the_listing_is_empty_for_a_scope_the_config_does_not_define(
+def test_the_listing_is_the_self_check_alone_for_a_scope_the_config_does_not_define(
     harness: Harness,
 ) -> None:
-    """A token whose scope the snapshot lacks lists nothing."""
+    """A token whose scope the snapshot lacks lists the self-check tool alone."""
     token = harness.store.mint("ghost-bot", "ghost", None)
 
-    assert harness.gateway.list_tools(_bearer(token)) == []
+    assert harness.gateway.list_tools(_bearer(token)) == [SELF_CHECK_SPEC]
 
 
 def test_the_listing_is_empty_when_the_token_store_cannot_be_read(
@@ -633,4 +676,131 @@ def test_a_latched_writer_refuses_before_authenticating(
     assert AUDIT_REFUSAL.fullmatch(_refusal(harness, _bearer(harness.token)))
     assert _last_used(harness) is None
     assert harness.runner.calls == []
+    assert _audit_lines(harness) == []
+
+
+def _self_check_refusal(
+    harness: Harness,
+    authorization: str | None,
+    arguments: dict[str, object] | None = None,
+) -> str:
+    with pytest.raises(CallRefusedError) as caught:
+        harness.gateway.call(authorization, SELF_CHECK_TOOL, arguments or {})
+    return str(caught.value)
+
+
+def test_the_self_check_returns_the_scopes_report(harness: Harness) -> None:
+    """The reply is the report's content, and no cage call runs for it."""
+    reply = harness.gateway.call(_bearer(harness.token), SELF_CHECK_TOOL, {})
+
+    assert reply == CheckReport(scope="dev", checks=CHECKS).content()
+    assert reply["ok"] is False
+    assert harness.runner.calls == []
+
+
+def test_the_self_check_runs_while_the_snapshot_is_in_use(harness: Harness) -> None:
+    """The check runs on the snapshot in force, held in use, released afterwards."""
+    harness.gateway.call(_bearer(harness.token), SELF_CHECK_TOOL, {})
+
+    assert harness.self_check.runs == [(SNAPSHOT, "dev", 1)]
+    assert harness.live._uses == {}
+
+
+def test_the_self_check_sets_last_used_at(harness: Harness) -> None:
+    """The self-check authenticates the token as any call does."""
+    harness.clock.moment = LATER
+
+    harness.gateway.call(_bearer(harness.token), SELF_CHECK_TOOL, {})
+
+    assert _last_used(harness) == LATER
+
+
+@pytest.mark.parametrize("make_authorization", BAD_AUTHORIZATIONS)
+def test_the_self_check_refuses_a_token_that_does_not_authenticate(
+    harness: Harness, make_authorization: MakeAuthorization
+) -> None:
+    """The self-check gets the one token refusal, and runs no check."""
+    assert _self_check_refusal(harness, make_authorization(harness)) == TOKEN_REFUSAL
+    assert harness.self_check.runs == []
+
+
+def test_the_self_check_refuses_a_scope_the_config_does_not_define(
+    harness: Harness,
+) -> None:
+    """The refusal names the scope, runs no check, and is audited."""
+    token = harness.store.mint("ghost-bot", "ghost", None)
+
+    refusal = _self_check_refusal(harness, _bearer(token))
+
+    assert refusal == "scope 'ghost' is not defined in the config in force"
+    assert harness.self_check.runs == []
+    [line] = _audit_lines(harness)
+    assert line["action"] == SELF_CHECK_TOOL
+    assert line["token_name"] == "ghost-bot"
+    assert line["refusal"] == refusal
+
+
+def test_the_self_check_refuses_any_input(harness: Harness) -> None:
+    """The refusal names the arguments sorted, runs no check, and is audited."""
+    arguments: dict[str, object] = {"scope": "ops", "deep": True}
+
+    refusal = _self_check_refusal(harness, _bearer(harness.token), arguments)
+
+    assert refusal == (
+        "tool 'agent-proxy_self_check' takes no input, got ['deep', 'scope']"
+    )
+    assert harness.self_check.runs == []
+    [line] = _audit_lines(harness)
+    assert line["arguments"] == arguments
+    assert line["refusal"] == refusal
+
+
+def test_the_self_checks_audit_line(harness: Harness) -> None:
+    """One line holds the call's start, token, tool, and no cage's output."""
+    harness.clock.moment = LATER
+
+    harness.gateway.call(_bearer(harness.token), SELF_CHECK_TOOL, {})
+
+    [line] = _audit_lines(harness)
+    duration_ms = line.pop("duration_ms")
+    call_id = line.pop("call_id")
+    assert isinstance(duration_ms, int)
+    assert duration_ms >= 0
+    assert isinstance(call_id, str)
+    assert re.fullmatch(CALL_ID_PATTERN, call_id)
+    assert line == {
+        "timestamp": LATER.isoformat(),
+        "token_name": "ci-bot",
+        "scope": "dev",
+        "action": SELF_CHECK_TOOL,
+        "arguments": {},
+        "exit_code": None,
+        "stdout_bytes": None,
+        "stderr_bytes": None,
+        "truncated": False,
+        "refusal": None,
+    }
+
+
+def test_a_failed_audit_write_withholds_the_report(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A self-check whose line cannot be written is refused, its report withheld."""
+    fail_next_write_after_half(monkeypatch)
+
+    refusal = _self_check_refusal(harness, _bearer(harness.token))
+
+    assert AUDIT_REFUSAL.fullmatch(refusal)
+    assert len(harness.self_check.runs) == 1
+
+
+def test_a_latched_writer_refuses_the_self_check_before_authenticating(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A latched writer refuses at once: no use recorded, no check, no line."""
+    _latch(harness.audit, monkeypatch)
+
+    assert AUDIT_REFUSAL.fullmatch(_self_check_refusal(harness, _bearer(harness.token)))
+    assert _last_used(harness) is None
+    assert harness.self_check.runs == []
     assert _audit_lines(harness) == []

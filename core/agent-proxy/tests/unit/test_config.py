@@ -666,3 +666,27 @@ def test_load_config_refuses_https_proxy_as_a_credential_env_in_any_grant(
 
     assert len(error.errors) == 1
     assert "scopes.ops.grants.git.push.credentials.gh-token.env" in error.errors[0]
+
+
+def test_load_config_refuses_the_plugin_name_the_self_check_tool_takes(
+    tmp_path: Path,
+) -> None:
+    """A plugin named agent-proxy is refused, with the file's name, as one rule."""
+    document = _config(plugins={"git": IMAGE, "agent-proxy": IMAGE})
+
+    error = _refusal(tmp_path, document)
+
+    assert error.errors == (
+        f"config file {str(tmp_path / 'config.yaml')!r}: plugins.agent-proxy: "
+        "the plugin name 'agent-proxy' is reserved, "
+        "because the tool 'agent-proxy_self_check' takes it",
+    )
+
+
+def test_load_config_accepts_a_plugin_name_that_extends_the_reserved_one(
+    tmp_path: Path,
+) -> None:
+    """Only the exact name agent-proxy is reserved."""
+    document = _config(plugins={"git": IMAGE, "agent-proxy-x": IMAGE})
+
+    assert set(_load(tmp_path, document).plugins) == {"git", "agent-proxy-x"}
