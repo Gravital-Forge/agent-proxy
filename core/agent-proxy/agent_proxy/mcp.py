@@ -94,16 +94,17 @@ class _Call:
             refusal=None,
         )
 
-    def check_line(self, token: TokenRecord) -> AuditRecord:
-        """Return the audit record of a self-check that ran.
+    def check_line(self, token_name: str | None, scope: str) -> AuditRecord:
+        """Return the audit record of a self-check of scope that ran.
 
-        No single cage's output is the result, so the output fields are None.
+        token_name is None when the operator's command asked for the check. No
+        single cage's output is the result, so the output fields are None.
         """
         return AuditRecord(
             timestamp=self.started_at,
             call_id=self.call_id,
-            token_name=token.name,
-            scope=token.scope,
+            token_name=token_name,
+            scope=scope,
             action=self.tool,
             arguments=self.arguments,
             exit_code=None,
@@ -197,13 +198,7 @@ class CallGateway:
             CallRefusedError: the call is refused, or its audit line cannot be
                 written; its message is the refusal without REFUSAL_PREFIX.
         """
-        call = _Call(
-            call_id=new_call_id(),
-            tool=tool,
-            arguments=arguments,
-            started_at=self._now(),
-            started=time.monotonic(),
-        )
+        call = self._start(tool, arguments)
         if not self._audit.available:
             raise CallRefusedError(_audit_refusal(call.call_id))
         try:
@@ -213,6 +208,16 @@ class CallGateway:
         if tool == SELF_CHECK_TOOL:
             return self._self_check_call(call, token)
         return self._cage_call(call, token)
+
+    def _start(self, tool: str, arguments: Mapping[str, object]) -> _Call:
+        """Return a call of tool with arguments, with a fresh ID, starting now."""
+        return _Call(
+            call_id=new_call_id(),
+            tool=tool,
+            arguments=arguments,
+            started_at=self._now(),
+            started=time.monotonic(),
+        )
 
     def _cage_call(self, call: _Call, token: TokenRecord) -> Mapping[str, object]:
         """Run call in a cage, audit it, and return the outcome's content.
@@ -239,7 +244,44 @@ class CallGateway:
             report = self._check(call, token.scope)
         except ProxyError as error:
             self._refuse(call, token, error)
-        self._write(call.check_line(token))
+        self._write(call.check_line(token.name, token.scope))
+        return report.content()
+
+    def check_scopes(self, scope_name: str | None) -> list[dict[str, object]]:
+        """Check scope_name, or every scope by name when None, and audit each.
+
+        The snapshot in force is held in use for the whole request. Each
+        scope's check writes one line with no token name; a refused request
+        writes none.
+
+        Raises:
+            CallRefusedError: the audit log is unavailable, the scope is not
+                defined in the config in force, or a scope's line cannot be
+                written, which withholds every report.
+        """
+        if not self._audit.available:
+            raise CallRefusedError(
+                "the audit log is unavailable, so the check is refused"
+            )
+        with self._live.use() as snapshot:
+            defined = sorted(snapshot.config.scopes)
+            if scope_name is not None and scope_name not in defined:
+                raise CallRefusedError(
+                    f"{_undefined_scope_refusal(scope_name)};"
+                    f" defined scopes are {defined!r}"
+                )
+            names = defined if scope_name is None else [scope_name]
+            return [self._check_scope(snapshot, name) for name in names]
+
+    def _check_scope(self, snapshot: Snapshot, scope_name: str) -> dict[str, object]:
+        """Check scope_name on snapshot, audit it, and return the report's content.
+
+        Raises:
+            CallRefusedError: the audit line cannot be written.
+        """
+        call = self._start(SELF_CHECK_TOOL, {})
+        report = self._self_check.run(snapshot, scope_name)
+        self._write(call.check_line(None, scope_name))
         return report.content()
 
     def _check(self, call: _Call, scope_name: str) -> CheckReport:
@@ -465,9 +507,10 @@ class Instance:
         """Open the stores under state_dir, then start the config and its servers.
 
         The order is the stores, the live config, the control socket, and the
-        overflow sweeper. A step that fails closes what the steps before it
-        started, then its error propagates. The instance's warnings are those
-        of the first snapshot.
+        overflow sweeper. The control socket serves reloads of the live config
+        and the gateway's checks. A step that fails closes what the steps
+        before it started, then its error propagates. The instance's warnings
+        are those of the first snapshot.
 
         Raises:
             ProxyError: the audit log cannot be prepared, the config cannot be
@@ -481,14 +524,6 @@ class Instance:
         with contextlib.ExitStack() as started:
             started.callback(audit.close)
             live = LiveConfig.start(build, EgressProxies(client, state_dir / "egress"))
-            control = ControlServer(state_dir / CONTROL_SOCKET_NAME, live, build)
-            control.start()
-            started.callback(control.close)
-            sweeper = OverflowSweeper(
-                lambda: live.current.config.overflow_dir, _utc_now
-            )
-            sweeper.start()
-            started.callback(sweeper.stop)
             runner = CageRunner(client, credentials, CageLimiter())
             gateway = CallGateway(
                 tokens,
@@ -498,6 +533,16 @@ class Instance:
                 audit,
                 _utc_now,
             )
+            control = ControlServer(
+                state_dir / CONTROL_SOCKET_NAME, live, build, gateway.check_scopes
+            )
+            control.start()
+            started.callback(control.close)
+            sweeper = OverflowSweeper(
+                lambda: live.current.config.overflow_dir, _utc_now
+            )
+            sweeper.start()
+            started.callback(sweeper.stop)
             instance = cls(
                 build_app(gateway), control, sweeper, audit, live.current.warnings
             )

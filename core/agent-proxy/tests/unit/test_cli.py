@@ -172,9 +172,11 @@ def _snapshot(tmp_path: Path, warnings: tuple[str, ...] = ()) -> Snapshot:
 def _control_server(
     state_dir: Path, tmp_path: Path, build: Callable[[], Snapshot]
 ) -> Iterator[None]:
-    """Serve reloads on the state directory's control socket."""
+    """Serve reloads on the state directory's control socket; checks report none."""
     live = LiveConfig(_snapshot(tmp_path), RecordingEgress())
-    server = ControlServer(state_dir / CONTROL_SOCKET_NAME, live, build)
+    server = ControlServer(
+        state_dir / CONTROL_SOCKET_NAME, live, build, lambda scope_name: []
+    )
     server.start()
     try:
         yield

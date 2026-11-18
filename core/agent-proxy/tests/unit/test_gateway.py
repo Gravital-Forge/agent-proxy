@@ -804,3 +804,101 @@ def test_a_latched_writer_refuses_the_self_check_before_authenticating(
     assert _last_used(harness) is None
     assert harness.self_check.runs == []
     assert _audit_lines(harness) == []
+
+
+def _check_scopes_refusal(harness: Harness, scope_name: str | None) -> str:
+    with pytest.raises(CallRefusedError) as caught:
+        harness.gateway.check_scopes(scope_name)
+    return str(caught.value)
+
+
+def test_check_scopes_reports_the_one_scope_named(harness: Harness) -> None:
+    """A named scope gets one report, checked on the snapshot held in use."""
+    reports = harness.gateway.check_scopes("ops")
+
+    assert reports == [CheckReport(scope="ops", checks=CHECKS).content()]
+    assert harness.self_check.runs == [(SNAPSHOT, "ops", 1)]
+    assert harness.live._uses == {}
+
+
+def test_check_scopes_reports_every_scope_by_name_under_one_use(
+    harness: Harness,
+) -> None:
+    """With no scope named, every scope is checked in name order, in one use."""
+    reports = harness.gateway.check_scopes(None)
+
+    assert [report["scope"] for report in reports] == ["dev", "ops"]
+    assert harness.self_check.runs == [(SNAPSHOT, "dev", 1), (SNAPSHOT, "ops", 1)]
+    assert harness.live._uses == {}
+
+
+def test_check_scopes_refuses_an_undefined_scope_with_no_audit_line(
+    harness: Harness,
+) -> None:
+    """The refusal names the scope and the defined ones; nothing runs or is audited."""
+    refusal = _check_scopes_refusal(harness, "ghost")
+
+    assert refusal == (
+        "scope 'ghost' is not defined in the config in force;"
+        " defined scopes are ['dev', 'ops']"
+    )
+    assert harness.self_check.runs == []
+    assert _audit_lines(harness) == []
+
+
+def test_check_scopes_is_refused_while_the_audit_log_is_unavailable(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A latched writer refuses the check before it runs, with no line."""
+    _latch(harness.audit, monkeypatch)
+
+    refusal = _check_scopes_refusal(harness, None)
+
+    assert refusal == "the audit log is unavailable, so the check is refused"
+    assert harness.self_check.runs == []
+    assert _audit_lines(harness) == []
+
+
+def test_check_scopes_writes_one_audit_line_per_scope(harness: Harness) -> None:
+    """Each scope's line has no token, no arguments, and no cage's output."""
+    harness.clock.moment = LATER
+
+    harness.gateway.check_scopes(None)
+
+    lines = _audit_lines(harness)
+    call_ids = [line.pop("call_id") for line in lines]
+    durations = [line.pop("duration_ms") for line in lines]
+    assert len(set(call_ids)) == len(call_ids) == 2
+    assert all(
+        isinstance(call_id, str) and re.fullmatch(CALL_ID_PATTERN, call_id)
+        for call_id in call_ids
+    )
+    assert all(isinstance(ms, int) and ms >= 0 for ms in durations)
+    assert lines == [
+        {
+            "timestamp": LATER.isoformat(),
+            "token_name": None,
+            "scope": scope,
+            "action": SELF_CHECK_TOOL,
+            "arguments": {},
+            "exit_code": None,
+            "stdout_bytes": None,
+            "stderr_bytes": None,
+            "truncated": False,
+            "refusal": None,
+        }
+        for scope in ("dev", "ops")
+    ]
+
+
+def test_check_scopes_withholds_the_reports_when_a_line_cannot_be_written(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first scope's failed line refuses the request; no later scope runs."""
+    fail_next_write_after_half(monkeypatch)
+
+    refusal = _check_scopes_refusal(harness, None)
+
+    assert AUDIT_REFUSAL.fullmatch(refusal)
+    assert [scope for _, scope, _ in harness.self_check.runs] == ["dev"]
+    assert harness.live._uses == {}

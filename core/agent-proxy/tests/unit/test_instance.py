@@ -1,3 +1,4 @@
+import json
 import shutil
 import tempfile
 import threading
@@ -10,11 +11,18 @@ import pytest
 import yaml
 from egress_fakes import RecordingEgress
 
+from agent_proxy.audit import tail
 from agent_proxy.config import ConfigError
 from agent_proxy.credentials import unset_message
 from agent_proxy.mcp import Instance
 from agent_proxy.plugins import CommandAction, Manifest
-from agent_proxy.reload import CONTROL_SOCKET_NAME, ControlError, request_reload
+from agent_proxy.reload import (
+    CONTROL_SOCKET_NAME,
+    ControlError,
+    request_check,
+    request_reload,
+)
+from agent_proxy.selfcheck import SELF_CHECK_TOOL
 
 SWEEPER_THREAD = "overflow-sweeper"
 GITHUB_IMAGE = "ghcr.io/example/github@sha256:" + "c" * 64
@@ -70,6 +78,27 @@ def test_start_opens_the_stores_under_the_state_dir_and_serves_reloads(
     assert (state_dir / "credentials").is_dir()
     assert (state_dir / "audit").is_dir()
     assert [verb for verb, _ in egress.calls[:2]] == ["ensure", "prune"]
+
+
+def test_start_serves_checks_on_the_control_socket_and_audits_them(
+    state_dir: Path, tmp_path: Path, egress: RecordingEgress
+) -> None:
+    """A check request reaches the instance's self-check and writes one audit line."""
+    instance = Instance.start(state_dir, _config(tmp_path, CONFIG), mock.MagicMock())
+    try:
+        reply = request_check(state_dir / CONTROL_SOCKET_NAME, None)
+        lines = list(tail(state_dir / "audit", 10))
+    finally:
+        instance.close()
+
+    assert reply.ok is True
+    [report] = reply.reports
+    assert report["scope"] == "ci"
+    assert [entry["check"] for entry in report["checks"]] == ["overflow_dir"]
+    [line] = [json.loads(line) for line in lines]
+    assert line["action"] == SELF_CHECK_TOOL
+    assert line["scope"] == "ci"
+    assert line["token_name"] is None
 
 
 def test_start_from_a_config_naming_an_unstored_credential_warns_of_it(
