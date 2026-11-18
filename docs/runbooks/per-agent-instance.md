@@ -167,6 +167,13 @@ warnings. Then:
    `docker exec agent-proxy agent-proxy token mint --name <name> --scope <scope>`. The token prints
    once; give it to the agent's MCP client. The mint also prints a warning for each credential that
    is still not stored, and mints the token all the same.
+3. Run the self-check on every scope with `docker exec agent-proxy agent-proxy check`. Add
+   `--scope <scope>` to check one scope. It prints one row per check: the scope, the kind of check,
+   what it checked, `pass` or `fail`, and a detail. A `fail` row's detail says what is wrong, such
+   as a credential that is not stored, a root that the instance cannot open, or an egress proxy that
+   does not run. Fix each one, then run the check again. The command exits 1 until every row passes.
+   The agent can run the same check on its own scope through the tool `agent-proxy_self_check`.
+   `docs/design.md` gives what the self-check covers under "Surface".
 
 To put a changed config in force later, install it over the installed config:
 

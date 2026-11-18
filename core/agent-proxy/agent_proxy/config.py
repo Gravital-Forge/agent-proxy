@@ -47,6 +47,7 @@ _RESERVED_ENV_SETTERS = {
     PROXY_ENV_NAME: "the egress proxy",
     ROOTS_ENV_NAME: "the core",
 }
+_RESERVED_PLUGIN_NAME = "agent-proxy"
 
 
 class InvalidNameError(ProxyError):
@@ -380,6 +381,12 @@ class InstanceConfig(BaseModel):
     def _rule_failures(self) -> Iterator[str]:
         yield from _agent_tree_failures(self.agent_tree)
         yield from _overflow_dir_failures(self.overflow_dir, self.agent_tree)
+        if _RESERVED_PLUGIN_NAME in self.plugins:
+            yield (
+                f"plugins.{_RESERVED_PLUGIN_NAME}: the plugin name "
+                f"{_RESERVED_PLUGIN_NAME!r} is reserved, "
+                "because the tool 'agent-proxy_self_check' takes it"
+            )
         for scope_name, scope in self.scopes.items():
             for key, grant in scope.grants.items():
                 yield from self._grant_failures(

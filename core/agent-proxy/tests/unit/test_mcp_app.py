@@ -28,6 +28,7 @@ from agent_proxy.mcp import REFUSAL_PREFIX, CallGateway, build_app
 from agent_proxy.plugins import Manifest, parse_manifest
 from agent_proxy.reload import LiveConfig, Snapshot
 from agent_proxy.runner import CageCall, CageTimeoutError, InputError, Outcome
+from agent_proxy.selfcheck import SELF_CHECK_TOOL, CheckEntry, CheckReport
 
 WAIT_SECONDS = 10
 AGENT_TREE = "/srv/agents/alpha"
@@ -117,6 +118,23 @@ FAILED_SCRIPT = Outcome(
     stderr_bytes=5,
     truncated=False,
 )
+SELF_CHECK_SCHEMA = {"type": "object", "properties": {}, "additionalProperties": False}
+CHECKS = (
+    CheckEntry(
+        check="root",
+        subject=f"{AGENT_TREE}/absent",
+        ok=False,
+        detail=f"root '{AGENT_TREE}/absent' does not exist",
+    ),
+)
+
+
+class FakeSelfCheck:
+    """A self-check that reports CHECKS for every scope it runs."""
+
+    def run(self, snapshot: Snapshot, scope_name: str) -> CheckReport:
+        """Return the report of scope_name."""
+        return CheckReport(scope=scope_name, checks=CHECKS)
 
 
 class FakeRunner:
@@ -191,6 +209,7 @@ def served(tmp_path: Path) -> Iterator[Served]:
         store,
         LiveConfig(SNAPSHOT, RecordingEgress()),
         runner,
+        FakeSelfCheck(),
         audit,
         lambda: datetime.now(UTC),
     )
@@ -254,12 +273,42 @@ def _bearer(served: Served, who: str | None) -> str | None:
 def test_two_scopes_list_their_own_tools_with_verbatim_schemas(
     served: Served,
 ) -> None:
-    """Each token lists exactly its scope's tools, each with its manifest's schema."""
+    """Each token lists its scope's tools with their schemas, and the self-check."""
     assert _list(served.url, served.dev_token) == {
+        SELF_CHECK_TOOL: SELF_CHECK_SCHEMA,
         "tools_echo": ECHO_SCHEMA,
         "tools_inspect": INSPECT_SCHEMA,
     }
-    assert _list(served.url, served.ops_token) == {"other_status": ECHO_SCHEMA}
+    assert _list(served.url, served.ops_token) == {
+        SELF_CHECK_TOOL: SELF_CHECK_SCHEMA,
+        "other_status": ECHO_SCHEMA,
+    }
+
+
+def test_a_scope_the_config_does_not_define_lists_the_self_check_alone(
+    served: Served,
+) -> None:
+    """The self-check's schema reaches the client as the plain JSON schema."""
+    assert _list(served.url, served.retired_token) == {
+        SELF_CHECK_TOOL: SELF_CHECK_SCHEMA
+    }
+
+
+def test_the_self_checks_report_is_a_normal_result_with_structured_content(
+    served: Served,
+) -> None:
+    """A failing report is a normal result: its content and its compact JSON text."""
+    expected = CheckReport(scope="dev", checks=CHECKS).content()
+
+    result = _call(
+        served.url, served.dev_token, SELF_CHECK_TOOL, {}, raise_on_error=False
+    )
+
+    assert result.is_error is False
+    assert result.structured_content == expected
+    [text] = result.content
+    assert text.text == _compact(expected)
+    assert served.runner.calls == []
 
 
 @pytest.mark.parametrize("who", [None, "unknown"], ids=["missing", "unknown"])

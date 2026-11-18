@@ -38,6 +38,12 @@ from agent_proxy.reload import (
 )
 from agent_proxy.results import OverflowSweeper, new_call_id
 from agent_proxy.runner import CageCall, CageLimiter, CageRunner, Outcome
+from agent_proxy.selfcheck import (
+    SELF_CHECK_INPUT_SCHEMA,
+    SELF_CHECK_TOOL,
+    CheckReport,
+    SelfCheck,
+)
 
 REFUSAL_PREFIX = "agent-proxy refused: "
 _BEARER_SCHEME = "bearer"
@@ -88,6 +94,27 @@ class _Call:
             refusal=None,
         )
 
+    def check_line(self, token_name: str | None, scope: str) -> AuditRecord:
+        """Return the audit record of a self-check of scope that ran.
+
+        token_name is None when the operator's command asked for the check. No
+        single cage's output is the result, so the output fields are None.
+        """
+        return AuditRecord(
+            timestamp=self.started_at,
+            call_id=self.call_id,
+            token_name=token_name,
+            scope=scope,
+            action=self.tool,
+            arguments=self.arguments,
+            exit_code=None,
+            duration_ms=self._elapsed_ms(),
+            stdout_bytes=None,
+            stderr_bytes=None,
+            truncated=False,
+            refusal=None,
+        )
+
     def refusal_line(self, token: TokenRecord | None, refusal: str) -> AuditRecord:
         """Return the audit record of a call refused now with refusal."""
         return AuditRecord(
@@ -98,12 +125,15 @@ class _Call:
             action=self.tool,
             arguments=self.arguments,
             exit_code=None,
-            duration_ms=round((time.monotonic() - self.started) * 1000),
+            duration_ms=self._elapsed_ms(),
             stdout_bytes=None,
             stderr_bytes=None,
             truncated=False,
             refusal=refusal,
         )
+
+    def _elapsed_ms(self) -> int:
+        return round((time.monotonic() - self.started) * 1000)
 
 
 class CallGateway:
@@ -118,6 +148,7 @@ class CallGateway:
         tokens: TokenStore,
         live: LiveConfig,
         runner: CageRunner,
+        self_check: SelfCheck,
         audit: AuditWriter,
         now: Callable[[], datetime],
     ) -> None:
@@ -125,15 +156,17 @@ class CallGateway:
         self._tokens = tokens
         self._live = live
         self._runner = runner
+        self._self_check = self_check
         self._audit = audit
         self._now = now
 
     def list_tools(self, authorization: str | None) -> list[ToolSpec]:
-        """Return one spec per grant of the token's scope, sorted by name.
+        """Return the self-check and one spec per grant of the token's scope, by name.
 
         The token is verified and its use is not recorded. The list is empty
-        when the token does not verify, when its scope is not defined in the
-        config in force, or when the token store cannot be read.
+        when the token does not verify or when the token store cannot be read.
+        A token whose scope the config in force does not define lists the
+        self-check alone.
         """
         token = _bearer_token(authorization)
         if token is None:
@@ -145,14 +178,13 @@ class CallGateway:
         if record is None:
             return []
         snapshot = self._live.current
+        specs = [ToolSpec(SELF_CHECK_TOOL, SELF_CHECK_INPUT_SCHEMA)]
         scope = snapshot.config.scopes.get(record.scope)
-        if scope is None:
-            return []
-        specs = []
-        for key in scope.grants:
-            plugin, action = key.split(".", 1)
-            schema = snapshot.manifests[plugin].actions[action].input_schema
-            specs.append(ToolSpec(f"{plugin}_{action}", schema))
+        if scope is not None:
+            for key in scope.grants:
+                plugin, action = key.split(".", 1)
+                schema = snapshot.manifests[plugin].actions[action].input_schema
+                specs.append(ToolSpec(f"{plugin}_{action}", schema))
         return sorted(specs, key=lambda spec: spec.name)
 
     def call(
@@ -160,29 +192,114 @@ class CallGateway:
     ) -> Mapping[str, object]:
         """Run one call of tool with arguments, audit it, and return its content.
 
+        The self-check tool returns its report; every other tool runs a cage.
+
         Raises:
             CallRefusedError: the call is refused, or its audit line cannot be
                 written; its message is the refusal without REFUSAL_PREFIX.
         """
-        call = _Call(
-            call_id=new_call_id(),
-            tool=tool,
-            arguments=arguments,
-            started_at=self._now(),
-            started=time.monotonic(),
-        )
+        call = self._start(tool, arguments)
         if not self._audit.available:
             raise CallRefusedError(_audit_refusal(call.call_id))
         try:
             token = self._authenticate(authorization)
         except CallRefusedError as error:
             self._refuse(call, None, error)
+        if tool == SELF_CHECK_TOOL:
+            return self._self_check_call(call, token)
+        return self._cage_call(call, token)
+
+    def _start(self, tool: str, arguments: Mapping[str, object]) -> _Call:
+        """Return a call of tool with arguments, with a fresh ID, starting now."""
+        return _Call(
+            call_id=new_call_id(),
+            tool=tool,
+            arguments=arguments,
+            started_at=self._now(),
+            started=time.monotonic(),
+        )
+
+    def _cage_call(self, call: _Call, token: TokenRecord) -> Mapping[str, object]:
+        """Run call in a cage, audit it, and return the outcome's content.
+
+        Raises:
+            CallRefusedError: the call is refused, or its audit line cannot be
+                written.
+        """
         try:
             outcome = self._run(call, token.scope)
         except ProxyError as error:
             self._refuse(call, token, error)
         self._write(call.outcome_line(token, outcome))
         return outcome.content
+
+    def _self_check_call(self, call: _Call, token: TokenRecord) -> Mapping[str, object]:
+        """Check the token's scope, audit the call, and return the report's content.
+
+        Raises:
+            CallRefusedError: the call is refused, or its audit line cannot be
+                written.
+        """
+        try:
+            report = self._check(call, token.scope)
+        except ProxyError as error:
+            self._refuse(call, token, error)
+        self._write(call.check_line(token.name, token.scope))
+        return report.content()
+
+    def check_scopes(self, scope_name: str | None) -> list[dict[str, object]]:
+        """Check scope_name, or every scope by name when None, and audit each.
+
+        The snapshot in force is held in use for the whole request. Each
+        scope's check writes one line with no token name; a refused request
+        writes none.
+
+        Raises:
+            CallRefusedError: the audit log is unavailable, the scope is not
+                defined in the config in force, or a scope's line cannot be
+                written, which withholds every report.
+        """
+        if not self._audit.available:
+            raise CallRefusedError(
+                "the audit log is unavailable, so the check is refused"
+            )
+        with self._live.use() as snapshot:
+            defined = sorted(snapshot.config.scopes)
+            if scope_name is not None and scope_name not in defined:
+                raise CallRefusedError(
+                    f"{_undefined_scope_refusal(scope_name)};"
+                    f" defined scopes are {defined!r}"
+                )
+            names = defined if scope_name is None else [scope_name]
+            return [self._check_scope(snapshot, name) for name in names]
+
+    def _check_scope(self, snapshot: Snapshot, scope_name: str) -> dict[str, object]:
+        """Check scope_name on snapshot, audit it, and return the report's content.
+
+        Raises:
+            CallRefusedError: the audit line cannot be written.
+        """
+        call = self._start(SELF_CHECK_TOOL, {})
+        report = self._self_check.run(snapshot, scope_name)
+        self._write(call.check_line(None, scope_name))
+        return report.content()
+
+    def _check(self, call: _Call, scope_name: str) -> CheckReport:
+        """Check scope_name, holding the snapshot in force in use throughout.
+
+        Raises:
+            CallRefusedError: the scope is not defined in the config in force,
+                or the call carries arguments.
+        """
+        with self._live.use() as snapshot:
+            if scope_name not in snapshot.config.scopes:
+                raise CallRefusedError(_undefined_scope_refusal(scope_name))
+            if call.arguments:
+                raise CallRefusedError(
+                    f"tool {SELF_CHECK_TOOL!r} takes no input, "
+                    f"got {sorted(call.arguments)!r}"
+                )
+            return self._self_check.run(snapshot, scope_name)
 
     def _authenticate(self, authorization: str | None) -> TokenRecord:
         """Return the record of the call's token, recording its use.
@@ -211,9 +328,7 @@ class CallGateway:
         with self._live.use() as snapshot:
             scope = snapshot.config.scopes.get(scope_name)
             if scope is None:
-                raise CallRefusedError(
-                    f"scope {scope_name!r} is not defined in the config in force"
-                )
+                raise CallRefusedError(_undefined_scope_refusal(scope_name))
             plugin, _, action = call.tool.partition("_")
             grant = scope.grants.get(f"{plugin}.{action}")
             if grant is None:
@@ -270,6 +385,10 @@ def _bearer_token(authorization: str | None) -> str | None:
 
 def _audit_refusal(call_id: str) -> str:
     return f"the audit log could not record call {call_id}, so its result is withheld"
+
+
+def _undefined_scope_refusal(scope_name: str) -> str:
+    return f"scope {scope_name!r} is not defined in the config in force"
 
 
 class ProxyTool(Tool):
@@ -388,9 +507,10 @@ class Instance:
         """Open the stores under state_dir, then start the config and its servers.
 
         The order is the stores, the live config, the control socket, and the
-        overflow sweeper. A step that fails closes what the steps before it
-        started, then its error propagates. The instance's warnings are those
-        of the first snapshot.
+        overflow sweeper. The control socket serves reloads of the live config
+        and the gateway's checks. A step that fails closes what the steps
+        before it started, then its error propagates. The instance's warnings
+        are those of the first snapshot.
 
         Raises:
             ProxyError: the audit log cannot be prepared, the config cannot be
@@ -404,7 +524,18 @@ class Instance:
         with contextlib.ExitStack() as started:
             started.callback(audit.close)
             live = LiveConfig.start(build, EgressProxies(client, state_dir / "egress"))
-            control = ControlServer(state_dir / CONTROL_SOCKET_NAME, live, build)
+            runner = CageRunner(client, credentials, CageLimiter())
+            gateway = CallGateway(
+                tokens,
+                live,
+                runner,
+                SelfCheck(client, credentials, runner),
+                audit,
+                _utc_now,
+            )
+            control = ControlServer(
+                state_dir / CONTROL_SOCKET_NAME, live, build, gateway.check_scopes
+            )
             control.start()
             started.callback(control.close)
             sweeper = OverflowSweeper(
@@ -412,8 +543,6 @@ class Instance:
             )
             sweeper.start()
             started.callback(sweeper.stop)
-            runner = CageRunner(client, credentials, CageLimiter())
-            gateway = CallGateway(tokens, live, runner, audit, _utc_now)
             instance = cls(
                 build_app(gateway), control, sweeper, audit, live.current.warnings
             )

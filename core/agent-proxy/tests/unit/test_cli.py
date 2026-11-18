@@ -24,7 +24,7 @@ from agent_proxy.auth import TokenStore
 from agent_proxy.cli import main, run
 from agent_proxy.config import ConfigError, load_config
 from agent_proxy.credentials import unset_message
-from agent_proxy.mcp import Instance, _Server
+from agent_proxy.mcp import CallRefusedError, Instance, _Server
 from agent_proxy.reload import CONTROL_SOCKET_NAME, ControlServer, LiveConfig, Snapshot
 
 PREFIX = "agent-proxy: "
@@ -168,13 +168,24 @@ def _snapshot(tmp_path: Path, warnings: tuple[str, ...] = ()) -> Snapshot:
     )
 
 
+def _no_reports(scope_name: str | None) -> list[dict[str, object]]:
+    return []
+
+
+def _unused_build() -> Snapshot:
+    raise AssertionError("a check test sends no reload")
+
+
 @contextlib.contextmanager
 def _control_server(
-    state_dir: Path, tmp_path: Path, build: Callable[[], Snapshot]
+    state_dir: Path,
+    tmp_path: Path,
+    build: Callable[[], Snapshot],
+    check: Callable[[str | None], list[dict[str, object]]] = _no_reports,
 ) -> Iterator[None]:
-    """Serve reloads on the state directory's control socket."""
+    """Serve reloads with build and checks with check on the state dir's socket."""
     live = LiveConfig(_snapshot(tmp_path), RecordingEgress())
-    server = ControlServer(state_dir / CONTROL_SOCKET_NAME, live, build)
+    server = ControlServer(state_dir / CONTROL_SOCKET_NAME, live, build, check)
     server.start()
     try:
         yield
@@ -727,6 +738,152 @@ def test_reload_with_nothing_listening_exits_1_naming_the_socket(
     assert repr(str(socket_state / CONTROL_SOCKET_NAME)) in err
 
 
+def _entry(check: str, subject: str, ok: bool, detail: str) -> dict[str, object]:
+    return {"check": check, "subject": subject, "ok": ok, "detail": detail}
+
+
+def _report(scope: str, *entries: dict[str, object]) -> dict[str, object]:
+    return {
+        "ok": all(entry["ok"] for entry in entries),
+        "scope": scope,
+        "checks": list(entries),
+    }
+
+
+class RecordingCheck:
+    """Answers every check with fixed reports and records the scope it was asked."""
+
+    def __init__(self, reports: list[dict[str, object]]) -> None:
+        """Hold the reports to answer with; no request yet."""
+        self.reports = reports
+        self.asked: list[str | None] = []
+
+    def __call__(self, scope_name: str | None) -> list[dict[str, object]]:
+        """Record scope_name and return the reports."""
+        self.asked.append(scope_name)
+        return self.reports
+
+
+def test_check_prints_a_header_and_one_row_per_entry_and_exits_0_when_all_pass(
+    socket_state: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An all-pass reply is the header row, then each report's rows in reply order."""
+    check = RecordingCheck(
+        [
+            _report(
+                "alpha",
+                _entry("credential", "github-token", True, "stored"),
+                _entry("overflow_dir", "/srv/overflow", True, "writable"),
+            ),
+            _report("beta", _entry("overflow_dir", "/srv/overflow", True, "writable")),
+        ]
+    )
+
+    with _control_server(socket_state, tmp_path, _unused_build, check):
+        status = main(["check"])
+
+    captured = capsys.readouterr()
+    assert status == 0
+    assert captured.out == (
+        "SCOPE\tCHECK\tSUBJECT\tRESULT\tDETAIL\n"
+        "alpha\tcredential\tgithub-token\tpass\tstored\n"
+        "alpha\toverflow_dir\t/srv/overflow\tpass\twritable\n"
+        "beta\toverflow_dir\t/srv/overflow\tpass\twritable\n"
+    )
+    assert captured.err == ""
+    assert check.asked == [None]
+
+
+def test_check_with_a_failed_entry_prints_its_row_and_the_count_and_exits_1(
+    socket_state: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A failed entry prints fail in its row, then one failure line naming the count."""
+    detail = unset_message("github-token")
+    check = RecordingCheck(
+        [
+            _report(
+                "alpha",
+                _entry("credential", "github-token", False, detail),
+                _entry("overflow_dir", "/srv/overflow", True, "writable"),
+            ),
+            _report("beta", _entry("root", "/srv/absent", False, "no such root")),
+        ]
+    )
+
+    with _control_server(socket_state, tmp_path, _unused_build, check):
+        status = main(["check"])
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert captured.out == (
+        "SCOPE\tCHECK\tSUBJECT\tRESULT\tDETAIL\n"
+        f"alpha\tcredential\tgithub-token\tfail\t{detail}\n"
+        "alpha\toverflow_dir\t/srv/overflow\tpass\twritable\n"
+        "beta\troot\t/srv/absent\tfail\tno such root\n"
+    )
+    assert captured.err == f"{PREFIX}2 of 3 checks failed\n"
+
+
+def test_check_with_scope_asks_for_that_scope_alone(
+    socket_state: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--scope NAME sends the scope's name to the serving process."""
+    check = RecordingCheck(
+        [_report("ci", _entry("overflow_dir", "/srv/overflow", True, "writable"))]
+    )
+
+    with _control_server(socket_state, tmp_path, _unused_build, check):
+        status = main(["check", "--scope", "ci"])
+
+    assert status == 0
+    assert check.asked == ["ci"]
+    assert capsys.readouterr().out.splitlines()[1].startswith("ci\t")
+
+
+def test_check_refused_prints_the_refusal_line_and_no_rows(
+    socket_state: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A check the proxy refuses exits 1 with its error as a refusal line."""
+    message = (
+        "scope 'nope' is not defined in the config in force; defined scopes are ['ci']"
+    )
+
+    def refuse(scope_name: str | None) -> list[dict[str, object]]:
+        raise CallRefusedError(message)
+
+    with _control_server(socket_state, tmp_path, _unused_build, refuse):
+        status = main(["check", "--scope", "nope"])
+
+    captured = capsys.readouterr()
+    assert status == 1
+    assert captured.out == ""
+    assert captured.err == f"{PREFIX}{message}\n"
+
+
+def test_check_with_nothing_listening_exits_1_naming_the_socket(
+    socket_state: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """No control socket is one refusal line naming its path, with no traceback."""
+    status = main(["check"])
+
+    err = capsys.readouterr().err
+    assert status == 1
+    _assert_refusal(err)
+    assert len(err.splitlines()) == 1
+    assert repr(str(socket_state / CONTROL_SOCKET_NAME)) in err
+
+
+def test_check_help_names_what_it_checks(capsys: pytest.CaptureFixture[str]) -> None:
+    """The top-level help describes the check command."""
+    with pytest.raises(SystemExit):
+        main(["--help"])
+
+    assert (
+        "check the running proxy's credentials, roots, overflow directory,"
+        " egress, and plugins" in " ".join(capsys.readouterr().out.split())
+    )
+
+
 @pytest.mark.parametrize("variable", ["AGENT_PROXY_STATE_DIR", "AGENT_PROXY_CONFIG"])
 def test_serve_with_a_missing_setting_exits_1_naming_it(
     state: Path,
@@ -959,7 +1116,8 @@ def test_help_lists_the_command_groups(capsys: pytest.CaptureFixture[str]) -> No
 
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    for noun in ("token", "credential", "audit", "manifest", "reload", "serve"):
+    nouns = ("token", "credential", "audit", "manifest", "reload", "check", "serve")
+    for noun in nouns:
         assert noun in out
 
 

@@ -77,7 +77,28 @@ These terms carry one meaning each through the plan, the code, and the docs.
 
 The instance is an MCP server over Streamable HTTP, published on a loopback port unique to the
 instance. The agent's MCP client sends the token as `Authorization: Bearer <token>`. `tools/list`
-returns only the actions the token's scope grants. MCP tool names are `<plugin>_<action>`.
+returns the actions the token's scope grants, and the self-check tool. MCP tool names are
+`<plugin>_<action>`.
+
+The self-check is one check with two entrances: the MCP tool `agent-proxy_self_check`, and the
+operator command `agent-proxy check [--scope NAME]` through `docker exec`, which runs it for every
+scope or for one.
+
+- The tool takes no input. Every token that verifies lists it, with no grant, and it reports on that
+  token's scope alone.
+- It checks the local wiring, the things that can be wrong while the instance looks healthy:
+  - each credential a grant names is stored, reported by name, never by value;
+  - each root a grant names exists, and the instance opens it;
+  - the overflow directory exists and is writable;
+  - each egress proxy that the scope's domain lists need is running;
+  - one cage per plugin the scope uses starts through the normal runner path, verifier included,
+    with no roots and no network.
+- It leaves out what the config load already refuses, such as an image that does not load, a grant
+  that names an undeclared action, or a root outside the agent tree. It never tests a credential
+  against its service.
+- The result is one object: an overall `ok`, and one entry per check that names what it checked,
+  whether it passed, and a detail. A failed check is a normal result, not a refusal. The command
+  prints one row per entry, and exits 1 when any check fails.
 
 ## Tokens
 
@@ -115,6 +136,8 @@ returns only the actions the token's scope grants. MCP tool names are `<plugin>_
   pass-through `args` is reported as a warning; every credential a grant names that the credential
   store lacks is reported as a warning at start, at `reload`, and at `token mint`, so the instance
   starts and tokens mint before the operator stores it.
+- The config refuses a plugin named `agent-proxy`, so no `<plugin>_<action>` tool name can take the
+  self-check tool's name.
 - There are no scope-level defaults and no layering between files. Repetition across grants and
   across agents is accepted.
 
@@ -249,6 +272,10 @@ input arguments, exit code, duration, output sizes, truncation, and the refusal 
 calls. Credential values and output contents are never recorded. The log rotates by size. Only the
 admin reads it, with `agent-proxy audit tail` through `docker exec`.
 
+Each self-check writes one line, with `agent-proxy_self_check` as its action, and with no exit code
+and no output sizes. The line of a tool call names the call's token. The command writes one line for
+each scope it checks, with no token name. The cages that a check runs write no line of their own.
+
 ## Deployment and isolation
 
 One instance per agent user:
@@ -334,7 +361,7 @@ agent-proxy/
 ├── examples/             # a sample instance config
 ├── core/
 │   ├── agent-proxy/      # the core uv package (Python, FastMCP, Docker SDK)
-│   │   ├── agent_proxy/  # cli, config, auth, credentials, plugins, reload, mcp, runner, egress, results, audit, errors, schemas
+│   │   ├── agent_proxy/  # cli, config, auth, credentials, plugins, reload, mcp, selfcheck, runner, egress, results, audit, errors, schemas
 │   │   └── tests/        # unit/, integration/
 │   ├── docker/           # the proxy's Dockerfile and provisioning; the iron-proxy pin is in egress
 │   └── verifier/         # the in-cage root verifier: Go source, its tests, and the Dockerfile that builds it

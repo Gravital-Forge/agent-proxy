@@ -1,4 +1,4 @@
-"""The agent-proxy command: token, credential, audit, manifest check, reload, serve."""
+"""The agent-proxy command: token, credential, audit, manifest, reload, check, serve."""
 
 import argparse
 import os
@@ -19,7 +19,7 @@ from agent_proxy.credentials import CredentialStore, unset_warnings
 from agent_proxy.errors import ProxyError
 from agent_proxy.mcp import Instance, _Server
 from agent_proxy.plugins import ManifestError, check_image
-from agent_proxy.reload import CONTROL_SOCKET_NAME, request_reload
+from agent_proxy.reload import CONTROL_SOCKET_NAME, request_check, request_reload
 
 STATE_DIR_VARIABLE = "AGENT_PROXY_STATE_DIR"
 CONFIG_VARIABLE = "AGENT_PROXY_CONFIG"
@@ -49,6 +49,19 @@ class ReloadRefusedError(ProxyError):
         super().__init__("\n".join(errors))
 
 
+class CheckRefusedError(ProxyError):
+    """The serving process refused a check."""
+
+    def __init__(self, *errors: str) -> None:
+        """Hold one message per failure; str() prints them one per line."""
+        self.errors = errors
+        super().__init__("\n".join(errors))
+
+
+class ChecksFailedError(ProxyError):
+    """A check the serving process ran reported at least one failed entry."""
+
+
 def run() -> None:
     """Run the operator command on the process arguments and exit with its status."""
     sys.exit(main())
@@ -63,7 +76,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         args.handler(args)
-    except (ConfigError, ManifestError, ReloadRefusedError) as error:
+    except (
+        ConfigError,
+        ManifestError,
+        ReloadRefusedError,
+        CheckRefusedError,
+    ) as error:
         _report_refusal(error.errors)
         return 1
     except ProxyError as error:
@@ -86,8 +104,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-proxy",
         description="Administer the tokens, credentials, and audit log of one"
-        " proxy instance, check plugin manifests, reload its config, and serve"
-        " its MCP surface.",
+        " proxy instance, check plugin manifests, reload its config, check its"
+        " wiring, and serve its MCP surface.",
     )
     nouns = parser.add_subparsers(dest="noun", required=True)
     _add_token_commands(
@@ -104,6 +122,13 @@ def _parser() -> argparse.ArgumentParser:
         "reload", help="ask the running proxy to reload its config"
     )
     reload_parser.set_defaults(handler=_reload)
+    _add_check_command(
+        nouns.add_parser(
+            "check",
+            help="check the running proxy's credentials, roots, overflow"
+            " directory, egress, and plugins",
+        )
+    )
     _add_serve_command(
         nouns.add_parser("serve", help="serve the MCP surface until SIGINT or SIGTERM")
     )
@@ -161,6 +186,15 @@ def _add_manifest_commands(parser: argparse.ArgumentParser) -> None:
     )
     check.add_argument("image", metavar="IMAGE")
     check.set_defaults(handler=_check_manifest)
+
+
+def _add_check_command(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--scope",
+        metavar="NAME",
+        help="check this scope alone; without it every scope is checked",
+    )
+    parser.set_defaults(handler=_check)
 
 
 def _add_serve_command(parser: argparse.ArgumentParser) -> None:
@@ -260,6 +294,24 @@ def _reload(args: argparse.Namespace) -> None:
         raise ReloadRefusedError(*reply.errors)
     _report_warnings(reply.warnings)
     print("reloaded")
+
+
+def _check(args: argparse.Namespace) -> None:
+    reply = request_check(_state_dir() / CONTROL_SOCKET_NAME, args.scope)
+    if not reply.ok:
+        raise CheckRefusedError(*reply.errors)
+    entries = [
+        (report["scope"], entry)
+        for report in reply.reports
+        for entry in report["checks"]
+    ]
+    print(_row("SCOPE", "CHECK", "SUBJECT", "RESULT", "DETAIL"))
+    for scope, entry in entries:
+        result = "pass" if entry["ok"] else "fail"
+        print(_row(scope, entry["check"], entry["subject"], result, entry["detail"]))
+    failed = sum(1 for _, entry in entries if not entry["ok"])
+    if failed:
+        raise ChecksFailedError(f"{failed} of {len(entries)} checks failed")
 
 
 def _serve(args: argparse.Namespace) -> None:

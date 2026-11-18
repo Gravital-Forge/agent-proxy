@@ -10,6 +10,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+import docker.errors
+import pytest
 import yaml
 from docker import DockerClient
 from fastmcp import Client
@@ -27,6 +29,7 @@ from instance_harness import (
 from agent_proxy import egress
 from agent_proxy.credentials import unset_message
 from agent_proxy.mcp import REFUSAL_PREFIX
+from agent_proxy.selfcheck import SELF_CHECK_TOOL
 
 EXAMPLE_CONFIG = Path(__file__).parents[4] / "examples" / "instance.yaml"
 EXAMPLE_TREE = "/home/agent-01/Projects"
@@ -57,6 +60,9 @@ WARNING_LINES = tuple(
     for credential in CREDENTIAL_TOOLS.values()
 )
 PR_VIEW_ARGUMENTS = {"repo": "example-org/n", "pr": "77"}
+CHECK_DOMAIN = "api.github.com"
+ABSENT_ROOT = "absent"
+CHECK_HEADER = "SCOPE\tCHECK\tSUBJECT\tRESULT\tDETAIL"
 
 
 @dataclass(frozen=True)
@@ -289,3 +295,142 @@ def test_the_instance_serves_both_plugins_on_the_agents_daemon(
         for path in (proxy_config, credential_file):
             _assert_owned_with_mode(path, 0o600)
             _assert_owned_with_mode(path.parent, 0o700)
+
+
+def _check_config(tree: _Tree, probe_plugin: str) -> dict[str, object]:
+    """Return a config whose one scope, check, fails its credential and one root."""
+    grant = {
+        "roots": [
+            {"path": str(tree.repo), "mode": "rw"},
+            {"path": str(tree.agent_tree / ABSENT_ROOT), "mode": "ro"},
+        ],
+        "domains": [CHECK_DOMAIN],
+        "credentials": {"probe-secret": {"file": "/run/credentials/probe"}},
+    }
+    return {
+        "agent_tree": str(tree.agent_tree),
+        "overflow_dir": str(tree.agent_tree / ".agent-proxy-overflow"),
+        "max_cages": 4,
+        "plugins": {"probe": probe_plugin},
+        "scopes": {"check": {"grants": {"probe.read_credential": grant}}},
+    }
+
+
+def _triples(report: dict[str, object]) -> list[tuple[object, object, object]]:
+    return [
+        (entry["check"], entry["subject"], entry["ok"]) for entry in report["checks"]
+    ]
+
+
+def _rows(report: dict[str, object]) -> str:
+    """Return the command's stdout for report: the header, then one row per entry."""
+    rows = [CHECK_HEADER]
+    for entry in report["checks"]:
+        result = "pass" if entry["ok"] else "fail"
+        fields = (report["scope"], entry["check"], entry["subject"], result)
+        rows.append("\t".join((*fields, entry["detail"])))
+    return "".join(f"{row}\n" for row in rows)
+
+
+def test_the_self_check_reports_each_kind_through_both_entrances(
+    docker_client: DockerClient,
+    labelled_instance_image: str,
+    pinned_plugin: str,
+    tmp_path: Path,
+) -> None:
+    """Fail each kind of check once on purpose, through the tool and the command.
+
+    The first round fails the unstored credential and the absent root. The
+    second stores the credential, stops the egress proxy, and removes the
+    plugin image the instance pulled at start.
+    """
+    tree = _make_tree(tmp_path)
+    _write_yaml(tree.config_dir / "config.yaml", _check_config(tree, pinned_plugin))
+    name = f"apx-it-check-{secrets.token_hex(4)}"
+    port = free_port()
+    probe_secret = f"probe-{secrets.token_hex(8)}"
+    proxy_name = egress.network_name(egress.list_key([CHECK_DOMAIN]))
+    repo, absent = str(tree.repo), str(tree.agent_tree / ABSENT_ROOT)
+    overflow_dir = str(tree.agent_tree / ".agent-proxy-overflow")
+
+    with removed_on_exit(docker_client, name):
+        started = run_start_script(
+            (
+                labelled_instance_image,
+                name,
+                str(port),
+                str(tree.config_dir),
+                str(tree.state_dir),
+                str(tree.agent_tree),
+            )
+        )
+        assert started.returncode == 0, started.stderr
+        url = wait_for_mcp(docker_client, name, port)
+
+        mint = ["agent-proxy", "token", "mint", "--name", "check", "--scope", "check"]
+        token = _exec_ok(name, mint).strip()
+        assert list_tools(url, token) == [SELF_CHECK_TOOL, "probe_read_credential"]
+
+        first = _content(_call(url, token, SELF_CHECK_TOOL, {}))
+        assert first["ok"] is False
+        assert first["scope"] == "check"
+        assert _triples(first) == [
+            ("credential", "probe-secret", False),
+            ("root", repo, True),
+            ("root", absent, False),
+            ("overflow_dir", overflow_dir, True),
+            ("egress", proxy_name, True),
+            ("plugin", "probe", True),
+        ]
+        assert first["checks"][0]["detail"] == unset_message("probe-secret")
+
+        checked = docker_exec(name, ["agent-proxy", "check"])
+        assert checked.returncode == 1, checked.stderr
+        assert checked.stdout == _rows(first)
+        assert "agent-proxy: 2 of 6 checks failed" in checked.stderr.splitlines()
+
+        _exec_ok(
+            name, ["agent-proxy", "credential", "set", "probe-secret"], probe_secret
+        )
+        docker_client.containers.get(proxy_name).stop()
+        docker_client.images.remove(
+            docker_client.images.get(pinned_plugin).id, force=True
+        )
+        with pytest.raises(docker.errors.ImageNotFound):
+            docker_client.images.get(pinned_plugin)
+
+        second = _content(_call(url, token, SELF_CHECK_TOOL, {}))
+        assert second["ok"] is False
+        assert _triples(second) == [
+            ("credential", "probe-secret", True),
+            ("root", repo, True),
+            ("root", absent, False),
+            ("overflow_dir", overflow_dir, True),
+            ("egress", proxy_name, False),
+            ("plugin", "probe", False),
+        ]
+
+        scoped = docker_exec(name, ["agent-proxy", "check", "--scope", "check"])
+        assert scoped.returncode == 1, scoped.stderr
+        assert scoped.stdout == _rows(second)
+        assert "agent-proxy: 3 of 6 checks failed" in scoped.stderr.splitlines()
+
+        refused = docker_exec(name, ["agent-proxy", "check", "--scope", "nope"])
+        assert refused.returncode == 1
+        assert refused.stdout == ""
+        assert "'nope'" in refused.stderr
+
+        audit_lines = _audit_lines(name)
+        assert len(audit_lines) == 4, audit_lines
+        assert all(line["action"] == SELF_CHECK_TOOL for line in audit_lines)
+        assert all(line["refusal"] is None for line in audit_lines)
+        token_names = [line["token_name"] for line in audit_lines]
+        assert token_names == ["check", None, "check", None]
+        seen = (
+            json.dumps(audit_lines),
+            json.dumps([first, second]),
+            checked.stdout + checked.stderr,
+            scoped.stdout + scoped.stderr,
+            refused.stdout + refused.stderr,
+        )
+        assert all(probe_secret not in text for text in seen)
