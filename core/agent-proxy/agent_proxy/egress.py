@@ -250,6 +250,25 @@ def _log_tail(log: bytes) -> str:
     return log[-PROXY_LOG_EXCERPT_BYTES:].decode("utf-8", errors="replace")
 
 
+def proxy_status(client: DockerClient, domains: Collection[str]) -> str | None:
+    """Return the status of the proxy for domains, or None when it is absent.
+
+    Raises:
+        EgressError: Docker fails the lookup other than by NotFound.
+    """
+    proxy = _find_proxy(client, network_name(list_key(domains)))
+    return None if proxy is None else proxy.status
+
+
+def _find_proxy(client: DockerClient, name: str) -> Container | None:
+    try:
+        return client.containers.get(name)
+    except docker.errors.NotFound:
+        return None
+    except DOCKER_FAILURES as exc:
+        raise EgressError(f"proxy {name!r} could not be looked up: {exc}") from exc
+
+
 def _remove_proxy(container: Container, name: str) -> None:
     try:
         container.remove(force=True)
@@ -339,7 +358,7 @@ class EgressProxies:
 
     def _ensure_proxy(self, key: str, config: bytes) -> None:
         name = network_name(key)
-        proxy = self._find_proxy(name)
+        proxy = _find_proxy(self._client, name)
         if proxy is not None:
             if self._is_current(proxy, key, config):
                 return
@@ -350,14 +369,6 @@ class EgressProxies:
         except EgressError:
             self._remove_config_dir(key)
             raise
-
-    def _find_proxy(self, name: str) -> Container | None:
-        try:
-            return self._client.containers.get(name)
-        except docker.errors.NotFound:
-            return None
-        except DOCKER_FAILURES as exc:
-            raise EgressError(f"proxy {name!r} could not be looked up: {exc}") from exc
 
     def _is_current(self, proxy: Container, key: str, config: bytes) -> bool:
         return (

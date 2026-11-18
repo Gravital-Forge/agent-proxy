@@ -24,6 +24,7 @@ from agent_proxy.results import (
     OverflowSweeper,
     OverflowWriteError,
     capture_stream,
+    check_overflow_dir,
     command_content,
     new_call_id,
     script_content,
@@ -236,6 +237,70 @@ def test_a_traverse_only_ancestor_allows_a_write_and_a_sweep(tmp_path: Path) -> 
     assert captured.size == OUTPUT_CAP_BYTES + 1
     assert (overflow / f"{CALL_ID}.stdout").read_bytes() == OVER_CAP
     assert not old.exists()
+
+
+def test_check_overflow_dir_creates_a_file_and_leaves_the_directory_empty(
+    tmp_path: Path,
+) -> None:
+    """The file it opens has no name, so the directory holds nothing after."""
+    with mock.patch("agent_proxy.results.os.open", wraps=os.open) as opened:
+        check_overflow_dir(str(tmp_path))
+
+    tmpfile_opens = [
+        call
+        for call in opened.call_args_list
+        if call.args[1] & os.O_TMPFILE == os.O_TMPFILE
+    ]
+    assert len(tmpfile_opens) == 1
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_check_overflow_dir_refuses_a_missing_directory(tmp_path: Path) -> None:
+    """The message names the directory and the OS error."""
+    missing = tmp_path / "missing"
+
+    with pytest.raises(OverflowWriteError) as excinfo:
+        check_overflow_dir(str(missing))
+
+    assert str(excinfo.value) == (
+        f"overflow directory {str(missing)!r} cannot take a file: "
+        f"{os.strerror(errno.ENOENT)}"
+    )
+    assert isinstance(excinfo.value, ProxyError)
+
+
+def test_check_overflow_dir_refuses_a_symlinked_component(tmp_path: Path) -> None:
+    """A link among the directory's ancestors is refused, as a call's write is."""
+    real = tmp_path / "real"
+    (real / "overflow").mkdir(parents=True)
+    link = tmp_path / "home"
+    link.symlink_to(real)
+
+    with pytest.raises(OverflowWriteError):
+        check_overflow_dir(str(link / "overflow"))
+
+    assert list((real / "overflow").iterdir()) == []
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root writes through any mode")
+def test_check_overflow_dir_refuses_a_directory_it_cannot_write(
+    tmp_path: Path,
+) -> None:
+    """A directory at mode 0o500 opens for reading but takes no file."""
+    overflow = tmp_path / "overflow"
+    overflow.mkdir()
+    overflow.chmod(0o500)
+    try:
+        with pytest.raises(OverflowWriteError) as excinfo:
+            check_overflow_dir(str(overflow))
+    finally:
+        overflow.chmod(0o755)
+
+    assert str(excinfo.value) == (
+        f"overflow directory {str(overflow)!r} cannot take a file: "
+        f"{os.strerror(errno.EACCES)}"
+    )
+    assert list(overflow.iterdir()) == []
 
 
 def test_sweep_overflow_removes_only_old_non_directories(tmp_path: Path) -> None:
