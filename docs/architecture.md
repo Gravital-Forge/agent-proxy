@@ -32,7 +32,7 @@ The core is the uv package in `core/agent-proxy/`, placed as `docs/design.md` se
   and cleanup. `test_instance_image.py` checks the image and the run line that the start script
   gives it. `test_instance_serves.py` starts an instance on the agent's own daemon and drives it
   through MCP and `docker exec`. It also drives the self-check through both entrances, the tool and
-  the command, and makes each kind of check fail once.
+  the command, and makes the credential, root, egress, and plugin checks fail on purpose.
 - `core/agent-proxy/tests/test-plugin/` holds the source of the test plugin image. The test plugin
   holds an action for each thing the tests reach, and its `manifest.json` declares them.
 
@@ -401,7 +401,8 @@ the scope's grants first name it.
 - `overflow_dir` — the config's overflow directory passes `check_overflow_dir` from `results.py`.
 - `egress` — the proxy of each distinct non-empty domain list has the status `running`, which
   `proxy_status` from `egress.py` reads. The subject is the proxy container's name, from
-  `network_name`, and the detail names the domains. The empty list has no proxy, so it has no entry.
+  `network_name`. The detail names the domains, except when the lookup fails, where it is the
+  `EgressError` text. The empty list has no proxy, so it has no entry.
 - `plugin` — for each plugin that the scope's grants use, the instance's `CageRunner` runs the
   image's `describe` in a cage. The cage gets an empty grant, so it has no roots, no credentials,
   and no `env`. It joins the Docker network `none`, so it has no network, and
@@ -470,8 +471,8 @@ It turns a `CallRefusedError` into a FastMCP `ToolError` whose text is `REFUSAL_
 The audit line's `refusal` field holds the refusal without the prefix.
 
 `build_app` returns the ASGI app that serves the gateway's tools over MCP's Streamable HTTP
-transport at `/mcp`. The app gives each input schema as the manifest gives it, and masks the detail
-of each error that is not a refusal.
+transport at `/mcp`. The app gives each input schema as the listing gives it, unchanged, and masks
+the detail of each error that is not a refusal.
 
 `snapshot_builder` returns the build that `LiveConfig.start` and each reload call. Each build reads
 the config file, reads the credential names afresh, and loads each plugin's manifest through the
