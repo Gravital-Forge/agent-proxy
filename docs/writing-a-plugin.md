@@ -15,6 +15,11 @@ container that `docs/architecture.md` gives under `plugins.py`. So `describe` re
 image holds, writes nothing but its output, and keeps within that section's time and output limits.
 A non-zero exit shows the start of stderr, so write a diagnostic there.
 
+The self-check also runs `describe`, in a cage that the runner builds as "How an action runs" below
+gives for an action. The cage starts behind the root verifier, as user `0:0`, on the Docker network
+`none`, with no roots, no credentials, and no grant `env`. So `describe` must also exit 0 there.
+`docs/architecture.md` gives the check under `selfcheck.py`.
+
 The simplest `describe` prints a manifest file that the image holds. `docs/design.md` gives where a
 plugin's source lives under "Plugins and actions" and "Repository layout".
 
