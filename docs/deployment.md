@@ -87,7 +87,7 @@ sudo core/docker/provision-instance.sh [--release <version>] [--tree <path>] age
 The config may name credentials that the operator has not stored yet;
 [The first start](#the-first-start) stores them.
 
-Each option is optional. The options come before the positional arguments, in any order:
+The options come before the positional arguments, in any order:
 
 - `--release <version>` selects release mode. The script pulls the instance image of the release
   `v<version>` and builds no image. `<version>` is `<major>.<minor>.<patch>`, with no `v`. The
@@ -191,7 +191,8 @@ These phrases stand for the way the script reaches the service user and the agen
     ```
 
     To put a changed port or a new image in force, remove the container first with
-    `docker rm --force agent-proxy`; [The instance](architecture.md#the-instance) gives why. The
+    `docker rm --force agent-proxy`; [The instance](architecture.md#the-instance) gives why.
+    Removing the container ends any call that runs at that moment, so do it when no call runs. The
     port this step prints is the port that the operator gave, not always the one bound;
     `docker port agent-proxy` shows the bound one.
 15. `print_next_steps` prints the commands that mint a token and store a credential, and the path of
