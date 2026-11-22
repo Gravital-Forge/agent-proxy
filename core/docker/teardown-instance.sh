@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage="usage: teardown-instance.sh <agent>"
+usage="usage: teardown-instance.sh [--tree PATH] <agent>"
 
 read_overflow_program='import yaml
 with open("/etc/agent-proxy/config.yaml") as handle:
@@ -11,6 +11,40 @@ print(config["overflow_dir"])'
 fail() {
     echo "teardown-instance.sh: $1" >&2
     exit 1
+}
+
+refuse_usage() {
+    echo "$usage" >&2
+    exit 2
+}
+
+require_option_value() {
+    if (( $# < 2 )) || [[ -z "$2" ]]; then
+        refuse_usage
+    fi
+}
+
+parse_arguments() {
+    tree_option=""
+    while (( $# > 0 )); do
+        case "$1" in
+            --tree)
+                require_option_value "$@"
+                tree_option="$2"
+                shift 2
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*) refuse_usage ;;
+            *) break ;;
+        esac
+    done
+    if (( $# < 1 )); then
+        refuse_usage
+    fi
+    agent="$1"
 }
 
 as_service_user() {
@@ -25,14 +59,30 @@ service_docker() {
     DOCKER_HOST="$docker_host" docker "$@"
 }
 
+find_tree_parents_in_home() {
+    local home_realpath directory
+    home_realpath="$(realpath -m -- "$agent_home")"
+    if [[ "$agent_tree" != "$home_realpath"/?* ]]; then
+        fail "the agent's tree '$agent_tree' must lie inside the agent's home '$home_realpath'"
+    fi
+    tree_parents_in_home=()
+    directory="$(dirname -- "$agent_tree")"
+    while [[ "$directory" != "$home_realpath" ]]; do
+        tree_parents_in_home+=("$directory")
+        directory="$(dirname -- "$directory")"
+    done
+}
+
 check_agent() {
-    local agent_entry service_entry
+    local agent_entry service_entry tree_path
     if ! agent_entry="$(getent passwd "$agent")"; then
         fail "no user named '$agent'"
     fi
     agent_home="$(cut -d: -f6 <<<"$agent_entry")"
-    if [[ -d "$agent_home/Projects" ]]; then
-        agent_tree="$(realpath -- "$agent_home/Projects")"
+    tree_path="${tree_option:-$agent_home/Projects}"
+    if [[ -d "$tree_path" ]]; then
+        agent_tree="$(realpath -- "$tree_path")"
+        find_tree_parents_in_home
     fi
     if service_entry="$(getent passwd "$service_user")"; then
         service_uid="$(cut -d: -f3 <<<"$service_entry")"
@@ -67,8 +117,11 @@ remove_acls() {
         setfacl -R -P -x "u:$service_user" "$agent_tree"
         setfacl -R -P -x "d:u:$service_user" "$agent_tree"
     fi
-    setfacl -x "u:$service_user" "$agent_home"
-    echo "removed the ACL entries of $service_user from the agent's tree and from $agent_home"
+    local cleared=("${tree_parents_in_home[@]}" "$agent_home") directory
+    for directory in "${cleared[@]}"; do
+        setfacl -x "u:$service_user" "$directory"
+    done
+    echo "removed the ACL entries of $service_user from the agent's tree and from ${cleared[*]}"
 }
 
 remove_overflow_dir() {
@@ -128,29 +181,32 @@ remove_config_dir() {
     fi
 }
 
-if (( $# < 1 )); then
-    echo "$usage" >&2
-    exit 2
+main() {
+    parse_arguments "$@"
+
+    if (( EUID != 0 )); then
+        fail "must run as root"
+    fi
+
+    service_user="agentproxy-$agent"
+    config_dir="/etc/agent-proxy/$agent"
+    agent_tree=""
+    tree_parents_in_home=()
+    service_uid=""
+    service_home=""
+    docker_host=""
+    overflow_dir=""
+
+    check_agent
+    read_overflow_dir
+    remove_acls
+    remove_overflow_dir
+    remove_rootless_daemon
+    disable_user_manager
+    remove_service_user
+    remove_config_dir
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi
-
-if (( EUID != 0 )); then
-    fail "must run as root"
-fi
-
-agent="$1"
-service_user="agentproxy-$agent"
-config_dir="/etc/agent-proxy/$agent"
-agent_tree=""
-service_uid=""
-service_home=""
-docker_host=""
-overflow_dir=""
-
-check_agent
-read_overflow_dir
-remove_acls
-remove_overflow_dir
-remove_rootless_daemon
-disable_user_manager
-remove_service_user
-remove_config_dir

@@ -3,6 +3,7 @@
 import os
 import re
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -26,11 +27,46 @@ def run_script(name: str, *arguments: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def run_sourced(
+    script: str, body: str, env: Mapping[str, str]
+) -> subprocess.CompletedProcess[str]:
+    """Source script under bash, then run body with env added, capturing its output.
+
+    The `_` takes `$0`, so `BASH_SOURCE[0]` differs from it and the script's guard
+    keeps `main` from running.
+    """
+    return subprocess.run(  # noqa: S603 - the tests pass their own body
+        ["/bin/bash", "-c", f'source "$1"; {body}', "_", str(DOCKER_DIR / script)],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={**os.environ, **env},
+    )
+
+
+def recording_stub(command: str) -> str:
+    """Return a shell function named command that appends its call to `$STUB_LOG`."""
+    return f'{command}() {{ echo "{command} $*" >> "$STUB_LOG"; }}; '
+
+
+def stub_calls(stub_log: Path) -> list[str]:
+    """Return the calls the recording stubs appended to stub_log, one per line."""
+    if not stub_log.exists():
+        return []
+    return stub_log.read_text().splitlines()
+
+
 @pytest.mark.parametrize(
     ("name", "arguments"),
     [
         ("provision-instance.sh", ("agent-01", "8100", "/nonexistent")),
+        (
+            "provision-instance.sh",
+            ("--release", "0.1.0", "--tree", "/nonexistent", "agent-01", "8100")
+            + ("/nonexistent",),
+        ),
         ("teardown-instance.sh", ("agent-01",)),
+        ("teardown-instance.sh", ("--tree", "/nonexistent", "agent-01")),
     ],
 )
 def test_script_refuses_a_non_root_user(name: str, arguments: tuple[str, ...]) -> None:
@@ -41,14 +77,18 @@ def test_script_refuses_a_non_root_user(name: str, arguments: tuple[str, ...]) -
     assert result.stderr == f"{name}: must run as root\n"
 
 
+PROVISION_USAGE = (
+    "usage: provision-instance.sh [--release VERSION] [--tree PATH] "
+    "<agent> <port> <config-file>"
+)
+TEARDOWN_USAGE = "usage: teardown-instance.sh [--tree PATH] <agent>"
+
+
 @pytest.mark.parametrize(
     ("name", "usage"),
     [
-        (
-            "provision-instance.sh",
-            "usage: provision-instance.sh <agent> <port> <config-file>",
-        ),
-        ("teardown-instance.sh", "usage: teardown-instance.sh <agent>"),
+        ("provision-instance.sh", PROVISION_USAGE),
+        ("teardown-instance.sh", TEARDOWN_USAGE),
     ],
 )
 def test_script_without_arguments_prints_its_usage(name: str, usage: str) -> None:
@@ -57,6 +97,375 @@ def test_script_without_arguments_prints_its_usage(name: str, usage: str) -> Non
 
     assert (result.returncode, result.stdout) == (2, "")
     assert result.stderr == f"{usage}\n"
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments", "usage"),
+    [
+        (
+            "provision-instance.sh",
+            ("--bogus", "agent-01", "8100", "/nonexistent"),
+            PROVISION_USAGE,
+        ),
+        ("teardown-instance.sh", ("--bogus", "agent-01"), TEARDOWN_USAGE),
+    ],
+)
+def test_script_with_an_unknown_option_prints_its_usage_before_the_root_check(
+    name: str, arguments: tuple[str, ...], usage: str
+) -> None:
+    """An unknown option from a non-root user exits 2 with the usage line, not 1."""
+    result = run_script(name, *arguments)
+
+    assert (result.returncode, result.stdout) == (2, "")
+    assert result.stderr == f"{usage}\n"
+
+
+@pytest.mark.parametrize(
+    ("script", "arguments", "expected"),
+    [
+        (
+            "provision-instance.sh",
+            "--release 0.1.0 --tree /t agent-01 8100 /c",
+            {"release_version": "0.1.0", "tree_option": "/t"},
+        ),
+        (
+            "provision-instance.sh",
+            "--tree /t --release 0.1.0 -- agent-01 8100 /c",
+            {"release_version": "0.1.0", "tree_option": "/t"},
+        ),
+        (
+            "provision-instance.sh",
+            "agent-01 8100 /c",
+            {"release_version": "", "tree_option": ""},
+        ),
+        ("teardown-instance.sh", "--tree /t agent-01", {"tree_option": "/t"}),
+        ("teardown-instance.sh", "-- agent-01", {"tree_option": ""}),
+        ("teardown-instance.sh", "agent-01", {"tree_option": ""}),
+    ],
+)
+def test_parse_arguments_sets_the_options_and_the_positional_arguments(
+    script: str, arguments: str, expected: dict[str, str]
+) -> None:
+    """The options before the positional arguments set their globals; absent, empty."""
+    positional = (
+        {"agent": "agent-01", "port": "8100", "config_file": "/c"}
+        if script == "provision-instance.sh"
+        else {"agent": "agent-01"}
+    )
+    names = " ".join([*expected, *positional])
+
+    result = run_sourced(script, f"parse_arguments {arguments}; declare -p {names}", {})
+
+    assert (result.returncode, result.stderr) == (0, "")
+    assert result.stdout.splitlines() == [
+        f'declare -- {name}="{value}"'
+        for name, value in {**expected, **positional}.items()
+    ]
+
+
+@pytest.mark.parametrize(
+    ("script", "arguments", "usage"),
+    [
+        ("provision-instance.sh", "--bogus agent-01 8100 /c", PROVISION_USAGE),
+        ("provision-instance.sh", "--release", PROVISION_USAGE),
+        ("provision-instance.sh", "--tree", PROVISION_USAGE),
+        ("provision-instance.sh", '--release "" agent-01 8100 /c', PROVISION_USAGE),
+        ("provision-instance.sh", '--tree "" agent-01 8100 /c', PROVISION_USAGE),
+        ("provision-instance.sh", "--release 0.1.0 agent-01 8100", PROVISION_USAGE),
+        ("teardown-instance.sh", "--bogus agent-01", TEARDOWN_USAGE),
+        ("teardown-instance.sh", "--tree", TEARDOWN_USAGE),
+        ("teardown-instance.sh", '--tree "" agent-01', TEARDOWN_USAGE),
+        ("teardown-instance.sh", "--tree /t", TEARDOWN_USAGE),
+    ],
+)
+def test_parse_arguments_refuses_a_bad_command_line_with_the_usage(
+    script: str, arguments: str, usage: str
+) -> None:
+    """An unknown option, an option with no value, or too few arguments exits 2."""
+    result = run_sourced(script, f"parse_arguments {arguments}; echo parsed", {})
+
+    assert (result.returncode, result.stdout) == (2, "")
+    assert result.stderr == f"{usage}\n"
+
+
+@pytest.mark.parametrize(
+    ("release_version", "calls", "report"),
+    [
+        (
+            "0.1.0",
+            [
+                "service_docker pull ghcr.io/gravital-forge/agent-proxy:0.1.0",
+                "service_docker tag ghcr.io/gravital-forge/agent-proxy:0.1.0 "
+                "agent-proxy:1",
+            ],
+            "pulled ghcr.io/gravital-forge/agent-proxy:0.1.0 as agent-proxy:1 "
+            "on the daemon of agentproxy-agent-01",
+        ),
+        (
+            "",
+            [
+                "service_docker build --quiet --tag agent-proxy-verifier:1 "
+                "/s/../verifier",
+                "service_docker build --quiet --tag agent-proxy:1 --file /s/Dockerfile "
+                "/s/../agent-proxy",
+            ],
+            "built agent-proxy-verifier:1 and agent-proxy:1 "
+            "on the daemon of agentproxy-agent-01",
+        ),
+    ],
+)
+def test_prepare_images_pulls_a_release_or_builds_from_the_checkout(
+    tmp_path: Path, release_version: str, calls: list[str], report: str
+) -> None:
+    """Release mode pulls and retags the instance image; source mode builds both."""
+    stub_log = tmp_path / "stub.log"
+    body = (
+        recording_stub("service_docker")
+        + 'script_dir=/s service_user=agentproxy-agent-01 release_version="$RELEASE"; '
+        + "prepare_images"
+    )
+
+    result = run_sourced(
+        "provision-instance.sh",
+        body,
+        {"STUB_LOG": str(stub_log), "RELEASE": release_version},
+    )
+
+    assert (result.returncode, result.stderr) == (0, "")
+    assert result.stdout == f"{report}\n"
+    assert stub_calls(stub_log) == calls
+
+
+@pytest.fixture
+def agent_home(tmp_path: Path) -> Path:
+    """Return an agent home under tmp_path holding Projects and work/repos."""
+    home = tmp_path.resolve() / "home"
+    (home / "Projects").mkdir(parents=True)
+    (home / "work" / "repos").mkdir(parents=True)
+    return home
+
+
+PASSWD_STUB = (
+    'getent() { case "$2" in '
+    'agent-01) echo "agent-01:x:1000:1000::$AGENT_HOME:/bin/bash" ;; '
+    "agentproxy-agent-01) "
+    'echo "agentproxy-agent-01:x:1001:1001::/svc:/usr/sbin/nologin" ;; '
+    "*) return 2 ;; esac; }; "
+)
+
+
+def run_check_arguments(
+    agent_home: Path, tree_option: str, then_run: str, release_version: str = ""
+) -> subprocess.CompletedProcess[str]:
+    """Run provisioning's check_arguments for agent-01, then the shell text then_run."""
+    config_file = agent_home.parent / "config.yaml"
+    config_file.write_text("agent_tree: x\n")
+    body = (
+        PASSWD_STUB
+        + recording_stub("as_agent")
+        + "id() { echo agents; }; "
+        + 'agent=agent-01 port=8100 config_file="$CONFIG_FILE" '
+        + "service_user=agentproxy-agent-01 "
+        + 'release_version="$RELEASE" tree_option="$TREE_OPTION"; '
+        + f"check_arguments; {then_run}"
+    )
+    return run_sourced(
+        "provision-instance.sh",
+        body,
+        {
+            "AGENT_HOME": str(agent_home),
+            "CONFIG_FILE": str(config_file),
+            "RELEASE": release_version,
+            "TREE_OPTION": tree_option,
+            "STUB_LOG": str(agent_home.parent / "stub.log"),
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("tree", "expected"), [("work/repos", "work/repos"), ("", "Projects")]
+)
+def test_check_arguments_takes_the_tree_option_or_the_default(
+    agent_home: Path, tree: str, expected: str
+) -> None:
+    """--tree names the agent's tree; without it the tree is <home>/Projects."""
+    tree_option = str(agent_home / tree) if tree else ""
+
+    result = run_check_arguments(agent_home, tree_option, "declare -p agent_tree")
+
+    assert (result.returncode, result.stderr) == (0, "")
+    assert result.stdout.splitlines()[-1] == (
+        f'declare -- agent_tree="{agent_home / expected}"'
+    )
+
+
+def test_check_arguments_refuses_a_tree_outside_the_home(agent_home: Path) -> None:
+    """A tree whose realpath is outside the home's realpath exits 1."""
+    elsewhere = agent_home.parent / "elsewhere"
+    elsewhere.mkdir()
+
+    result = run_check_arguments(agent_home, str(elsewhere), "echo checked")
+
+    assert (result.returncode, result.stdout) == (1, "")
+    assert result.stderr == (
+        f"provision-instance.sh: the agent's tree '{elsewhere}' must lie inside "
+        f"the agent's home '{agent_home}'\n"
+    )
+
+
+def test_check_arguments_refuses_the_home_itself_as_the_tree(agent_home: Path) -> None:
+    """A tree equal to the home exits 1, so no ACL lands on the whole home."""
+    result = run_check_arguments(agent_home, str(agent_home), "echo checked")
+
+    assert (result.returncode, result.stdout) == (1, "")
+    assert result.stderr == (
+        f"provision-instance.sh: the agent's tree '{agent_home}' must lie inside "
+        f"the agent's home '{agent_home}'\n"
+    )
+
+
+def test_check_arguments_refuses_a_default_tree_that_resolves_outside_the_home(
+    agent_home: Path,
+) -> None:
+    """A <home>/Projects symbolic link to a directory outside the home exits 1."""
+    elsewhere = agent_home.parent / "elsewhere"
+    elsewhere.mkdir()
+    (agent_home / "Projects").rmdir()
+    (agent_home / "Projects").symlink_to(elsewhere)
+
+    result = run_check_arguments(agent_home, "", "echo checked")
+
+    assert (result.returncode, result.stdout) == (1, "")
+    assert result.stderr == (
+        f"provision-instance.sh: the agent's tree '{elsewhere}' must lie inside "
+        f"the agent's home '{agent_home}'\n"
+    )
+
+
+def test_check_arguments_refuses_a_tree_that_is_not_a_directory(
+    agent_home: Path,
+) -> None:
+    """A --tree naming no directory exits 1 with the path as given."""
+    missing = agent_home / "missing"
+
+    result = run_check_arguments(agent_home, str(missing), "echo checked")
+
+    assert (result.returncode, result.stdout) == (1, "")
+    assert result.stderr == (
+        f"provision-instance.sh: the agent's tree '{missing}' is not a directory\n"
+    )
+
+
+def test_check_arguments_refuses_a_release_that_is_not_a_bare_version(
+    agent_home: Path,
+) -> None:
+    """--release v0.1.0 exits 1: the version carries no v."""
+    result = run_check_arguments(agent_home, "", "echo checked", "v0.1.0")
+
+    assert (result.returncode, result.stdout) == (1, "")
+    assert result.stderr == (
+        "provision-instance.sh: the release must be <major>.<minor>.<patch>, "
+        "got 'v0.1.0'\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("tree", "calls"),
+    [
+        (
+            "work/repos",
+            ["as_agent setfacl -m u:agentproxy-agent-01:x {home}/work"],
+        ),
+        ("Projects", []),
+    ],
+)
+def test_grant_tree_traverse_grants_each_directory_between_the_home_and_the_tree(
+    agent_home: Path, tree: str, calls: list[str]
+) -> None:
+    """The agent grants the service user traverse strictly between home and tree."""
+    result = run_check_arguments(
+        agent_home, str(agent_home / tree), "grant_tree_traverse"
+    )
+
+    assert (result.returncode, result.stderr) == (0, "")
+    assert stub_calls(agent_home.parent / "stub.log") == [
+        call.format(home=agent_home) for call in calls
+    ]
+    assert result.stdout.splitlines()[-1] == (
+        "granted agentproxy-agent-01 traverse as agent-01 on each directory "
+        f"between {agent_home} and {agent_home / tree}, {len(calls)} in all"
+    )
+
+
+def run_teardown_acls(
+    agent_home: Path, tree_option: str
+) -> subprocess.CompletedProcess[str]:
+    """Run teardown's check_agent and remove_acls for agent-01 with setfacl stubbed."""
+    body = (
+        PASSWD_STUB
+        + recording_stub("setfacl")
+        + "agent=agent-01 service_user=agentproxy-agent-01 "
+        + 'tree_option="$TREE_OPTION" agent_tree="" service_uid="" service_home="" '
+        + 'docker_host="" tree_parents_in_home=(); '
+        + "check_agent >/dev/null; remove_acls"
+    )
+    return run_sourced(
+        "teardown-instance.sh",
+        body,
+        {
+            "AGENT_HOME": str(agent_home),
+            "TREE_OPTION": tree_option,
+            "STUB_LOG": str(agent_home.parent / "stub.log"),
+        },
+    )
+
+
+def test_remove_acls_clears_the_tree_the_directories_above_it_and_the_home(
+    agent_home: Path,
+) -> None:
+    """Teardown removes the service user's entries up to and including the home."""
+    tree = agent_home / "work" / "repos"
+
+    result = run_teardown_acls(agent_home, str(tree))
+
+    assert (result.returncode, result.stderr) == (0, "")
+    assert stub_calls(agent_home.parent / "stub.log") == [
+        f"setfacl -R -P -x u:agentproxy-agent-01 {tree}",
+        f"setfacl -R -P -x d:u:agentproxy-agent-01 {tree}",
+        f"setfacl -x u:agentproxy-agent-01 {agent_home / 'work'}",
+        f"setfacl -x u:agentproxy-agent-01 {agent_home}",
+    ]
+    assert result.stdout == (
+        "removed the ACL entries of agentproxy-agent-01 from the agent's tree "
+        f"and from {agent_home / 'work'} {agent_home}\n"
+    )
+
+
+def test_remove_acls_clears_the_home_alone_when_the_tree_is_gone(
+    agent_home: Path,
+) -> None:
+    """With no tree, teardown knows no directory above it and clears the home."""
+    result = run_teardown_acls(agent_home, str(agent_home / "gone" / "repos"))
+
+    assert (result.returncode, result.stderr) == (0, "")
+    assert stub_calls(agent_home.parent / "stub.log") == [
+        f"setfacl -x u:agentproxy-agent-01 {agent_home}",
+    ]
+
+
+def test_check_agent_refuses_a_tree_outside_the_home(agent_home: Path) -> None:
+    """Teardown refuses a tree outside the home before it removes any ACL entry."""
+    elsewhere = agent_home.parent / "elsewhere"
+    elsewhere.mkdir()
+
+    result = run_teardown_acls(agent_home, str(elsewhere))
+
+    assert (result.returncode, result.stdout) == (1, "")
+    assert result.stderr == (
+        f"teardown-instance.sh: the agent's tree '{elsewhere}' must lie inside "
+        f"the agent's home '{agent_home}'\n"
+    )
+    assert stub_calls(agent_home.parent / "stub.log") == []
 
 
 def function_body(script: str, function: str) -> str:
@@ -80,6 +489,7 @@ def test_as_agent_runs_as_the_agent_from_the_root_directory(script: str) -> None
     [
         ("provision-instance.sh", "create_overflow_dir"),
         ("provision-instance.sh", "apply_tree_permissions"),
+        ("provision-instance.sh", "grant_tree_traverse"),
         ("teardown-instance.sh", "remove_overflow_dir"),
     ],
 )
