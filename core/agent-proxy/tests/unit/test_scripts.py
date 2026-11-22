@@ -260,6 +260,25 @@ def test_prepare_images_pulls_a_release_or_builds_from_the_checkout(
     assert stub_calls(stub_log) == calls
 
 
+def test_print_next_steps_points_at_the_deployment_guide() -> None:
+    """The last next step names the deployment guide, which exists in the checkout."""
+    guide = DOCKER_DIR.resolve().parents[1] / "docs" / "deployment.md"
+    body = (
+        'script_dir="$SCRIPT_DIR" docker_host=unix:///run/user/1001/docker.sock; '
+        "print_next_steps"
+    )
+
+    result = run_sourced(
+        "provision-instance.sh", body, {"SCRIPT_DIR": str(DOCKER_DIR.resolve())}
+    )
+
+    assert (result.returncode, result.stderr) == (0, "")
+    assert result.stdout.splitlines()[-1] == (
+        f"next, follow the deployment guide: {guide}"
+    )
+    assert guide.is_file()
+
+
 @pytest.fixture
 def agent_home(tmp_path: Path) -> Path:
     """Return an agent home under tmp_path holding Projects and work/repos."""

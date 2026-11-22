@@ -14,8 +14,6 @@ Kept documentation is exactly these living documents, each path from the reposit
 - `LICENSE`
 - the third-party notice for what the published images ship that the MIT licence does not cover
 
-`docs/design.md` and `docs/runbooks/per-agent-instance.md` are also kept documents while they exist.
-
 Update a kept document whenever a change affects what it describes. The enumeration is the rule, and
 the set is closed. Only the operator adds a kept document; never add one as a default home for new
 prose.
@@ -43,11 +41,6 @@ something to describe creates it.
 - `CHANGELOG.md` holds one entry per release.
 - `LICENSE` is the MIT licence.
 - The third-party notice covers what the published images ship that the MIT licence does not cover.
-- `docs/design.md` holds the operator's closed decisions. An item's pull request edits only the
-  `docs/design.md` sections the operator's ask names, and a change to a closed decision needs the
-  operator.
-- `docs/runbooks/per-agent-instance.md` tells the operator how to provision, start, and tear down
-  one agent's instance, and how to run the deployment acceptance checks.
 
 Everything else resolves to the workspace root: the root `documentation` topic for retrospective
 reports, the `implementation` skill for a work item's working documents, the `task-management` topic

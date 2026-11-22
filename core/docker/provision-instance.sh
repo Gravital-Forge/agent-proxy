@@ -272,7 +272,7 @@ print_next_steps() {
     local exec_prefix="DOCKER_HOST=$docker_host docker exec"
     echo "next, mint a token: $exec_prefix agent-proxy agent-proxy token mint --name <name> --scope <scope>"
     echo "next, store a credential: $exec_prefix --interactive agent-proxy agent-proxy credential set <name>"
-    echo "next, follow the runbook: $(realpath -m -- "$script_dir/../../docs/runbooks/per-agent-instance.md")"
+    echo "next, follow the deployment guide: $(realpath -m -- "$script_dir/../../docs/deployment.md")"
 }
 
 main() {

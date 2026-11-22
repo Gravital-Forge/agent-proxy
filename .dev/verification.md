@@ -29,8 +29,8 @@ runs it and when.
   ```
 
 - Every check runs as the agent's own user. A **deployment acceptance check** is a check that needs
-  root, a second user, or a real credential. Write it into `docs/runbooks/per-agent-instance.md` as
-  a step, and never run it in the project.
+  root, a second user, or a real credential. Write it into `docs/acceptance-checks.md` as a check,
+  and never run it in the project.
 
 Everything else resolves to the workspace root's `verification` topic, which owns how a package
 declares its checks.

@@ -1,5 +1,5 @@
 # agent_tree must be the resolved path of the agent's Projects tree, with no
-# symlink on the way. docs/runbooks/per-agent-instance.md sets it up.
+# symlink on the way. docs/deployment.md sets it up.
 agent_tree: /home/agent-01/Projects
 overflow_dir: /home/agent-01/Projects/.agent-proxy-overflow
 max_cages: 4
