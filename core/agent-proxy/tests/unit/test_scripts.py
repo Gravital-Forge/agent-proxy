@@ -33,7 +33,8 @@ def run_sourced(
     """Source script under bash, then run body with env added, capturing its output.
 
     The `_` takes `$0`, so `BASH_SOURCE[0]` differs from it and the script's guard
-    keeps `main` from running.
+    keeps `main` from running. The timeout fails a run that never ends: a tree check
+    that lets a tree outside the home through walks its parents forever.
     """
     return subprocess.run(  # noqa: S603 - the tests pass their own body
         ["/bin/bash", "-c", f'source "$1"; {body}', "_", str(DOCKER_DIR / script)],
@@ -41,6 +42,7 @@ def run_sourced(
         text=True,
         check=False,
         env={**os.environ, **env},
+        timeout=10,
     )
 
 
@@ -493,6 +495,37 @@ def test_check_agent_refuses_a_tree_outside_the_home(agent_home: Path) -> None:
     assert stub_calls(agent_home.parent / "stub.log") == []
 
 
+def test_check_agent_refuses_the_home_itself_as_the_tree(agent_home: Path) -> None:
+    """A tree equal to the home exits 1, so no recursive removal walks the home."""
+    result = run_teardown_acls(agent_home, str(agent_home))
+
+    assert (result.returncode, result.stdout) == (1, "")
+    assert result.stderr == (
+        f"teardown-instance.sh: the agent's tree '{agent_home}' must lie inside "
+        f"the agent's home '{agent_home}'\n"
+    )
+    assert stub_calls(agent_home.parent / "stub.log") == []
+
+
+def test_check_agent_refuses_a_default_tree_that_resolves_outside_the_home(
+    agent_home: Path,
+) -> None:
+    """A <home>/Projects symbolic link to a directory outside the home exits 1."""
+    elsewhere = agent_home.parent / "elsewhere"
+    elsewhere.mkdir()
+    (agent_home / "Projects").rmdir()
+    (agent_home / "Projects").symlink_to(elsewhere)
+
+    result = run_teardown_acls(agent_home, "")
+
+    assert (result.returncode, result.stdout) == (1, "")
+    assert result.stderr == (
+        f"teardown-instance.sh: the agent's tree '{elsewhere}' must lie inside "
+        f"the agent's home '{agent_home}'\n"
+    )
+    assert stub_calls(agent_home.parent / "stub.log") == []
+
+
 def function_body(script: str, function: str) -> str:
     """Return the body of the shell function named function in script."""
     text = (DOCKER_DIR / script).read_text()
@@ -507,6 +540,13 @@ def test_as_agent_runs_as_the_agent_from_the_root_directory(script: str) -> None
     """The helper drops to the agent through runuser, outside root's cwd."""
     expected = '(cd / && runuser -u "$agent" -- "$@")'
     assert function_body(script, "as_agent").strip() == expected
+
+
+def test_both_scripts_share_one_tree_check() -> None:
+    """Teardown's recursive ACL removal sits behind the check provisioning applies."""
+    assert function_body(
+        "teardown-instance.sh", "find_tree_parents_in_home"
+    ) == function_body("provision-instance.sh", "find_tree_parents_in_home")
 
 
 @pytest.mark.parametrize(

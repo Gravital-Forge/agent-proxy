@@ -672,8 +672,9 @@ the image's digest reference, `<registry>/<name>@sha256:<digest>`, as one line o
 and push output goes to stderr, so stdout holds only the image references.
 
 `.github/workflows/release.yml` runs when the operator publishes a GitHub release. Its one job,
-`images`, refuses a tag that is not `v<major>.<minor>.<patch>` before it checks out. It logs in to
-GHCR with the job's token, and runs `build-images.sh` with the tag's version without the `v`, the
+`images`, refuses a release marked as a pre-release, and a tag that is not
+`v<major>.<minor>.<patch>`, before it checks out, so neither publishes an image. It logs in to GHCR
+with the job's token, and runs `build-images.sh` with the tag's version without the `v`, the
 registry `ghcr.io/gravital-forge`, and the repository's URL. It then writes each image's reference
 into the release notes under a `## Images` heading, one bullet each. On a re-run, it replaces that
 heading and everything after it. The workflow holds `contents: read`; the job holds

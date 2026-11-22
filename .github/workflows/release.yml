@@ -16,8 +16,14 @@ jobs:
     env:
       TAG: ${{ github.event.release.tag_name }}
     steps:
-      - name: Refuse a tag that is not v<major>.<minor>.<patch>
+      - name: Refuse a pre-release, and a tag that is not v<major>.<minor>.<patch>
+        env:
+          PRERELEASE: ${{ github.event.release.prerelease }}
         run: |
+          if [[ "$PRERELEASE" != false ]]; then
+            echo "a pre-release publishes no images, and '$TAG' is marked as a pre-release" >&2
+            exit 1
+          fi
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "the release tag must be v<major>.<minor>.<patch>, got '$TAG'" >&2
             exit 1

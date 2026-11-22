@@ -317,14 +317,14 @@ One instance per agent user:
   the home loses that guard, and a tree equal to the home would put the service user's ACL on the
   whole home. Teardown applies the same rule, because it removes ACL entries recursively, as root,
   from the tree it is given.
-- A release publishes five images on GHCR: `ghcr.io/gravital-forge/agent-proxy`, the instance;
-  `ghcr.io/gravital-forge/agent-proxy-verifier`; and
-  `ghcr.io/gravital-forge/agent-proxy-plugin-git`, `-plugin-github`, and `-plugin-hcp-terraform`.
-  The operator publishes a GitHub release, and a workflow then builds and pushes the five images and
-  writes each image's digest reference into the release notes. Each package starts private on GHCR;
-  the operator makes the five public once, after the first release.
-- One version covers all five images: a repository tag `vX.Y.Z` tags every image `X.Y.Z`. Images
-  carry version tags only, never `latest`, because configs pin plugins by digest.
+- A release publishes its images on GHCR: the instance image, `ghcr.io/gravital-forge/agent-proxy`;
+  the verifier image, `ghcr.io/gravital-forge/agent-proxy-verifier`; and
+  `ghcr.io/gravital-forge/agent-proxy-plugin-<plugin>` for each plugin directory that holds a
+  `Dockerfile`. The operator publishes a GitHub release, and a workflow then builds and pushes every
+  image and writes each image's digest reference into the release notes. Each package starts private
+  on GHCR, and the operator makes it public.
+- One version covers every image: a repository tag `vX.Y.Z` tags every image `X.Y.Z`. Images carry
+  version tags only, never `latest`, because configs pin plugins by digest.
 - The images are linux/amd64 only. The github plugin's image checks gh's `linux_amd64` tarball
   against one SHA-256 (`plugins/github/Dockerfile`), and arm64 waits for a deployment that needs it.
 - The verifier is pinned by digest. A release builds the verifier first and bakes its full
@@ -405,8 +405,8 @@ The core is Python on uv and FastMCP. One part of the core is Go: the in-cage ro
 with `CGO_ENABLED=0` into a static executable, so it runs in any image with no libc or runtime in
 the cage. The Go toolchain is a build dependency for that verifier alone. Plugins may be written in
 any language. CI builds each plugin image and runs `manifest check` on it. CI also builds every
-image on each pull request, and a release publishes the five images, as "Deployment and isolation"
-sets out.
+image on each pull request, and a release publishes every image, as "Deployment and isolation" sets
+out.
 
 ## Verification
 

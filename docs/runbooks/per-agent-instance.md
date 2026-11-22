@@ -262,6 +262,9 @@ Teardown leaves these in place:
 - the files cages created in the tree, whose owner stays the removed service user's uid;
 - the overflow directory, when step 2 skipped its read;
 - the service user's entry on each directory between the home and the tree, when the tree is gone;
+- the service user's entries on the tree and on each directory between it and the home, when
+  provisioning took `--tree` and teardown runs without it. With no `<home>/Projects`, teardown
+  clears the home alone. Give teardown the same `--tree` that provisioning took;
 - `/etc/agent-proxy` itself;
 - any line for the service user in `/etc/subuid` or `/etc/subgid`. The script warns about each one;
   remove it when no user needs that range.
