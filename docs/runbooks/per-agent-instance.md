@@ -32,8 +32,8 @@ such a registry.
 
 ## The config
 
-Start from `examples/instance.yaml`. `docs/design.md` gives the rules a config must satisfy under
-"Config".
+Start from `examples/instance.yaml`. The reference gives the rules a config must satisfy under
+[The config file](../reference.md#the-config-file).
 
 - `agent_tree` names `<tree>`, the path that `realpath` prints for the agent's tree, such as
   `realpath /home/agent-01/Projects`. The runner refuses a root or an overflow directory under a
@@ -210,8 +210,8 @@ Then run `docker exec agent-proxy agent-proxy reload`. When it refuses the confi
 error, and the running config stays. When it accepts the config, it prints `reloaded` and each
 warning, such as one for each credential that is still not stored.
 
-Every `docker` command here runs as root with `DOCKER_HOST=unix:///run/user/<uid>/docker.sock`.
-`docs/architecture.md` gives every verb of the admin command under "The admin command".
+Every `docker` command here runs as root with `DOCKER_HOST=unix:///run/user/<uid>/docker.sock`. The
+reference gives every verb under [The operator command](../reference.md#the-operator-command).
 
 ## Teardown
 

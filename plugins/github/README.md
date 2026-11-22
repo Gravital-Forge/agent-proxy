@@ -69,12 +69,13 @@ that `attach` needs supplies only the files that gh uploads.
 
 ### What an action returns
 
-A command action returns `{exit_code, stdout, stderr}`, as `docs/design.md` gives under "Results". A
-script action prints the same three members, and its `output_schema` states them. The script exits 0
-whenever it runs to its end, and gh's exit code goes in `exit_code`. `job_log_url` runs no gh, so
-its exit code is its own, as given below. Each action returns gh's stdout as gh prints it, except
-for `pr_fetch`, `pr_checks`, and `job_log_url`, and for `pr_create` and `pr_edit` with `attach`,
-where the script replaces each private path, as "Attachments" gives.
+A command action returns `{exit_code, stdout, stderr}`, as the core's reference gives under
+[Results and refusals](../../docs/reference.md#results-and-refusals). A script action prints the
+same three members, and its `output_schema` states them. The script exits 0 whenever it runs to its
+end, and gh's exit code goes in `exit_code`. `job_log_url` runs no gh, so its exit code is its own,
+as given below. Each action returns gh's stdout as gh prints it, except for `pr_fetch`, `pr_checks`,
+and `job_log_url`, and for `pr_create` and `pr_edit` with `attach`, where the script replaces each
+private path, as "Attachments" gives.
 
 `pr_create` and `pr_edit` add two members when the last non-empty line of gh's stdout is a pull
 request's URL, `https://github.com/<owner>/<name>/pull/<number>`: `pr_url`, that URL, and
@@ -149,9 +150,10 @@ calls fail it:
 
 `pr_fetch` on a busy pull request is the call most likely to pass the core's cap. It is a script
 action. `pr_checks` returns no log, only one line for each failed job. `docs/writing-a-plugin.md`
-gives what happens to a script whose output passes the cap, and `docs/design.md` gives the cap and
-the result forms under "Results". `run_view` with `log_failed` fetches one run's failed logs as a
-command action, whose stdout past the cap goes to an overflow file.
+gives what happens to a script whose output passes the cap, and the core's reference gives the cap
+and the result forms under [Results and refusals](../../docs/reference.md#results-and-refusals).
+`run_view` with `log_failed` fetches one run's failed logs as a command action, whose stdout past
+the cap goes to an overflow file.
 
 ### Optional inputs
 
@@ -350,7 +352,7 @@ no wildcard. For `run_view` with `log_failed` to work, a grant names each storag
 ## A grant
 
 A config pins the plugin's image as `github`, and grants each action under `github.<action>`. In the
-form `docs/design.md` gives under "Config":
+form the core's reference gives under [The config file](../../docs/reference.md#the-config-file):
 
 ```yaml
 scopes:

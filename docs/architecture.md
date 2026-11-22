@@ -43,59 +43,14 @@ The core is the uv package in `core/agent-proxy/`, placed as `docs/design.md` se
 
 Each module below is a file in `core/agent-proxy/agent_proxy/`.
 
-### `errors.py`
-
-`ProxyError` is the base of every error a caller can act on. Each module that refuses input raises
-its own subclass, and the message names the refused value and what the module expected. The admin
-command catches `ProxyError` and prints it as a refusal.
-
 ### `config.py`
 
-This module holds the rules the other modules share, and the instance config those rules govern.
-
-The shared rules are the name patterns and the checks that apply them. `NAME_PATTERN` governs scope,
-token, and credential names, and `check_name` refuses a name that does not match it with
-`InvalidNameError`. `PLUGIN_NAME_PATTERN` governs plugin names. `PINNED_IMAGE_PATTERN` is the form
-of an image reference pinned by digest: each plugin's image in the config must match it, and
-`runner.py` matches the verifier's reference against it. `parse_duration` turns a duration such as
-`120s` or `7d` into a `timedelta`, and refuses anything else with `DurationError`.
-
-`load_config` reads one YAML file and returns an `InstanceConfig`: the agent tree, the overflow
-directory, the cap on running cages, the plugins pinned by image digest, and the scopes with their
-grants. `read_yaml` parses the file with a safe loader that also refuses a key repeated in one
-mapping and a YAML merge key (`<<`). The pydantic models refuse unknown fields and check each
-field's form. The `InstanceConfig` validator then checks the rules that span fields, such as a root
-lying inside the agent tree. `docs/design.md` sets the validation rules under "Config". The models
-and the validator together check each rule that the file can settle. For example, the models make a
-grant state `roots`, `domains`, and `credentials`, because `Grant` gives none of them a default. A
-grant's `env` is optional and defaults to an empty map. It maps each name, which must match
-`ENV_NAME_PATTERN`, to a string value.
-
-Two fields of `InstanceConfig` serve the cage runner. `max_cages` is the instance's cap on running
-cages, an integer of 1 or more; `docs/design.md` gives the cap under "The cage". `overflow_dir` is
-the directory that takes a stream over the output cap; `docs/design.md` gives it under "Results". It
-is an absolute path with no `..` segment, inside the agent tree, and it must not equal the agent
-tree. A grant's root must not equal the overflow directory, contain it, or lie inside it, so no cage
-mounts it and the sweep never reaches a root.
-
-Two rules of the validator serve egress. A grant must not name one domain more than once. A grant's
-credential must not take the environment name `PROXY_ENV_NAME`, which is `HTTPS_PROXY`, because the
-cage's network sets that variable. `DOMAIN_PATTERN` is the form of a domain, and `egress.py` checks
-it again before it writes a proxy config.
-
-A grant's credential must not take the environment name `ROOTS_ENV_NAME` either, which is
-`AGENT_PROXY_ROOTS`, because the runner sets that variable in every cage.
-
-A grant's `env` must not name `HTTPS_PROXY` or `AGENT_PROXY_ROOTS` either. It must not name an
-environment variable that a credential of the same grant takes, and no value in it may hold a NUL.
-These failures join the grant's other rule failures.
-
-The validator refuses a plugin named `agent-proxy`. A tool's name is `<plugin>_<action>`, and a
-plugin name holds no `_`, so that is the one plugin whose tools could take the name of the
-self-check tool, `agent-proxy_self_check`.
-
-A config that fails raises `ConfigError`, which holds one message per failure. Each message names
-the file, and a failure inside the file also names its location.
+This module holds the rules the other modules share, and loads the instance config those rules
+govern. The reference gives every field and rule of the config under
+[The config file](reference.md#the-config-file). The pydantic models check each field's form, and
+the `InstanceConfig` validator checks the rules that span fields, such as a root lying inside the
+agent tree. `runner.py` matches the verifier's reference against `PINNED_IMAGE_PATTERN`, the form a
+plugin's image takes, and `egress.py` checks `DOMAIN_PATTERN` again before it writes a proxy config.
 
 Config validation does not consult the credential store. A credential that a grant names and the
 store lacks is a warning, not a failure, and the callers of `load_config` compute it with
@@ -115,7 +70,7 @@ model under "Credentials".
 
 `unset_message` forms the one text that says a credential is not set and gives the command the
 operator stores it with. The warnings at start, at reload, and at token mint use it, and so does the
-runner's refusal. `docs/design.md` gives the text under "Credentials".
+runner's refusal. The reference gives the text under [Refusals](reference.md#refusals).
 
 `unset_warnings` takes scopes and the stored names. It returns `unset_message` of each credential a
 grant of the scopes names that the stored names lack, each name once, in the order the scopes and
@@ -189,32 +144,24 @@ error classes that a container wait raises when its timeout passes, which depend
 
 ### `results.py`
 
-This module turns what a cage printed into a call's result, and removes old overflow files.
+This module turns what a cage printed into a call's result, and removes old overflow files. The
+reference gives the result forms, the cap, and the retention under
+[Results and refusals](reference.md#results-and-refusals).
 
-`capture_stream` reads one stream of a cage as chunks and returns a `CapturedStream`. A stream of at
-most `OUTPUT_CAP_BYTES` stays inline. A stream over the cap goes in full to a new file named
-`<call_id>.stdout` or `<call_id>.stderr` in the overflow directory, and the `CapturedStream` holds
-that path and the stream's size in place of the bytes. The module holds at most the cap and one more
-chunk in memory. It opens the overflow directory one component at a time from `/`, and refuses a
-symbolic link at any component. It creates the file with mode `0o660` and refuses a file that
-already exists. A file it cannot create or write raises `OverflowWriteError`. `new_call_id` returns
-a fresh ID that matches `CALL_ID_PATTERN`, the form that names the file. `check_overflow_dir` walks
-a directory the same way, then opens a file with no name in it through `O_TMPFILE` and closes it, so
-it leaves no file, and raises `OverflowWriteError` when it cannot.
+`capture_stream` reads one stream of a cage as chunks and returns a `CapturedStream`, which holds
+the bytes of a stream within the cap, or the overflow file's path and the stream's size. The module
+holds at most the cap and one more chunk in memory. It opens the overflow directory one component at
+a time from `/`, and refuses a symbolic link at any component. It refuses an overflow file that
+already exists. A file it cannot create or write raises `OverflowWriteError`. `check_overflow_dir`
+walks a directory the same way, then opens a file with no name in it through `O_TMPFILE` and closes
+it, so it leaves no file, and raises `OverflowWriteError` when it cannot.
 
-`command_content` forms a command's result from the exit code and the two streams. An inline stream
-appears as text, decoded as UTF-8 with each bad byte replaced. An overflowed stream appears as its
-file and size, and the result then carries `truncated`. `script_content` forms a script's result by
-the rule `docs/writing-a-plugin.md` gives under "How an action runs". A failed script's result is
-the command result. `docs/design.md` gives the result forms and the cap under "Results".
+`command_content` and `script_content` form a command's and a script's result.
 
-`sweep_overflow` removes each entry directly in a directory that is not a directory itself and that
-was last modified more than `OVERFLOW_MAX_AGE` before the time it is given. It judges and removes a
-symbolic link as itself, never its target, and skips an entry that is gone before it acts.
-`OverflowSweeper` runs the sweep on a daemon thread once at start, then every `SWEEP_INTERVAL`. It
-reads the directory and the time through the callables it takes, fresh for each sweep. A sweep that
-fails logs a warning, and the thread keeps its schedule. `docs/design.md` gives the retention under
-"Results".
+`sweep_overflow` judges and removes a symbolic link as itself, never its target, and skips an entry
+that is gone before it acts. `OverflowSweeper` runs the sweep on a daemon thread. It reads the
+directory and the time through the callables it takes, fresh for each sweep. A sweep that fails logs
+a warning, and the thread keeps its schedule.
 
 ### `egress.py`
 
@@ -296,9 +243,8 @@ and returns an `Outcome`. It refuses a bad call before it takes a slot under the
    `CredentialError` with `unset_message` of its name. When several are not stored, the refusal
    names the first env credential in grant order that is not stored, else the first such file
    credential. A credential's environment value that is not UTF-8 or holds a NUL also raises
-   `CredentialError`. The runner reads the store on every call, so a credential that the operator
-   stores takes effect on the next call, with no reload. `_create` adds one more mount to these: the
-   verifier image, read-only, at `VERIFIER_MOUNT`.
+   `CredentialError`. The runner reads the store on every call. `_create` adds one more mount to
+   these: the verifier image, read-only, at `VERIFIER_MOUNT`.
 
 The run then waits for a slot, creates the cage, starts it, and removes it by force whatever
 happens. The slot stays taken until the cage is removed. The cage's entrypoint is the verifier's
@@ -396,26 +342,20 @@ of the report's form is a reply of another form.
 
 This module is the self-check. It checks one scope's local wiring against a snapshot: the things
 that can be wrong while the instance looks healthy. `docs/design.md` gives what it checks, and what
-it leaves out, under "Surface".
+it leaves out, under "Surface". The reference gives the report's form under
+[The self-check report](reference.md#the-self-check-report).
 
 `SelfCheck` takes the instance's Docker client, credential store, and `CageRunner`. `SelfCheck.run`
-takes a `Snapshot` and the name of a scope that its config defines, and returns a `CheckReport`. The
-report holds the scope's name and one `CheckEntry` per check. An entry holds `check`, the kind of
-check; `subject`, what it checked; `ok`, whether it passed; and `detail`, a line that says what it
-found. The kinds come in the order below. Within a kind, each subject comes once, in the order that
-the scope's grants first name it.
+takes a `Snapshot` and the name of a scope that its config defines, and returns a `CheckReport`.
+Each kind of check does this:
 
 - `credential` — each credential that a grant names is among the store's names, read afresh on each
-  run. The detail of an unstored credential is `unset_message` of its name, from `credentials.py`.
-  An entry names a credential and never holds its value.
+  run.
 - `root` — each root path opens through `hold_roots` from `runner.py`, as it opens for a call, and
-  closes again. A root that several grants name is checked once, by its path. The detail of a root
-  that fails is the `RootError` text.
+  closes again. A root that several grants name is checked once, by its path.
 - `overflow_dir` — the config's overflow directory passes `check_overflow_dir` from `results.py`.
 - `egress` — the proxy of each distinct non-empty domain list has the status `running`, which
-  `proxy_status` from `egress.py` reads. The subject is the proxy container's name, from
-  `network_name`. The detail names the domains, except when the lookup fails, where it is the
-  `EgressError` text. The empty list has no proxy, so it has no entry.
+  `proxy_status` from `egress.py` reads.
 - `plugin` — for each plugin that the scope's grants use, the instance's `CageRunner` runs the
   image's `describe` in a cage. The cage gets an empty grant, so it has no roots, no credentials,
   and no `env`. It joins the Docker network `none`, so it has no network, and
@@ -426,17 +366,14 @@ the scope's grants first name it.
   file on each check, as the output of any call does, and the sweep removes it.
 
 `run` turns every failed check into an entry, never an error. The refusal or Docker failure that a
-check meets becomes the detail of an entry whose `ok` is false. `CheckReport.ok` is true when every
-entry passed. `CheckReport.content` returns the report as one JSON object that holds `ok`, `scope`,
-and `checks`, with each entry's four fields. `SELF_CHECK_TOOL` holds the tool's name,
-`agent-proxy_self_check`, and `SELF_CHECK_INPUT_SCHEMA` holds its input schema, an object with no
-property that refuses any property.
+check meets becomes the detail of an entry whose `ok` is false.
 
 ### `mcp.py`
 
 This module is the MCP surface: the call path, its glue to FastMCP, and the instance that serves it.
-`docs/design.md` gives the surface under "Surface", the result forms under "Results", and the audit
-line under "Audit".
+`docs/design.md` gives the surface under "Surface" and the audit line under "Audit". The reference
+gives the result forms and the refusals under
+[Results and refusals](reference.md#results-and-refusals).
 
 `CallGateway` is the call path, and it is synchronous. `list_tools` takes the request's
 `Authorization` header, verifies its bearer token, and returns the self-check tool and one
@@ -448,16 +385,14 @@ self-check tool alone.
 
 `CallGateway.call` runs one call and audits it in one line. It authenticates the token, which
 records its use. It then holds the snapshot in force through `LiveConfig.use`, finds the grant that
-the tool names, and runs the cage through `CageRunner`. Its reply holds the result's content. A
-failed script's reply is the command result, as a normal result. The only error results are
-refusals.
+the tool names, and runs the cage through `CageRunner`. Its reply holds the result's content.
 
 A call of the self-check tool goes to `SelfCheck.run` from `selfcheck.py` instead of a cage. It
 holds the snapshot in force through `LiveConfig.use` for the whole check, refuses a call that
-carries any argument, and returns the report's content. A report whose `ok` is false is a normal
-result. Its audit line names the token and its scope, holds `agent-proxy_self_check` as the action
-and the call's arguments, and holds no exit code and no output size, because no single cage's output
-is the result. The cages that the check runs write no line of their own.
+carries any argument, and returns the report's content. Its audit line names the token and its
+scope, holds `agent-proxy_self_check` as the action and the call's arguments, and holds no exit code
+and no output size, because no single cage's output is the result. The cages that the check runs
+write no line of their own.
 
 `CallGateway.check_scopes` serves the control socket's check request. It takes a scope name, or
 `None` for every scope that the config in force defines, sorted by name, and holds the snapshot in
@@ -467,25 +402,20 @@ not `available`, it refuses the request. It refuses a scope that the config in f
 define, and names the scopes it defines. When a scope's line cannot be written, it refuses the
 request and withholds every report.
 
-Every refusal is a `CallRefusedError`, whose message is the refusal. A bad token, a token store that
-cannot be read, a scope that the config in force does not define, a tool that the scope does not
-grant, a self-check call that carries an argument, and each error that the runner raises are
-refusals. The audit line of a refused call holds that message in its `refusal` field. A call whose
-audit line cannot be written is refused, and its result is withheld. While the audit writer is not
-`available`, each call is refused before its token is checked, and writes no line.
+Every refusal is a `CallRefusedError`, whose message is the refusal. Each error that the runner
+raises is a refusal. The audit line of a refused call holds that message in its `refusal` field. A
+call whose audit line cannot be written is refused, and its result is withheld. While the audit
+writer is not `available`, each call is refused before its token is checked, and writes no line.
 
 `ScopedTools` and `ProxyTool` connect the gateway to FastMCP. `ScopedTools` is a FastMCP `Provider`.
 It lists the tools of each request's bearer token, and resolves every tool name to a `ProxyTool`, so
 a call of a tool that the token does not list still reaches the gateway, which refuses and audits
 it. `ProxyTool.run` hands the call to the gateway on a worker thread. It returns the reply as a
-normal result, which holds one compact JSON text block and the same content as structured content.
-It turns a `CallRefusedError` into a FastMCP `ToolError` whose text is `REFUSAL_PREFIX`, which is
-`agent-proxy refused: `, followed by the refusal. An MCP client receives that as an error result.
-The audit line's `refusal` field holds the refusal without the prefix.
+normal result, and turns a `CallRefusedError` into a FastMCP `ToolError` whose text is the refusal
+behind its prefix. The audit line's `refusal` field holds the refusal without the prefix.
 
 `build_app` returns the ASGI app that serves the gateway's tools over MCP's Streamable HTTP
-transport at `/mcp`. The app gives each input schema as the listing gives it, unchanged, and masks
-the detail of each error that is not a refusal.
+transport at `/mcp`. The app gives each input schema as the listing gives it, unchanged.
 
 `snapshot_builder` returns the build that `LiveConfig.start` and each reload call. Each build reads
 the config file, reads the credential names afresh, and loads each plugin's manifest through the
@@ -506,14 +436,15 @@ egress proxies stay, and the next `LiveConfig.start` keeps or prunes them.
 
 ### `cli.py`
 
-This module is the admin command. It reads the environment, and the one other module that does is
-`runner.py`, which reads only `AGENT_PROXY_VERIFIER_IMAGE`, as `runner.py` above gives. Outside
-`serve`, it opens each store under the state directory itself, and `token mint` hands the credential
-store's names to `unset_warnings`. It opens the Docker client for `manifest check` and `serve`, and
-calls `request_reload` for `reload` and `request_check` for `check`. For
-`serve --host HOST --port PORT`, it starts an `Instance` from `mcp.py`, which opens the stores, and
-serves its app on that address. No store imports another; within the package, the stores import only
-`config.py` and `errors.py`.
+This module is the operator command, which the reference gives under
+[The operator command](reference.md#the-operator-command). It reads the environment, and the one
+other module that does is `runner.py`, which reads only `AGENT_PROXY_VERIFIER_IMAGE`, as `runner.py`
+above gives. Outside `serve`, it opens each store under the state directory itself, and `token mint`
+hands the credential store's names to `unset_warnings`. It opens the Docker client for
+`manifest check` and `serve`, and calls `request_reload` for `reload` and `request_check` for
+`check`. For `serve --host HOST --port PORT`, it starts an `Instance` from `mcp.py`, which opens the
+stores, and serves its app on that address. No store imports another; within the package, the stores
+import only `config.py` and `errors.py`.
 
 ## The root verifier
 
@@ -576,11 +507,11 @@ egress, its layout, and its tests.
 
 ## Where state lives
 
-Environment variables place everything the admin command reads and writes. The config file places
-the one directory outside the state directory that the cage runner writes.
+The operator command keeps its state in the state directory, which the environment names, as the
+reference gives under [Environment](reference.md#environment). The config file places the one
+directory outside the state directory that the cage runner writes.
 
-`AGENT_PROXY_STATE_DIR` names the state directory. The directory must already exist, and the command
-does not change its mode. The command keeps its state beneath it:
+The state directory holds:
 
 - `tokens.sqlite3` is the token store. The store creates it with mode `0o600`.
 - `credentials/` is the credential store. The store creates the directory, narrows it to mode
@@ -592,15 +523,7 @@ does not change its mode. The command keeps its state beneath it:
 - `egress/` is the config root that `serve` gives `EgressProxies`. The paragraph on `EgressProxies`
   below gives what it keeps there.
 
-`AGENT_PROXY_CONFIG` names the config file. `token mint` and `serve` read it. `docs/design.md` gives
-where the file comes from under "Config".
-
-An unset `AGENT_PROXY_STATE_DIR` or `AGENT_PROXY_CONFIG`, or a state directory that does not exist,
-is a refusal that names the variable.
-
-`manifest check` and `serve` reach the Docker daemon through `DOCKER_HOST`, which the Docker SDK
-reads from the environment. With `DOCKER_HOST` unset, the SDK uses its default socket. A daemon it
-cannot reach is a refusal that names `DOCKER_HOST` and its value, or says that it is unset.
+`docs/design.md` gives where the config file comes from under "Config".
 
 The cage runner mounts credential files from the credential store's directory, as `runner.py` gives
 above. It writes each overflow file under the config's `overflow_dir`, in the agent's tree, and the
@@ -621,11 +544,11 @@ The image sets `DOCKER_HOST` to the socket path the run line mounts, `AGENT_PROX
 `/etc/agent-proxy/config.yaml`, and `AGENT_PROXY_VERIFIER_IMAGE` to the build argument
 `VERIFIER_IMAGE`, which defaults to `agent-proxy-verifier:1`.
 
-`serve --host HOST --port PORT` starts an `Instance` from `mcp.py` and serves its MCP surface at
-`/mcp` on that address until SIGINT or SIGTERM, then closes the instance and exits 0. `PORT` is an
-integer from 1 to 65535. `serve` in `cli.py` runs the app under uvicorn through `_Server` from
-`mcp.py`. `_Server` routes SIGINT and SIGTERM to uvicorn's shutdown on the main thread, restores the
-previous handlers when the server stops, and re-raises neither signal.
+`serve` starts an `Instance` from `mcp.py` and serves its MCP surface, as the reference gives under
+[The operator command](reference.md#the-operator-command), and closes the instance when it stops.
+`serve` in `cli.py` runs the app under uvicorn through `_Server` from `mcp.py`. `_Server` routes
+SIGINT and SIGTERM to uvicorn's shutdown on the main thread, restores the previous handlers when the
+server stops, and re-raises neither signal.
 
 `core/docker/start-instance.sh` holds the run line. It takes the image, the container name, the host
 port, the config directory, the state directory, and the agent tree, and passes any further
@@ -691,45 +614,3 @@ Every action in the workflows is pinned by commit SHA, with its version in a tra
 `.github/dependabot.yml` asks for weekly updates of those actions, of the base images that the
 Dockerfiles pin by tag and digest, and of the uv lockfiles. `docs/design.md` gives the decisions
 behind the published images under "Deployment and isolation".
-
-## The admin command
-
-The `agent-proxy` command is `agent_proxy.cli:run`. The admin runs its verbs through `docker exec`
-into the instance container. Its `serve` verb is the instance image's process, which "The instance"
-above describes. `serve` prints the warnings of the instance's start before it serves, so the
-operator reads them in the container's log. Each other verb but `reload` and `check` takes a noun:
-
-- `token mint --name NAME --scope SCOPE [--expires DURATION]` loads the config, refuses a scope the
-  config does not define, and prints the new token. A token minted without `--expires` never
-  expires. Before the token, it prints a warning for each credential the config names that the store
-  lacks, and it still mints the token and exits 0.
-- `token list` prints each token's name, scope, created time, last-used time, and expiry, never the
-  token.
-- `token revoke NAME` deletes a token.
-- `credential set NAME` reads the value from stdin, stores it, and prints its size in bytes.
-- `credential list` prints each credential's name and set time, never the value.
-- `credential rm NAME` deletes a credential.
-- `audit tail [-n COUNT]` prints the newest audit lines, ten unless `-n` says otherwise.
-- `manifest check IMAGE` runs the `describe` of a local image and checks the manifest it prints. It
-  never pulls, so an absent image is a refusal. On a pass it prints a line that names the image and
-  the number of actions it declares.
-- `reload` connects to `control.sock` beneath the state directory and asks the server there to
-  reload its config. It prints `reloaded` when the new config is in force. When the server refuses,
-  the command prints each error it sent as a refusal.
-- `check [--scope NAME]` connects to `control.sock` beneath the state directory and asks the server
-  there to run the self-check on scope `NAME`, or on every scope without `--scope`. The server runs
-  the check in its own process, against its config in force and its Docker daemon, so the command
-  gets the report that the tool gives. It prints a header row, then one row per entry with five
-  fields: the scope, the kind of check, the subject, `pass` or `fail`, and the detail. When an entry
-  fails, it then prints `agent-proxy: <failed> of <total> checks failed` to stderr and exits 1. A
-  scope that the config in force does not define is a refusal that lists the defined scopes.
-
-A listing prints a header row, then one tab-separated row per entry, with `-` for a time that is not
-set.
-
-The command exits 0 on success. A refusal prints one line per failure to stderr, each beginning
-`agent-proxy:`, and exits 1. A usage error exits 2. A warning is not a failure: `manifest check`,
-`reload`, `token mint`, and `serve` print each warning to stderr as a line beginning
-`agent-proxy: warning:`, and go on as they would with no warning. A command that only warns exits 0.
-`docs/design.md` gives who runs the command and how under "Surface", "Tokens", "Credentials",
-"Audit", "Config", and "Plugins and actions".

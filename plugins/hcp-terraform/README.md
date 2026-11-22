@@ -143,7 +143,8 @@ for every action, as `examples/instance.yaml` does. A grant of the first three m
 ## A grant
 
 A config pins the plugin's image as `hcp-terraform`, and grants each action under
-`hcp-terraform.<action>`. In the form `docs/design.md` gives under "Config":
+`hcp-terraform.<action>`. In the form the core's reference gives under
+[The config file](../../docs/reference.md#the-config-file):
 
 ```yaml
 scopes:

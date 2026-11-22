@@ -39,10 +39,11 @@ before a cage starts.
 
 ### What an action returns
 
-A command action returns `{exit_code, stdout, stderr}`, as `docs/design.md` gives under "Results". A
-script action prints the same three members, and its `output_schema` states them. The script exits 0
-whenever it runs to its end, and git's exit code goes in `exit_code`. `diff` with `output` is the
-one exception to both rules: "`diff`" gives its result.
+A command action returns `{exit_code, stdout, stderr}`, as the core's reference gives under
+[Results and refusals](../../docs/reference.md#results-and-refusals). A script action prints the
+same three members, and its `output_schema` states them. The script exits 0 whenever it runs to its
+end, and git's exit code goes in `exit_code`. `diff` with `output` is the one exception to both
+rules: "`diff`" gives its result.
 
 When a git step inside a script fails for a reason other than the outcome that step checks, the
 script stops and returns that step's git result. For example, `push` returns git's own result when
@@ -82,8 +83,8 @@ The credential helper refuses in its own way: it writes the refusal to stderr an
 
 A large `diff` is the usual call whose output passes the core's cap. Give it `output`, and the diff
 goes to a file while the result holds only the file's path and a stat. `docs/writing-a-plugin.md`
-gives what happens to a script whose output passes the cap, and `docs/design.md` gives the cap and
-the result forms under "Results".
+gives what happens to a script whose output passes the cap, and the core's reference gives the cap
+and the result forms under [Results and refusals](../../docs/reference.md#results-and-refusals).
 
 ### `diff`
 
@@ -442,7 +443,7 @@ gives, and the files in the repository, with no further git run.
 ## A grant
 
 A config pins the plugin's image as `git`, and grants each action under `git.<action>`. In the form
-`docs/design.md` gives under "Config":
+the core's reference gives under [The config file](../../docs/reference.md#the-config-file):
 
 ```yaml
 scopes:

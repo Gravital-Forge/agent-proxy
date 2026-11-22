@@ -77,15 +77,14 @@ These terms carry one meaning each through the plan, the code, and the docs.
 
 The instance is an MCP server over Streamable HTTP, published on a loopback port unique to the
 instance. The agent's MCP client sends the token as `Authorization: Bearer <token>`. `tools/list`
-returns the actions the token's scope grants, and the self-check tool. MCP tool names are
-`<plugin>_<action>`.
+returns the actions the token's scope grants, and the self-check tool. The reference gives each
+tool's name under [A scope's grants](reference.md#a-scopes-grants).
 
-The self-check is one check with two entrances: the MCP tool `agent-proxy_self_check`, and the
-operator command `agent-proxy check [--scope NAME]` through `docker exec`, which runs it for every
-scope or for one.
+The self-check is one check with two entrances: the MCP tool `agent-proxy_self_check`, which reports
+on the calling token's scope alone, and the operator command `check`. The reference gives the report
+under [The self-check report](reference.md#the-self-check-report), and the command under
+[The operator command](reference.md#the-operator-command).
 
-- The tool takes no input. Every token that verifies lists it, with no grant, and it reports on that
-  token's scope alone.
 - It checks the local wiring, the things that can be wrong while the instance looks healthy:
   - each credential a grant names is stored, reported by name, never by value;
   - each root a grant names exists, and the instance opens it;
@@ -96,9 +95,6 @@ scope or for one.
 - It leaves out what the config load already refuses, such as an image that does not load, a grant
   that names an undeclared action, or a root outside the agent tree. It never tests a credential
   against its service.
-- The result is one object: an overall `ok`, and one entry per check that names what it checked,
-  whether it passed, and a detail. A failed check is a normal result, not a refusal. The command
-  prints one row per entry, and exits 1 when any check fails.
 
 ## Tokens
 
@@ -106,11 +102,8 @@ scope or for one.
   recognize a leaked token.
 - The instance stores the SHA-256 of each token with its name, scope, created time, last-used time,
   and optional expiry. Verification is a constant-time comparison of hashes.
-- Tokens never expire unless minted with `--expires`.
-- Only the admin manages tokens, through `docker exec` into the instance container:
-  `token mint --name <name> --scope <scope> [--expires <duration>]` prints the token once and
-  refuses a name already in use; `token list` shows metadata and never the token;
-  `token revoke <name>` takes effect on the next call. Rotation is revoke then mint.
+- Only the operator manages tokens, with the `token` verbs that the reference gives under
+  [The operator command](reference.md#the-operator-command).
 - The admin delivers the token by writing it into the agent's MCP client config as the
   `Authorization` header.
 - Editing a scope changes the reach of every token naming it, from the next reload.
@@ -124,59 +117,20 @@ scope or for one.
   that fails validation is refused and the running config stays. Calls already running finish under
   the config they started with. Reload starts every egress proxy the new config needs before the
   swap, and removes a proxy no grant names once no cage runs on its network.
-- A grant may set `env`, a map of plain environment variables that every cage under the grant
-  receives. Its values are settings, not secrets: they live in the config file, and the credential
-  store holds none of them.
-- Validation checks: every grant names an action a pinned plugin's manifest declares; every grant
-  states `roots`, `domains`, and `credentials` explicitly, empty values included — an omitted field
-  is an error; every root lies inside the instance's agent tree; every plugin image is present,
-  pulled at reload by digest; every `env` name begins with an upper-case letter or `_`, holds only
-  upper-case letters, digits, and `_`, and is neither `HTTPS_PROXY`, `AGENT_PROXY_ROOTS`, nor an env
-  name that a credential of the same grant takes; no `env` value holds a NUL; every action declaring
-  pass-through `args` is reported as a warning; every credential a grant names that the credential
-  store lacks is reported as a warning at start, at `reload`, and at `token mint`, so the instance
-  starts and tokens mint before the operator stores it.
-- The config refuses a plugin named `agent-proxy`, so no `<plugin>_<action>` tool name can take the
-  self-check tool's name.
-- There are no scope-level defaults and no layering between files. Repetition across grants and
-  across agents is accepted.
-
-A grant, for illustration:
-
-```yaml
-scopes:
-  dev-agent:
-    grants:
-      git.status:
-        roots: [{path: /home/agent-01/Projects/example-repo, mode: rw}]
-        domains: []
-        credentials: {}
-      github.pr_create:
-        roots: []
-        domains: [api.github.com]
-        credentials: {github-token: {env: GH_TOKEN}}
-        timeout: 120s
-```
+- The reference gives every field of the file and every rule its validation checks, under
+  [The config file](reference.md#the-config-file).
 
 ## Credentials
 
-- Intake is admin-only: `credential set <name>` reads the value from stdin, so it never appears in
-  process arguments or shell history. `credential list` shows names and set-times;
-  `credential rm <name>` deletes.
+- Only the operator manages credentials, with the `credential` verbs that the reference gives under
+  [The operator command](reference.md#the-operator-command).
 - A credential is an opaque named blob stored as a file in the instance's credential volume,
   readable only by the instance's service user.
-- A grant maps each credential it uses to an environment variable (`{env: NAME}`, the default form)
-  or to a file path inside the cage (`{file: /run/credentials/<name>}`) for tools that only read
-  files. The cage receives only its grant's credentials.
+- A grant gives each credential it uses to the cage as an environment variable or as a file, in the
+  forms the reference gives under [The config file](reference.md#a-scopes-grants).
 - A call under a grant whose credential is not set is refused before a cage starts, and audited like
-  any other refusal. The refusal names the credential and the command the operator stores it with:
-
-  ```text
-  agent-proxy refused: credential 'github-token' is not set; the operator stores it with 'agent-proxy credential set github-token'
-  ```
-
-  The grant's tools stay listed for the token. A credential that the operator stores with
-  `credential set` takes effect on the next call, with no reload.
+  any other refusal. The grant's tools stay listed for the token. The reference gives the refusal
+  under [Refusals](reference.md#refusals).
 - At rest, credentials are plain files protected by uid.
 
 ## Plugins and actions
@@ -252,25 +206,13 @@ inside the proxy process.
 - **Timeout:** the manifest's default, overridable per grant. On timeout the cage is killed and
   removed.
 
-## Results
-
-- A `command` action returns `{exit_code, stdout, stderr}`; a non-zero exit is a normal result.
-- A `script` action returns the JSON it printed as the tool's structured content.
-- MCP errors are reserved for the proxy's own refusals — bad token, ungranted action, input failing
-  the schema, timeout, cage failing to start — each with a message saying the proxy refused.
-- When stdout or stderr exceeds the cap (256 KiB each), the proxy writes that full stream to a file
-  in the instance's overflow directory and returns only the pointer and size in its place, for
-  example `{truncated: true, stdout_file: "<dir>/<call-id>.stdout", stdout_bytes: 4194304}` — no
-  head of the stream. The overflow directory is a host path in the agent's tree set in the instance
-  config; the proxy writes it, cages never mount it. Files older than 7 days are deleted at startup
-  and daily.
-
 ## Audit
 
 One JSON line per call in the instance's volume: timestamp, call ID, token name, scope, action, full
 input arguments, exit code, duration, output sizes, truncation, and the refusal reason for refused
 calls. Credential values and output contents are never recorded. The log rotates by size. Only the
-admin reads it, with `agent-proxy audit tail` through `docker exec`.
+operator reads it, with the `audit tail` verb that the reference gives under
+[The operator command](reference.md#the-operator-command).
 
 Each self-check writes one line, with `agent-proxy_self_check` as its action, and with no exit code
 and no output sizes. The line of a tool call names the call's token. The command writes one line for

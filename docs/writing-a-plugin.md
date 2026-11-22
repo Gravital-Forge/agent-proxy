@@ -41,7 +41,8 @@ converting text to an integer.
 The manifest has one member, `actions`. It is an object with at least one member. Each key is an
 action name, which matches `ACTION_NAME_PATTERN` in `config.py`. Each value is an action. An
 operator grants an action to a scope under the key `<plugin>.<action>`, where `<plugin>` is the name
-the config pins the image under. `docs/design.md` gives the config under "Config".
+the config pins the image under. The reference gives the config under
+[The config file](reference.md#the-config-file).
 
 ### Every action
 
@@ -52,8 +53,9 @@ Every action states each of these members. None has a default.
   meta-schema check.
 - `credentials` is an array, possibly empty, of the credentials the action expects. Each item is
   `{"env": NAME}`, with `NAME` matching `ENV_NAME_PATTERN` in `config.py`, or `{"file": PATH}`, with
-  `PATH` an absolute path beneath `/run/credentials/` with no `..` segment. `docs/design.md` gives
-  how a grant supplies a credential in these forms under "Credentials".
+  `PATH` an absolute path beneath `/run/credentials/` with no `..` segment. The reference gives how
+  a grant supplies a credential in these forms under
+  [A scope's grants](reference.md#a-scopes-grants).
 - `timeout` is the action's default timeout, a duration string matching `DURATION_PATTERN` in
   `config.py`, such as `30s` or `5m`, whose count fits a Python `timedelta`. `docs/design.md` gives
   how a grant overrides it under "The cage".
@@ -141,8 +143,8 @@ A script succeeds when it exits 0 and prints on stdout one JSON object that its 
 validates. That stdout must decode as the manifest must, by the rules under "The manifest". The call
 then returns that object. Otherwise the script has failed. The call then returns a normal result
 that holds what a command action returns: the exit code, stdout, and stderr. A stdout over the
-output cap goes to an overflow file, so a script whose output passes the cap fails. `docs/design.md`
-gives the cap and the result forms under "Results".
+output cap goes to an overflow file, so a script whose output passes the cap fails. The reference
+gives the cap and the result forms under [Results and refusals](reference.md#results-and-refusals).
 
 The cage's network follows the grant's `domains`. `docs/design.md` gives the egress model under "The
 cage", and `docs/architecture.md` gives the network and its proxy under `egress.py`.
@@ -162,9 +164,9 @@ Build the image, then check it from `core/agent-proxy/`:
 uv run agent-proxy manifest check IMAGE
 ```
 
-`IMAGE` is any local image reference; build or pull it first. `docs/architecture.md` gives how the
-command reaches Docker under "Where state lives", and what it prints and how it exits under "The
-admin command".
+`IMAGE` is any local image reference; build or pull it first. The reference gives how the command
+reaches Docker, what it prints, and how it exits under
+[The operator command](reference.md#the-operator-command).
 
 ## A working example
 
