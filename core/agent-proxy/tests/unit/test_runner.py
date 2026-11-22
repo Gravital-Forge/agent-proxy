@@ -51,6 +51,7 @@ from agent_proxy.runner import (
     validate_input,
 )
 
+_PINNED_VERIFIER = "ghcr.io/example/agent-proxy-verifier@sha256:" + "a" * 64
 _MANIFEST = parse_manifest(
     (Path(__file__).parents[1] / "test-plugin" / "manifest.json").read_bytes()
 )
@@ -635,7 +636,8 @@ def test_the_cage_constants_are_the_spec_s() -> None:
     assert TMPFS_OPTIONS == "rw,size=64m"
     assert CONTAINER_USER == "0:0"
     assert LOG_DRIVER == "json-file"
-    assert VERIFIER_IMAGE == "agent-proxy-verifier:1"
+    assert runner.SOURCE_VERIFIER_IMAGE == "agent-proxy-verifier:1"
+    assert runner.VERIFIER_IMAGE_VARIABLE == "AGENT_PROXY_VERIFIER_IMAGE"
     assert VERIFIER_MOUNT == "/.agent-proxy"
     assert VERIFIER_PATH == "/.agent-proxy/verify"
     assert VERIFIER_REFUSED_EXIT == 125
@@ -1170,6 +1172,60 @@ def test_run_mounts_the_verifier_image_named_when_the_cage_is_created(
 
     mounts = client.containers.create.call_args.kwargs["mounts"]
     assert mounts[-1]["Source"] == "apx-verifier:it"
+
+
+@pytest.mark.parametrize("environ", [{}, {"AGENT_PROXY_VERIFIER_IMAGE": ""}])
+def test_an_unset_or_empty_verifier_variable_gives_the_source_build_s_tag(
+    environ: Mapping[str, str],
+) -> None:
+    """With no reference in the variable, the verifier is the source build's tag."""
+    assert runner.verifier_image(environ) == "agent-proxy-verifier:1"
+
+
+def test_the_verifier_variable_names_the_verifier_image() -> None:
+    """A reference in AGENT_PROXY_VERIFIER_IMAGE is the verifier image."""
+    environ = {"AGENT_PROXY_VERIFIER_IMAGE": _PINNED_VERIFIER}
+
+    assert runner.verifier_image(environ) == _PINNED_VERIFIER
+
+
+def test_a_pinned_verifier_on_the_daemon_is_not_pulled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A digest reference the daemon holds is looked up and left alone."""
+    monkeypatch.setattr(runner, "VERIFIER_IMAGE", _PINNED_VERIFIER)
+    client = MagicMock()
+
+    runner.ensure_verifier(client)
+
+    client.images.get.assert_called_once_with(_PINNED_VERIFIER)
+    client.images.pull.assert_not_called()
+
+
+def test_a_pinned_verifier_absent_from_the_daemon_is_pulled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A digest reference the daemon lacks is pulled by that reference."""
+    monkeypatch.setattr(runner, "VERIFIER_IMAGE", _PINNED_VERIFIER)
+    client = MagicMock()
+    client.images.get.side_effect = docker.errors.ImageNotFound("no such image")
+
+    runner.ensure_verifier(client)
+
+    client.images.pull.assert_called_once_with(_PINNED_VERIFIER)
+
+
+def test_a_verifier_named_by_tag_is_neither_looked_up_nor_pulled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A tag reference must already be on the daemon; nothing touches it at start."""
+    monkeypatch.setattr(runner, "VERIFIER_IMAGE", "agent-proxy-verifier:1")
+    client = MagicMock()
+
+    runner.ensure_verifier(client)
+
+    client.images.get.assert_not_called()
+    client.images.pull.assert_not_called()
 
 
 def test_run_holds_each_root_open_until_the_cage_is_removed(

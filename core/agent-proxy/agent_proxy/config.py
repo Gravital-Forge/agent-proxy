@@ -30,6 +30,7 @@ GRANT_KEY_PATTERN = (
 )
 DURATION_PATTERN = r"^[1-9][0-9]*[smhd]$"
 ENV_NAME_PATTERN = r"^[A-Z_][A-Z0-9_]*$"
+PINNED_IMAGE_PATTERN = r"^[^@\s]+@sha256:[0-9a-f]{64}$"
 DOMAIN_PATTERN = (
     r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
 )
@@ -170,9 +171,7 @@ _STRICT = ConfigDict(extra="forbid", frozen=True)
 Name = Annotated[str, StringConstraints(pattern=NAME_PATTERN)]
 PluginName = Annotated[str, StringConstraints(pattern=PLUGIN_NAME_PATTERN)]
 GrantKey = Annotated[str, StringConstraints(pattern=GRANT_KEY_PATTERN)]
-PinnedImage = Annotated[
-    str, StringConstraints(pattern=r"^[^@\s]+@sha256:[0-9a-f]{64}$")
-]
+PinnedImage = Annotated[str, StringConstraints(pattern=PINNED_IMAGE_PATTERN)]
 Domain = Annotated[str, StringConstraints(max_length=253, pattern=DOMAIN_PATTERN)]
 EnvName = Annotated[str, StringConstraints(pattern=ENV_NAME_PATTERN)]
 

@@ -25,14 +25,17 @@ The core is the uv package in `core/agent-proxy/`, placed as `docs/design.md` se
   runner. `test_transport.py` there starts an `Instance` from `mcp.py`, serves its app on a loopback
   port, and drives the MCP surface over HTTP with a FastMCP client. For the instance tests,
   `conftest.py` builds the instance image from `core/docker/Dockerfile`, and its test variant from
-  `core/agent-proxy/tests/instance-image/`, whose `.pth` startup hook sets the test label and points
-  `runner.VERIFIER_IMAGE` at the verifier image the tests build. It also pushes the git plugin, and
-  the github plugin with its stub gh, to the registry. `instance_harness.py` there holds the helpers
-  the instance tests share: running the start script, waiting for the MCP surface, `docker exec`,
-  and cleanup. `test_instance_image.py` checks the image and the run line that the start script
-  gives it. `test_instance_serves.py` starts an instance on the agent's own daemon and drives it
-  through MCP and `docker exec`. It also drives the self-check through both entrances, the tool and
-  the command, and makes the credential, root, egress, and plugin checks fail on purpose.
+  `core/agent-proxy/tests/instance-image/`. That variant's `.pth` startup hook sets the test label,
+  and its Dockerfile sets `AGENT_PROXY_VERIFIER_IMAGE` to the verifier image the tests build. It
+  also pushes the git plugin, and the github plugin with its stub gh, to the registry.
+  `instance_harness.py` there holds the helpers the instance tests share: running the start script,
+  waiting for the MCP surface, `docker exec`, and cleanup. `test_instance_image.py` checks the image
+  and the run line that the start script gives it. `test_instance_serves.py` starts an instance on
+  the agent's own daemon and drives it through MCP and `docker exec`. It also drives the self-check
+  through both entrances, the tool and the command, and makes the credential, root, egress, and
+  plugin checks fail on purpose. Its `test_an_instance_pulls_its_verifier_by_digest_at_start` starts
+  an instance whose verifier is referenced by digest and absent from the daemon, and checks that a
+  call succeeds after the instance pulls the verifier.
 - `core/agent-proxy/tests/test-plugin/` holds the source of the test plugin image. The test plugin
   holds an action for each thing the tests reach, and its `manifest.json` declares them.
 
@@ -52,8 +55,10 @@ This module holds the rules the other modules share, and the instance config tho
 
 The shared rules are the name patterns and the checks that apply them. `NAME_PATTERN` governs scope,
 token, and credential names, and `check_name` refuses a name that does not match it with
-`InvalidNameError`. `PLUGIN_NAME_PATTERN` governs plugin names. `parse_duration` turns a duration
-such as `120s` or `7d` into a `timedelta`, and refuses anything else with `DurationError`.
+`InvalidNameError`. `PLUGIN_NAME_PATTERN` governs plugin names. `PINNED_IMAGE_PATTERN` is the form
+of an image reference pinned by digest: each plugin's image in the config must match it, and
+`runner.py` matches the verifier's reference against it. `parse_duration` turns a duration such as
+`120s` or `7d` into a `timedelta`, and refuses anything else with `DurationError`.
 
 `load_config` reads one YAML file and returns an `InstanceConfig`: the agent tree, the overflow
 directory, the cap on running cages, the plugins pinned by image digest, and the scopes with their
@@ -331,6 +336,14 @@ no bound until fewer cages run than the limit it is given. Each call brings its 
 that started under different configs still share one count. `CageRunner` takes the Docker client,
 the credential store, and the limiter; the module opens none of them.
 
+`VERIFIER_IMAGE` is the reference of the verifier image that every cage mounts. The module sets it
+when it loads, with `verifier_image(os.environ)`: the value of `AGENT_PROXY_VERIFIER_IMAGE`, or
+`SOURCE_VERIFIER_IMAGE`, which is `agent-proxy-verifier:1`, when the variable is unset or empty.
+`ensure_verifier` takes the Docker client and makes a verifier pinned by digest present: when
+`VERIFIER_IMAGE` matches `PINNED_IMAGE_PATTERN`, it calls `ensure_image` from `plugins.py`, which
+pulls the image when the daemon does not hold it and raises `PluginImageError` on a Docker failure.
+It neither looks up nor pulls a tag reference.
+
 ### `reload.py`
 
 This module holds the config in force and replaces it on request.
@@ -479,19 +492,22 @@ the config file, reads the credential names afresh, and loads each plugin's mani
 Docker client.
 
 `Instance.start` opens the token store, the credential store, and the audit writer under the state
-directory. It then starts the live config with `EgressProxies` over `egress/`, the control server on
-`control.sock`, and the overflow sweeper, in that order. Before the control server, it builds the
-one `CageRunner` and the one `CallGateway`, with a `SelfCheck` over that runner, and the control
-server serves the gateway's `check_scopes`. A step that fails closes what the steps before it
-started, except that the egress proxies that `LiveConfig.start` made ready stay, and then its error
-propagates. The calls of one instance and its checks share one `CageLimiter`. `Instance.app` is the
-app that `build_app` returns. `Instance.warnings` holds the warnings of the snapshot that the live
-config started with. `Instance.close` closes the control socket, stops the sweeper, and closes the
-audit writer. The egress proxies stay, and the next `LiveConfig.start` keeps or prunes them.
+directory. It then makes the verifier present with `ensure_verifier` from `runner.py`, and starts
+the live config with `EgressProxies` over `egress/`, the control server on `control.sock`, and the
+overflow sweeper, in that order. A verifier that cannot be pulled raises `PluginImageError`, and
+nothing after it starts. Before the control server, it builds the one `CageRunner` and the one
+`CallGateway`, with a `SelfCheck` over that runner, and the control server serves the gateway's
+`check_scopes`. A step that fails closes what the steps before it started, except that the egress
+proxies that `LiveConfig.start` made ready stay, and then its error propagates. The calls of one
+instance and its checks share one `CageLimiter`. `Instance.app` is the app that `build_app` returns.
+`Instance.warnings` holds the warnings of the snapshot that the live config started with.
+`Instance.close` closes the control socket, stops the sweeper, and closes the audit writer. The
+egress proxies stay, and the next `LiveConfig.start` keeps or prunes them.
 
 ### `cli.py`
 
-This module is the admin command, and it is the one module that reads the environment. Outside
+This module is the admin command. It reads the environment, and the one other module that does is
+`runner.py`, which reads only `AGENT_PROXY_VERIFIER_IMAGE`, as `runner.py` above gives. Outside
 `serve`, it opens each store under the state directory itself, and `token mint` hands the credential
 store's names to `unset_warnings`. It opens the Docker client for `manifest check` and `serve`, and
 calls `request_reload` for `reload` and `request_check` for `check`. For
@@ -524,10 +540,15 @@ unchanged. Otherwise it writes one line to stderr and exits 125, the value of
 
 `core/verifier/Dockerfile` builds the verifier with `CGO_ENABLED=0` on a Go image pinned by digest.
 Its build stage runs `gofmt`, `go vet`, and the tests in `core/verifier/main_test.go`, so a failing
-check fails the build. The final stage is `FROM scratch` and holds the one file `/verify`. The image
-must be on the instance's daemon under the reference `VERIFIER_IMAGE` before the first call, because
-an image mount never pulls; a missing image fails the create with `CageStartError`. The cage sees
-that one file, read-only, at `VERIFIER_PATH`.
+check fails the build. The final stage is `FROM scratch` and holds the one file `/verify`. The cage
+sees that one file, read-only, at `VERIFIER_PATH`.
+
+The cage mounts the image under the reference `VERIFIER_IMAGE`, which comes from the instance
+image's environment, as `runner.py` above gives. An image mount never pulls, so the image must be on
+the instance's daemon before the first call; a missing image fails the create with `CageStartError`.
+A reference pinned by digest, as a published instance image carries, is pulled at the instance's
+start by `ensure_verifier` when the daemon lacks it. A tag reference, such as the source build's
+`agent-proxy-verifier:1`, must already be on the daemon.
 
 ## The git plugin
 
@@ -596,8 +617,9 @@ its proxy.
 The instance image is built by `core/docker/Dockerfile` from `core/agent-proxy/`. Its build stage
 installs the package with uv from the lockfile, and its final stage holds only the environment that
 stage made. The image's process is `agent-proxy serve` on container port 8000, on all interfaces.
-The image sets `DOCKER_HOST` to the socket path the run line mounts, and `AGENT_PROXY_CONFIG` to
-`/etc/agent-proxy/config.yaml`.
+The image sets `DOCKER_HOST` to the socket path the run line mounts, `AGENT_PROXY_CONFIG` to
+`/etc/agent-proxy/config.yaml`, and `AGENT_PROXY_VERIFIER_IMAGE` to the build argument
+`VERIFIER_IMAGE`, which defaults to `agent-proxy-verifier:1`.
 
 `serve --host HOST --port PORT` starts an `Instance` from `mcp.py` and serves its MCP surface at
 `/mcp` on that address until SIGINT or SIGTERM, then closes the instance and exits 0. `PORT` is an
@@ -625,8 +647,50 @@ that is not an absolute path equal to its realpath. When a container of that nam
 starts it as it was created, or leaves it running.
 
 `core/docker/provision-instance.sh` sets up everything the instance needs on the host and starts it,
-and `core/docker/teardown-instance.sh` removes it. `docs/runbooks/per-agent-instance.md` explains
-each of their steps.
+and `core/docker/teardown-instance.sh` removes it. Provisioning builds the verifier and instance
+images from the checkout. With `--release VERSION`, it pulls the published instance image of that
+release in their place, and tags it `agent-proxy:1`. Both scripts take `--tree PATH`, the agent's
+tree, which defaults to `<home>/Projects` and must lie inside the agent's home.
+`docs/runbooks/per-agent-instance.md` explains each of their steps.
+
+## Published images
+
+`core/docker/build-images.sh <version> <registry> <source-url>` builds the images and pushes each
+one to the registry, tagged with the version, which is `<major>.<minor>.<patch>`. It finds the
+repository from its own path, so it runs from any working directory. It builds in this order:
+
+1. `agent-proxy-verifier` from `core/verifier/`.
+2. `agent-proxy`, the instance, from `core/agent-proxy/` with `core/docker/Dockerfile`. The build
+   argument `VERIFIER_IMAGE` takes the verifier's digest reference.
+3. `agent-proxy-plugin-<plugin>` from each directory under `plugins/` that holds a `Dockerfile`, in
+   name order.
+
+Every build is for `linux/amd64` with no provenance attestation, so each pushed digest names one
+image manifest. Every image carries the label `org.opencontainers.image.source`, set to the source
+URL, and `org.opencontainers.image.version`, set to the version. After each push, the script prints
+the image's digest reference, `<registry>/<name>@sha256:<digest>`, as one line on stdout. The build
+and push output goes to stderr, so stdout holds only the image references.
+
+`.github/workflows/release.yml` runs when the operator publishes a GitHub release. Its one job,
+`images`, refuses a release marked as a pre-release, and a tag that is not
+`v<major>.<minor>.<patch>`, before it checks out, so neither publishes an image. It logs in to GHCR
+with the job's token, and runs `build-images.sh` with the tag's version without the `v`, the
+registry `ghcr.io/gravital-forge`, and the repository's URL. It then writes each image's reference
+into the release notes under a `## Images` heading, one bullet each. On a re-run, it replaces that
+heading and everything after it. The workflow holds `contents: read`; the job holds
+`contents: write`, to edit the release notes, and `packages: write`, to push. Event data reaches
+each script through the step's environment, never through the script's text.
+
+The `images` job in `.github/workflows/ci.yml` runs `build-images.sh` with the version `0.0.0` on
+each pull request and each push to `main`. It pushes to a `registry:3` service container that lives
+only for the job, and no pull-request job logs in to a registry. The job then checks that the
+instance image's `AGENT_PROXY_VERIFIER_IMAGE` equals the first reference the script printed, the
+verifier's.
+
+Every action in the workflows is pinned by commit SHA, with its version in a trailing comment.
+`.github/dependabot.yml` asks for weekly updates of those actions, of the base images that the
+Dockerfiles pin by tag and digest, and of the uv lockfiles. `docs/design.md` gives the decisions
+behind the published images under "Deployment and isolation".
 
 ## The admin command
 

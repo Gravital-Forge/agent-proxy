@@ -31,6 +31,11 @@ PROBE_IMAGE_TAG = "apx-egress-probe:it"
 VERIFIER_DIR = Path(__file__).parents[3] / "verifier"
 VERIFIER_BUILD_TAG = "apx-verifier-build:it"
 VERIFIER_IMAGE_TAG = "apx-verifier:it"
+PINNED_VERIFIER_NAME = "apx-pinned-verifier"
+# As with the runner image, the extra label keeps this build's image ID apart
+# from the session verifier's, which the pinned_verifier fixture would otherwise
+# force-remove with its own.
+PINNED_VERIFIER_LABELS = TEST_LABELS | {"agent-proxy.test.fixture": "pinned-verifier"}
 INSTANCE_CONTEXT = Path(__file__).parents[2]
 INSTANCE_DOCKERFILE = Path(__file__).parents[3] / "docker" / "Dockerfile"
 INSTANCE_BUILD_TAG = "apx-instance-build:it"
@@ -255,6 +260,29 @@ def pinned_plugin(docker_client: DockerClient, registry: str) -> Iterator[str]:
         yield reference
     finally:
         # The image is already gone when the test failed before it pulled.
+        with contextlib.suppress(docker.errors.ImageNotFound):
+            docker_client.images.remove(image.id, force=True)
+
+
+@pytest.fixture
+def pinned_verifier(docker_client: DockerClient, registry: str) -> Iterator[str]:
+    """The pinned reference of a verifier image, pushed and absent from the daemon."""
+    repository = f"{registry}/{PINNED_VERIFIER_NAME}"
+    image, _ = docker_client.images.build(
+        path=str(VERIFIER_DIR),
+        tag=f"{repository}:{PLUGIN_TAG}",
+        labels=PINNED_VERIFIER_LABELS,
+        rm=True,
+        forcerm=True,
+    )
+    try:
+        reference = _pinned_reference(docker_client, image, repository)
+        for tag in image.tags:
+            docker_client.images.remove(tag)
+        with pytest.raises(docker.errors.ImageNotFound):
+            docker_client.images.get(reference)
+        yield reference
+    finally:
         with contextlib.suppress(docker.errors.ImageNotFound):
             docker_client.images.remove(image.id, force=True)
 
