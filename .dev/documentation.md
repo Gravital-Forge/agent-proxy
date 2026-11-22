@@ -43,8 +43,7 @@ something to describe creates it.
 - `CHANGELOG.md` holds one entry per release.
 - `LICENSE` is the MIT licence.
 - The third-party notice covers what the published images ship that the MIT licence does not cover.
-- `docs/runbooks/per-agent-instance.md` tells the operator how to provision, start, and tear down
-  one agent's instance, and how to run the deployment acceptance checks.
+- `docs/runbooks/per-agent-instance.md` holds the deployment acceptance checks.
 
 Everything else resolves to the workspace root: the root `documentation` topic for retrospective
 reports, the `implementation` skill for a work item's working documents, the `task-management` topic

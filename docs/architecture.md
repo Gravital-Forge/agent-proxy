@@ -342,8 +342,8 @@ builds the verifier and instance images from the checkout. With `--release VERSI
 published instance image of that version and tags it `agent-proxy:1`, so every later step and
 teardown run unchanged, and the instance pulls its verifier at start. Both scripts take
 `--tree PATH`, the agent's tree, which defaults to `<home>/Projects`. The positional form,
-`<agent> <port> <config-file>`, works with no option. The
-[runbook](runbooks/per-agent-instance.md#provisioning) explains each step.
+`<agent> <port> <config-file>`, works with no option. The deployment guide explains each step under
+[Provisioning](deployment.md#provisioning) and [Teardown](deployment.md#teardown).
 
 ## Published images
 

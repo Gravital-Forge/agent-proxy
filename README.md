@@ -11,8 +11,9 @@ Work lands on `main` through pull requests the operator merges.
   by path.
 - [`docs/reference.md`](docs/reference.md) gives the config file's fields, the operator command, and
   the results and refusals of a call.
-- `docs/runbooks/per-agent-instance.md` tells an admin how to provision, start, and tear down one
-  agent's instance, and how to run the deployment acceptance checks.
+- [`docs/deployment.md`](docs/deployment.md) tells the operator how to provision, start, check, tear
+  down, and upgrade one agent's instance, and why each part of the setup is needed.
+- `docs/runbooks/per-agent-instance.md` holds the deployment acceptance checks.
 - `examples/instance.yaml` is a sample instance config.
 - `docs/writing-a-plugin.md` tells a plugin author what the image holds, and how to write and check
   its manifest.

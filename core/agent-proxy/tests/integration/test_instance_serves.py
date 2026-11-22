@@ -211,7 +211,7 @@ def test_the_instance_serves_both_plugins_on_the_agents_daemon(
 ) -> None:
     """Start with no credential stored, get refused, store them, then call each tool.
 
-    The steps follow the runbook's first start, so their order matters: no
+    The steps follow the deployment guide's first start, so their order matters: no
     reload comes between storing the credentials and the calls that use them.
     """
     tree = _make_tree(tmp_path)

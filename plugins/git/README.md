@@ -291,10 +291,10 @@ git.commit:
 
 A grant can make the plugin sign each commit it creates with an SSH key. The setting has two halves:
 
-- The key is a credential. After the instance starts, the admin stores the private key with
+- The key is a credential. After the instance starts, the operator stores the private key with
   `agent-proxy credential set <name>`, as any other credential, and the grant gives it in the file
-  form, `{file: /run/credentials/<name>}`. `docs/runbooks/per-agent-instance.md` gives the command
-  under "The first start".
+  form, `{file: /run/credentials/<name>}`. The deployment guide gives the command under
+  [The first start](../../docs/deployment.md#the-first-start).
 - `GIT_SIGNING_KEY` in the grant's `env` names that file's path in the cage.
 
 The plugin signs in the SSH format only. The key must have no passphrase, because the cage has no

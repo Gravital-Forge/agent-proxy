@@ -1,274 +1,8 @@
 # Per-agent instance runbook
 
-This runbook takes an admin through one agent's instance: provisioning, the first start, teardown,
-and the deployment acceptance checks. The architecture gives the isolation model under
-[The isolation model](../architecture.md#the-isolation-model), and the instance under
-[The instance](../architecture.md#the-instance). The examples use the agent `agent-01`, whose
-service user is `agentproxy-agent-01`.
-
-Every step runs as root. Where a step names `<uid>`, it means the service user's uid, which
-`id -u agentproxy-agent-01` prints. `<home>` is the agent's home, `<tree>` is the resolved path of
-the agent's tree, and `<service home>` is the service user's home. The agent's tree is the path that
-`--tree` names, or `<home>/Projects` without that option.
-
-## Before you start
-
-The host needs these packages:
-
-- Docker Engine with `docker-ce-rootless-extras`, which gives the service user its rootless daemon.
-- `uidmap`, which gives the rootless daemon its subordinate uid and gid ranges.
-- `dbus-user-session`, which the service user's systemd user manager needs.
-- `acl`, which gives `setfacl` and `getfacl`.
-- systemd, which keeps the service user's daemon running under linger.
-
-Root must be able to read a checkout of this repository. The scripts run from it, and the
-provisioning script builds the verifier and instance images from it. In release mode, the
-provisioning script builds nothing from the checkout. The checkout must then be at the release's
-tag, so that the scripts match the release's images.
-
-Each plugin line in the config names its image by digest, in a registry that the service user's
-daemon can pull from. A release's notes list the published images under `## Images`, each by its
-digest reference, ready for a plugin line. To use a plugin image built from the checkout, push it to
-such a registry.
-
-## The config
-
-Start from `examples/instance.yaml`. The reference gives the rules a config must satisfy under
-[The config file](../reference.md#the-config-file).
-
-- `agent_tree` names `<tree>`, the path that `realpath` prints for the agent's tree, such as
-  `realpath /home/agent-01/Projects`. The runner refuses a root or an overflow directory under a
-  symbolic link, and provisioning refuses any other value.
-- `overflow_dir` names a directory inside the tree, by a path with no symbolic link in it. Root
-  creates and removes that directory, so both scripts refuse any other path.
-- Every root names a directory below the tree, never the tree itself.
-- Every grant that holds `github-token` sets `GITHUB_REPOS` in its `env`, or the plugin refuses each
-  call under that grant. `plugins/git/README.md` gives the list's form under "The repository list".
-- Every grant that holds `hcp-terraform-token` sets `HCP_TERRAFORM_WORKSPACES` in its `env`, or the
-  plugin refuses each call under that grant. `plugins/hcp-terraform/README.md` gives the list's form
-  under "The workspace list".
-- Every grant for an action that creates a commit sets `GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL` in
-  its `env`. `plugins/git/README.md` names those actions and gives the rule under "Commit identity".
-- A grant that signs commits gives the signing key as a file credential, and sets `GIT_SIGNING_KEY`
-  in its `env` to that file's path. Store the key as "The first start" stores each credential.
-  `plugins/git/README.md` gives the setting under "Commit signing".
-
-## Provisioning
-
-Run the script from the checkout:
-
-```sh
-sudo core/docker/provision-instance.sh [--release <version>] [--tree <path>] agent-01 <port> <config-file>
-```
-
-`<port>` is the loopback port the instance serves on, and `<config-file>` is the config to install.
-The config may name credentials that the operator has not stored yet; "The first start" below stores
-them.
-
-The options come before the positional arguments, in any order:
-
-- `--release <version>` selects release mode. The script pulls the instance image of the release
-  `v<version>` and builds no image. `<version>` is `<major>.<minor>.<patch>`, with no `v`. The
-  service user's daemon must be able to pull from `ghcr.io`.
-- `--tree <path>` names the agent's tree. Without it, the tree is `<home>/Projects`.
-
-An unknown option, an option with no value, or a missing positional argument makes the script print
-its usage line and exit 2, before it runs any step.
-
-The script runs the steps below in order, and reports each step as it runs it. Each step leaves its
-object alone when it is already in place, so a second run with the same config changes nothing.
-Every run installs `<config-file>` over the installed config. An instance that is already running
-keeps its config in force until a reload, as the end of "The first start" gives. A step that fails
-stops the script; after the fix, run the script again from the top. To debug a step, run its
-commands by hand.
-
-Three phrases below stand for the way the script reaches the service user and the agent:
-
-- "As the service user" means through
-  `systemd-run --machine=agentproxy-agent-01@.host --user --wait --pipe --quiet <command>`.
-- "On the service user's daemon" means through
-  `DOCKER_HOST=unix:///run/user/<uid>/docker.sock docker <arguments>`.
-- "As the agent" means through `runuser -u agent-01 -- <command>`, run from `/`. The agent can swap
-  any path inside the tree for a symbolic link, so a step that creates or grants in the tree as root
-  could reach a file outside it. Such steps run as the agent instead.
-
-1. `check_arguments` checks that the agent exists, that the service user's name is at most 32
-   characters, that the port is an integer from 1 to 65535, that a given `<version>` is
-   `<major>.<minor>.<patch>`, that the config file is a readable regular file, and that the agent's
-   tree is a directory. It reads the agent's home, the tree as `realpath -- <path>`, where `<path>`
-   is the value of `--tree` or `<home>/Projects`, and the agent's group as `id -gn agent-01`. It
-   stops when the tree's realpath does not lie strictly inside the realpath of the home;
-   [The tree inside the home](../architecture.md#the-tree-inside-the-home) gives why.
-2. `create_service_user` creates the service user with
-   `useradd --create-home --shell /usr/sbin/nologin agentproxy-agent-01`. The service user then
-   needs a line in both `/etc/subuid` and `/etc/subgid`. When either line is missing, the step stops
-   and names the fix: run
-   `usermod --add-subuids FIRST-LAST --add-subgids FIRST-LAST agentproxy-agent-01` with a range no
-   other user holds.
-3. `create_config_root` creates `/etc/agent-proxy` with
-   `install -d -o root -g root -m 0755 /etc/agent-proxy`. The directory must exist before the
-   service user's daemon starts, because that daemon sees only the `/etc` entries present at its
-   start. A daemon started before it needs a restart, which step 5 gives it.
-4. `enable_user_manager` runs `loginctl enable-linger agentproxy-agent-01` and
-   `systemctl start user@<uid>.service`.
-5. `setup_rootless_daemon` installs and starts the rootless daemon, as the service user, with
-   `/usr/bin/dockerd-rootless-setuptool.sh install`. When the daemon is already active and step 3
-   created `/etc/agent-proxy`, the step restarts the daemon, as the service user, with
-   `/usr/bin/systemctl --user restart docker`.
-6. `prepare_images` makes the instance image `agent-proxy:1` present on the service user's daemon.
-   Without `--release`, it builds two images from the checkout:
-   `build --tag agent-proxy-verifier:1 core/verifier`, then
-   `build --tag agent-proxy:1 --file core/docker/Dockerfile core/agent-proxy`. The verifier image is
-   built before the instance starts because an image mount never pulls: without it, no cage starts.
-   With `--release <version>`, the step runs `pull ghcr.io/gravital-forge/agent-proxy:<version>`,
-   then `tag ghcr.io/gravital-forge/agent-proxy:<version> agent-proxy:1`, and builds nothing. That
-   image names its verifier by digest, and the instance pulls the verifier when it starts.
-7. `install_config` creates `/etc/agent-proxy/agent-01` with `install -d -o root -g root -m 0755`
-   when it is missing, and installs the config with
-   `install -o root -g root -m 0644 <config-file> /etc/agent-proxy/agent-01/config.yaml`. It skips
-   the install when `cmp -s` finds the installed file the same.
-8. `read_config_paths` reads `agent_tree` and `overflow_dir` from the installed config, in a
-   throwaway `agent-proxy:1` container on the service user's daemon with no network, a read-only
-   root filesystem, and the config directory mounted read-only. It stops when `agent_tree` is not
-   the tree, or when `overflow_dir` is not inside the tree or is reached through a symbolic link.
-9. `create_state_dir` creates the instance's state directory with
-   `install -d -o agentproxy-agent-01 -g agentproxy-agent-01 -m 0700 <service home>/state`.
-10. `create_overflow_dir` creates the overflow directory, as the agent, with
-    `install -d -m 2770 <overflow_dir>`, so the agent and its group own it. It stops when that path
-    is a symbolic link.
-11. `apply_tree_permissions` gives the tree the group, setgid, and ACL entries that
-    [The agent's tree](../architecture.md#the-agents-tree) sets. It runs each command as the agent,
-    so it changes only the entries the agent owns:
-
-    ```sh
-    find <tree> <closed> -o -user agent-01 ! -group <agent group> -exec chgrp -h <agent group> {} +
-    find <tree> <closed> -o -type d -user agent-01 ! -perm -2000 -exec chmod g+s {} +
-    find <tree> <closed> -o -type d -user agent-01 -exec setfacl -P -m u:agentproxy-agent-01:rwX,d:u:agentproxy-agent-01:rwx,d:u:agent-01:rwx {} +
-    find <tree> <closed> -o ! -type d ! -type l -user agent-01 -exec setfacl -P -m u:agentproxy-agent-01:rwX {} +
-    ```
-
-    Here `<closed>` is `-type d \( ! -readable -o ! -executable \) -prune`, so the walk does not
-    enter a directory the agent cannot open. The step skips each entry the agent does not own, and
-    each directory it cannot open with all that lies below it. Its line gives the number of entries
-    it skipped, and counts a directory it cannot open as one. An entry the service user makes
-    already has the group, setgid, and default ACL entries from the setgid directory it is made in.
-    Fix any other skipped entry by hand, as its owner.
-12. `grant_home_traverse` gives the service user traverse on the agent's home with
-    `setfacl -m u:agentproxy-agent-01:x <home>`. After it, `ls -l` shows the home as `drwx--x---+`,
-    because the group bits show the ACL mask. The home's group still has no access:
-    `getfacl -p <home>` shows `group::---`.
-13. `grant_tree_traverse` gives the service user traverse, as the agent, on each directory strictly
-    between the home and the tree, with `setfacl -m u:agentproxy-agent-01:x <directory>`. Its line
-    gives the number of directories. With the tree `<home>/Projects`, there are none.
-14. `start_instance` starts the instance container, named `agent-proxy`, on the service user's
-    daemon, with `DOCKER_HOST` set as above:
-
-    ```sh
-    core/docker/start-instance.sh agent-proxy:1 agent-proxy <port> /etc/agent-proxy/agent-01 <service home>/state <tree>
-    ```
-
-    When the container already exists, the start script starts it as it was created, so a changed
-    port takes effect only after you remove the container. The port this step prints is the one you
-    asked for, not always the one bound; `docker port agent-proxy` on the service user's daemon
-    shows the bound one.
-15. `print_next_steps` prints the commands that mint a token and store a credential, and the path of
-    this runbook.
-
-## The first start
-
-Provision with the full config. The instance starts even though its credential store is still empty.
-It logs one warning for each credential that a grant names and the store lacks, and each warning
-gives the command that the operator stores the credential with. `docker logs agent-proxy` shows the
-warnings. Then:
-
-1. Store each credential the config names. The command reads the value from stdin:
-
-   ```sh
-   docker exec -i agent-proxy agent-proxy credential set <name>
-   ```
-
-   Each credential takes effect on the next call, with no reload. Until the operator stores it, a
-   call under a grant that names it is refused, and the refusal gives the warning's text.
-2. Mint a token for the agent with
-   `docker exec agent-proxy agent-proxy token mint --name <name> --scope <scope>`. The token prints
-   once; give it to the agent's MCP client. The mint also prints a warning for each credential that
-   is still not stored, and mints the token all the same.
-3. Run the self-check on every scope with `docker exec agent-proxy agent-proxy check`. Add
-   `--scope <scope>` to check one scope. It prints one row per check: the scope, the kind of check,
-   what it checked, `pass` or `fail`, and a detail. A `fail` row's detail says what is wrong, such
-   as a credential that is not stored, a root that the instance cannot open, or an egress proxy that
-   does not run. Fix each one, then run the check again. The command exits 1 until every row passes.
-   The agent can run the same check on its own scope through the tool `agent-proxy_self_check`.
-   [The self-check](../architecture.md#the-self-check) gives what the self-check covers.
-
-To put a changed config in force later, install it over the installed config:
-
-```sh
-install -o root -g root -m 0644 <config-file> /etc/agent-proxy/agent-01/config.yaml
-```
-
-Then run `docker exec agent-proxy agent-proxy reload`. When it refuses the config, it prints each
-error, and the running config stays. When it accepts the config, it prints `reloaded` and each
-warning, such as one for each credential that is still not stored.
-
-Every `docker` command here runs as root with `DOCKER_HOST=unix:///run/user/<uid>/docker.sock`. The
-reference gives every verb under [The operator command](../reference.md#the-operator-command).
-
-## Teardown
-
-Run the script from the checkout:
-
-```sh
-sudo core/docker/teardown-instance.sh [--tree <path>] agent-01
-```
-
-`--tree <path>` names the agent's tree, as in provisioning. Give it the tree that provisioning took.
-The option comes before the agent, and the script refuses a bad command line as provisioning does.
-
-The script runs the steps below in order. A step whose object is already gone says so and skips its
-work, so teardown also cleans up after a provisioning that stopped part way.
-
-1. `check_agent` reads the agent's home and the tree, and the service user's uid and home when the
-   service user exists. When the tree exists, the step stops if the tree's realpath does not lie
-   strictly inside the realpath of the home, as provisioning's step 1 does. It stops before any step
-   removes an ACL entry.
-2. `read_overflow_dir` reads `overflow_dir` from the installed config, as provisioning's
-   `read_config_paths` does. It skips the read when the service user, its daemon, the
-   `agent-proxy:1` image, the config, or the tree is gone. It stops on an `overflow_dir` that is not
-   inside the tree or is reached through a symbolic link.
-3. `remove_acls` removes the service user's entries from the tree with
-   `setfacl -R -P -x u:agentproxy-agent-01 <tree>` and
-   `setfacl -R -P -x d:u:agentproxy-agent-01 <tree>`. It then removes the entry from each directory
-   between the home and the tree with `setfacl -x u:agentproxy-agent-01 <directory>`, and from the
-   home with `setfacl -x u:agentproxy-agent-01 <home>`. When the tree is gone, the step cannot find
-   those directories, and removes the entry from the home alone. Its line names each directory it
-   cleared.
-4. `remove_overflow_dir` removes the overflow directory that step 2 read, as the agent, with
-   `rm -rf -- <overflow_dir>`. When the agent cannot remove all of it, the step warns, and teardown
-   goes on; remove what is left by hand.
-5. `remove_rootless_daemon` uninstalls the rootless daemon, as the service user, with
-   `/usr/bin/dockerd-rootless-setuptool.sh uninstall`. It then removes the daemon's data, the
-   instance container and its images included, as the service user, with
-   `/usr/bin/rootlesskit rm -rf <service home>/.local/share/docker`.
-6. `disable_user_manager` runs `loginctl disable-linger agentproxy-agent-01` and
-   `systemctl stop user@<uid>.service`.
-7. `remove_service_user` removes the service user and its home, the state directory included, with
-   `userdel --remove agentproxy-agent-01`.
-8. `remove_config_dir` removes `/etc/agent-proxy/agent-01` with `rm -rf`.
-
-Teardown leaves these in place:
-
-- the agent's own default ACL entry on the tree, `default:user:agent-01:rwx`;
-- the tree's group and setgid;
-- the files cages created in the tree, whose owner stays the removed service user's uid;
-- the overflow directory, when step 2 skipped its read;
-- the service user's entry on each directory between the home and the tree, when the tree is gone;
-- the service user's entries on the tree and on each directory between it and the home, when
-  provisioning took `--tree` and teardown runs without it. With no `<home>/Projects`, teardown
-  clears the home alone. Give teardown the same `--tree` that provisioning took;
-- `/etc/agent-proxy` itself;
-- any line for the service user in `/etc/subuid` or `/etc/subgid`. The script warns about each one;
-  remove it when no user needs that range.
+This runbook holds the deployment acceptance checks for one agent's instance, provisioned as
+[the deployment guide](../deployment.md) gives. The checks use the agent `agent-01`, its service
+user `agentproxy-agent-01`, and the placeholders that the guide's opening sets.
 
 ## Deployment acceptance checks
 
@@ -319,11 +53,11 @@ why every check runs here and never in the project. Every `docker` command below
    the `MEASURE cage-cost` line the run prints. `test_the_cage_passes_the_hardening_probes` checks
    that the cage's root filesystem refuses a write, `/tmp` takes one, the cage holds no effective
    capability, and `no_new_privs` is set. Remove the copy with `rm -rf <service home>/agent-proxy`.
-6. **`E12` with a real credential.** Store a real `github-token`, as "The first start" does, and
-   give a `git.fetch` grant shaped like the `git.push` grant in `examples/instance.yaml`. Through
-   the agent's MCP client, call `git_fetch` on a repository below the tree whose remote is a private
-   repository that the grant's `GITHUB_REPOS` names. The check passes when the result's `exit_code`
-   is 0.
+6. **`E12` with a real credential.** Store a real `github-token`, as
+   [The first start](../deployment.md#the-first-start) does, and give a `git.fetch` grant shaped
+   like the `git.push` grant in `examples/instance.yaml`. Through the agent's MCP client, call
+   `git_fetch` on a repository below the tree whose remote is a private repository that the grant's
+   `GITHUB_REPOS` names. The check passes when the result's `exit_code` is 0.
 7. **A run's log with a real credential.** With a real `github-token` stored, give a
    `github.run_view` grant that names `api.github.com` and the storage host GitHub redirects the log
    fetch to, and that sets `GITHUB_REPOS` in its `env`; `plugins/github/README.md` gives
@@ -337,8 +71,8 @@ why every check runs here and never in the project. Every `docker` command below
    pull request on `<listed>`. Give `git.push` and `github.pr_view` grants shaped like those in
    `examples/instance.yaml`, with `GITHUB_REPOS: "<listed>"`. The `git.push` grant's `roots` name
    both checkouts with mode `rw`, and its `domains` also name each host GitHub's LFS server sends
-   objects to, as `plugins/git/README.md` gives under "A grant". Put the config in force as "The
-   first start" does.
+   objects to, as `plugins/git/README.md` gives under "A grant". Put the config in force as
+   [Changing the config](../deployment.md#changing-the-config) gives.
    1. As the agent, create a branch under the grant's prefix in each checkout and commit one change
       on it, for example with `git -C <checkout> checkout -b task/list-check`.
    2. Through the agent's MCP client, call `git_push` with `repo` set to the `<listed>` checkout.
@@ -360,7 +94,8 @@ why every check runs here and never in the project. Every `docker` command below
    The check passes when each result is as given. Afterwards, delete the branch `task/list-check`
    from `<listed>` on GitHub.
 9. **A signed commit with a real key.** Make a key pair with no passphrase, and store its private
-   half as the credential `git-signing-key`, as "The first start" stores `github-token`:
+   half as the credential `git-signing-key`, as [The first start](../deployment.md#the-first-start)
+   stores each credential:
 
    ```sh
    ssh-keygen -q -t ed25519 -N "" -C agent-01-signing -f <key dir>/signing-key
@@ -383,7 +118,7 @@ why every check runs here and never in the project. Every `docker` command below
    - The `git.push` grant is shaped like the one in `examples/instance.yaml`, and its `GITHUB_REPOS`
      names the repository.
 
-   Put the config in force as "The first start" does.
+   Put the config in force as [Changing the config](../deployment.md#changing-the-config) gives.
 
    1. As the agent, create a branch under the `git.push` grant's prefix in the checkout, and stage
       one change on it, for example with `git -C <checkout> checkout -b task/signing-check` and
@@ -402,7 +137,7 @@ why every check runs here and never in the project. Every `docker` command below
     directory below the tree, `<root>` below, with mode `ro`; its `domains` name `api.github.com`
     and `uploads.github.com`; its `GITHUB_REPOS` names the repository; and its `env` sets
     `GITHUB_PR_ATTACHMENTS: "on"`. `plugins/github/README.md` gives each member under "Attachments".
-    Put the config in force as "The first start" does.
+    Put the config in force as [Changing the config](../deployment.md#changing-the-config) gives.
 
     1. As the agent, create a worktree of the checkout below `<root>`, for example with
        `git -C <checkout> worktree add <root>/attach-check`. As the agent, write two files in it: a
@@ -429,12 +164,13 @@ why every check runs here and never in the project. Every `docker` command below
     `git -C <checkout> worktree remove <root>/attach-check`.
 
 11. **The workspace list with a real token.** Store a real HCP Terraform API token as the credential
-    `hcp-terraform-token`, as "The first start" stores each credential. Take two workspaces the
-    token can read, `<listed>` and `<unlisted>`, each as `organization/name`, and one run of each
-    whose plan has finished, `<listed run>` and `<unlisted run>`. Pick `<listed run>` from the
-    workspace's 20 newest runs. Give `hcp-terraform.run_list` and `hcp-terraform.plan_log` grants
-    shaped like those in `examples/instance.yaml`, with `HCP_TERRAFORM_WORKSPACES: "<listed>"`. Put
-    the config in force as "The first start" does.
+    `hcp-terraform-token`, as [The first start](../deployment.md#the-first-start) stores each
+    credential. Take two workspaces the token can read, `<listed>` and `<unlisted>`, each as
+    `organization/name`, and one run of each whose plan has finished, `<listed run>` and
+    `<unlisted run>`. Pick `<listed run>` from the workspace's 20 newest runs. Give
+    `hcp-terraform.run_list` and `hcp-terraform.plan_log` grants shaped like those in
+    `examples/instance.yaml`, with `HCP_TERRAFORM_WORKSPACES: "<listed>"`. Put the config in force
+    as [Changing the config](../deployment.md#changing-the-config) gives.
 
     1. Through the agent's MCP client, call `hcp-terraform_run_list` with `organization` and
        `workspace` set to those of `<listed>`, and `limit` set to 20. The result's `exit_code` is 0,
@@ -453,8 +189,9 @@ why every check runs here and never in the project. Every `docker` command below
 
 12. **Release mode.** Take a clean host and a release that the operator has published, whose
     packages are all public on GHCR. Check out the release's tag, and provision with
-    `--release <version>` and the full config. Do "The first start". Then read the verifier's
-    reference from the instance image:
+    `--release <version>` and the full config. Do
+    [The first start](../deployment.md#the-first-start). Then read the verifier's reference from the
+    instance image:
 
     ```sh
     docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' agent-proxy:1
