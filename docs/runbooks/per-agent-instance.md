@@ -7,7 +7,8 @@ use the agent `agent-01`, whose service user is `agentproxy-agent-01`.
 
 Every step runs as root. Where a step names `<uid>`, it means the service user's uid, which
 `id -u agentproxy-agent-01` prints. `<home>` is the agent's home, `<tree>` is the resolved path of
-the agent's `Projects` tree, and `<service home>` is the service user's home.
+the agent's tree, and `<service home>` is the service user's home. The agent's tree is the path that
+`--tree` names, or `<home>/Projects` without that option.
 
 ## Before you start
 
@@ -20,19 +21,23 @@ The host needs these packages:
 - systemd, which keeps the service user's daemon running under linger.
 
 Root must be able to read a checkout of this repository. The scripts run from it, and the
-provisioning script builds the verifier and instance images from it.
+provisioning script builds the verifier and instance images from it. In release mode, the
+provisioning script builds nothing from the checkout. The checkout must then be at the release's
+tag, so that the scripts match the release's images.
 
-Push each plugin image to a registry that the service user's daemon can pull from. Each plugin line
-in the config names its image by digest.
+Each plugin line in the config names its image by digest, in a registry that the service user's
+daemon can pull from. A release's notes list the published images under `## Images`, each by its
+digest reference, ready for a plugin line. To use a plugin image built from the checkout, push it to
+such a registry.
 
 ## The config
 
 Start from `examples/instance.yaml`. `docs/design.md` gives the rules a config must satisfy under
 "Config".
 
-- `agent_tree` names the resolved path of the agent's `Projects` tree, the path that
-  `realpath /home/agent-01/Projects` prints. The runner refuses a root or an overflow directory
-  under a symbolic link, and provisioning refuses any other value.
+- `agent_tree` names `<tree>`, the path that `realpath` prints for the agent's tree, such as
+  `realpath /home/agent-01/Projects`. The runner refuses a root or an overflow directory under a
+  symbolic link, and provisioning refuses any other value.
 - `overflow_dir` names a directory inside the tree, by a path with no symbolic link in it. Root
   creates and removes that directory, so both scripts refuse any other path.
 - Every root names a directory below the tree, never the tree itself.
@@ -52,12 +57,22 @@ Start from `examples/instance.yaml`. `docs/design.md` gives the rules a config m
 Run the script from the checkout:
 
 ```sh
-sudo core/docker/provision-instance.sh agent-01 <port> <config-file>
+sudo core/docker/provision-instance.sh [--release <version>] [--tree <path>] agent-01 <port> <config-file>
 ```
 
 `<port>` is the loopback port the instance serves on, and `<config-file>` is the config to install.
 The config may name credentials that the operator has not stored yet; "The first start" below stores
 them.
+
+The options come before the positional arguments, in any order:
+
+- `--release <version>` selects release mode. The script pulls the instance image of the release
+  `v<version>` and builds no image. `<version>` is `<major>.<minor>.<patch>`, with no `v`. The
+  service user's daemon must be able to pull from `ghcr.io`.
+- `--tree <path>` names the agent's tree. Without it, the tree is `<home>/Projects`.
+
+An unknown option, an option with no value, or a missing positional argument makes the script print
+its usage line and exit 2, before it runs any step.
 
 The script runs the steps below in order, and reports each step as it runs it. Each step leaves its
 object alone when it is already in place, so a second run with the same config changes nothing.
@@ -77,9 +92,12 @@ Three phrases below stand for the way the script reaches the service user and th
   could reach a file outside it. Such steps run as the agent instead.
 
 1. `check_arguments` checks that the agent exists, that the service user's name is at most 32
-   characters, that the port is an integer from 1 to 65535, that the config file is a readable
-   regular file, and that `<home>/Projects` is a directory. It reads the agent's home, the tree as
-   `realpath -- <home>/Projects`, and the agent's group as `id -gn agent-01`.
+   characters, that the port is an integer from 1 to 65535, that a given `<version>` is
+   `<major>.<minor>.<patch>`, that the config file is a readable regular file, and that the agent's
+   tree is a directory. It reads the agent's home, the tree as `realpath -- <path>`, where `<path>`
+   is the value of `--tree` or `<home>/Projects`, and the agent's group as `id -gn agent-01`. It
+   stops when the tree's realpath does not lie strictly inside the realpath of the home;
+   `docs/design.md` gives why under "Deployment and isolation".
 2. `create_service_user` creates the service user with
    `useradd --create-home --shell /usr/sbin/nologin agentproxy-agent-01`. The service user then
    needs a line in both `/etc/subuid` and `/etc/subgid`. When either line is missing, the step stops
@@ -96,10 +114,14 @@ Three phrases below stand for the way the script reaches the service user and th
    `/usr/bin/dockerd-rootless-setuptool.sh install`. When the daemon is already active and step 3
    created `/etc/agent-proxy`, the step restarts the daemon, as the service user, with
    `/usr/bin/systemctl --user restart docker`.
-6. `build_images` builds two images on the service user's daemon, from the checkout:
+6. `prepare_images` makes the instance image `agent-proxy:1` present on the service user's daemon.
+   Without `--release`, it builds two images from the checkout:
    `build --tag agent-proxy-verifier:1 core/verifier`, then
    `build --tag agent-proxy:1 --file core/docker/Dockerfile core/agent-proxy`. The verifier image is
    built before the instance starts because an image mount never pulls: without it, no cage starts.
+   With `--release <version>`, the step runs `pull ghcr.io/gravital-forge/agent-proxy:<version>`,
+   then `tag ghcr.io/gravital-forge/agent-proxy:<version> agent-proxy:1`, and builds nothing. That
+   image names its verifier by digest, and the instance pulls the verifier when it starts.
 7. `install_config` creates `/etc/agent-proxy/agent-01` with `install -d -o root -g root -m 0755`
    when it is missing, and installs the config with
    `install -o root -g root -m 0644 <config-file> /etc/agent-proxy/agent-01/config.yaml`. It skips
@@ -134,7 +156,10 @@ Three phrases below stand for the way the script reaches the service user and th
     `setfacl -m u:agentproxy-agent-01:x <home>`. After it, `ls -l` shows the home as `drwx--x---+`,
     because the group bits show the ACL mask. The home's group still has no access:
     `getfacl -p <home>` shows `group::---`.
-13. `start_instance` starts the instance container, named `agent-proxy`, on the service user's
+13. `grant_tree_traverse` gives the service user traverse, as the agent, on each directory strictly
+    between the home and the tree, with `setfacl -m u:agentproxy-agent-01:x <directory>`. Its line
+    gives the number of directories. With the tree `<home>/Projects`, there are none.
+14. `start_instance` starts the instance container, named `agent-proxy`, on the service user's
     daemon, with `DOCKER_HOST` set as above:
 
     ```sh
@@ -145,7 +170,7 @@ Three phrases below stand for the way the script reaches the service user and th
     port takes effect only after you remove the container. The port this step prints is the one you
     asked for, not always the one bound; `docker port agent-proxy` on the service user's daemon
     shows the bound one.
-14. `print_next_steps` prints the commands that mint a token and store a credential, and the path of
+15. `print_next_steps` prints the commands that mint a token and store a credential, and the path of
     this runbook.
 
 ## The first start
@@ -193,22 +218,30 @@ Every `docker` command here runs as root with `DOCKER_HOST=unix:///run/user/<uid
 Run the script from the checkout:
 
 ```sh
-sudo core/docker/teardown-instance.sh agent-01
+sudo core/docker/teardown-instance.sh [--tree <path>] agent-01
 ```
+
+`--tree <path>` names the agent's tree, as in provisioning. Give it the tree that provisioning took.
+The option comes before the agent, and the script refuses a bad command line as provisioning does.
 
 The script runs the steps below in order. A step whose object is already gone says so and skips its
 work, so teardown also cleans up after a provisioning that stopped part way.
 
 1. `check_agent` reads the agent's home and the tree, and the service user's uid and home when the
-   service user exists.
+   service user exists. When the tree exists, the step stops if the tree's realpath does not lie
+   strictly inside the realpath of the home, as provisioning's step 1 does. It stops before any step
+   removes an ACL entry.
 2. `read_overflow_dir` reads `overflow_dir` from the installed config, as provisioning's
    `read_config_paths` does. It skips the read when the service user, its daemon, the
    `agent-proxy:1` image, the config, or the tree is gone. It stops on an `overflow_dir` that is not
    inside the tree or is reached through a symbolic link.
 3. `remove_acls` removes the service user's entries from the tree with
    `setfacl -R -P -x u:agentproxy-agent-01 <tree>` and
-   `setfacl -R -P -x d:u:agentproxy-agent-01 <tree>`, and from the home with
-   `setfacl -x u:agentproxy-agent-01 <home>`.
+   `setfacl -R -P -x d:u:agentproxy-agent-01 <tree>`. It then removes the entry from each directory
+   between the home and the tree with `setfacl -x u:agentproxy-agent-01 <directory>`, and from the
+   home with `setfacl -x u:agentproxy-agent-01 <home>`. When the tree is gone, the step cannot find
+   those directories, and removes the entry from the home alone. Its line names each directory it
+   cleared.
 4. `remove_overflow_dir` removes the overflow directory that step 2 read, as the agent, with
    `rm -rf -- <overflow_dir>`. When the agent cannot remove all of it, the step warns, and teardown
    goes on; remove what is left by hand.
@@ -228,6 +261,7 @@ Teardown leaves these in place:
 - the tree's group and setgid;
 - the files cages created in the tree, whose owner stays the removed service user's uid;
 - the overflow directory, when step 2 skipped its read;
+- the service user's entry on each directory between the home and the tree, when the tree is gone;
 - `/etc/agent-proxy` itself;
 - any line for the service user in `/etc/subuid` or `/etc/subgid`. The script warns about each one;
   remove it when no user needs that range.
@@ -413,3 +447,19 @@ check runs here and never in the project. Every `docker` command below runs as r
        is 2, and its `stderr` holds the refusal of step 2.
 
     The check passes when each result is as given.
+
+12. **Release mode.** Take a clean host and a release that the operator has published, whose five
+    packages are public on GHCR. Check out the release's tag, and provision with
+    `--release <version>` and the full config. Do "The first start". Then read the verifier's
+    reference from the instance image:
+
+    ```sh
+    docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' agent-proxy:1
+    ```
+
+    Its `AGENT_PROXY_VERIFIER_IMAGE` line names `<reference>`, which has the form
+    `ghcr.io/gravital-forge/agent-proxy-verifier@sha256:<digest>`. Run
+    `docker image inspect --format '{{json .RepoDigests}}' <reference>`, then call any tool the
+    token grants through the agent's MCP client. The check passes when that `inspect` prints a list
+    that holds `<reference>`, and the call succeeds. `docs/design.md` gives the verifier's pin under
+    "Deployment and isolation".

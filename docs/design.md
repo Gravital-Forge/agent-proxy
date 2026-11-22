@@ -284,10 +284,10 @@ One instance per agent user:
   rootless `dockerd`. The instance container, its egress proxies, and its cages all run on that
   daemon. The agent cannot reach the daemon's socket, and compromising the instance yields
   `agentproxy-<agent>`, not root. Root only provisions.
-- The agent's `Projects` tree carries: a user ACL entry `user:agentproxy-<agent>:rwx` with a
-  matching default ACL; `default:user:<agent>:rwx`, so the agent keeps access even when a file's
-  group goes wrong; setgid with the agent's own group. The agent's home stays mode `700` and gains
-  only traverse (`x`) for `agentproxy-<agent>`.
+- The agent's tree carries: a user ACL entry `user:agentproxy-<agent>:rwx` with a matching default
+  ACL; `default:user:<agent>:rwx`, so the agent keeps access even when a file's group goes wrong;
+  setgid with the agent's own group. The agent's home stays mode `700` and gains only traverse (`x`)
+  for `agentproxy-<agent>`.
 - The instance reaches the agent's tree through the `user:agentproxy-<agent>` ACL entry alone.
   Supplementary groups do not reach a rootless container (`S4`), so provisioning never adds the
   service user to a group, the agent's group included. Setgid on every root is the only thing that
@@ -300,11 +300,41 @@ One instance per agent user:
   `/proc/<pid>/environ` and `/proc/<pid>/root`, which would expose the cage's credentials to the
   agent.
 - Provisioning is an idempotent script,
-  `core/docker/provision-instance.sh <agent> <port> <config-file>`, run with sudo. It creates the
-  service user, sets up its rootless daemon, applies the ACLs, creates the overflow directory, and
-  starts the instance. Provisioning stops at a started instance: the instance starts its egress
-  proxies itself. It stops before minting, so the admin sees the token printed.
-  `docs/runbooks/per-agent-instance.md` explains each step so the admin can run or debug it by hand.
+  `core/docker/provision-instance.sh [--release VERSION] [--tree PATH] <agent> <port> <config-file>`,
+  run with sudo. It creates the service user, sets up its rootless daemon, applies the ACLs, creates
+  the overflow directory, and starts the instance. Provisioning stops at a started instance: the
+  instance starts its egress proxies itself. It stops before minting, so the admin sees the token
+  printed. `docs/runbooks/per-agent-instance.md` explains each step so the admin can run or debug it
+  by hand. The positional form keeps working with no option, because a deployment already runs it.
+- Without `--release`, provisioning builds the verifier and instance images from the checkout. With
+  `--release VERSION`, it pulls the published instance image `ghcr.io/gravital-forge/agent-proxy` of
+  that version and tags it `agent-proxy:1`, so every later step and teardown run unchanged. It
+  builds no image: the instance pulls its verifier at start.
+- `--tree PATH` names the agent's tree, which defaults to `<home>/Projects`. Teardown takes the same
+  option. The tree's realpath lies strictly inside the realpath of the agent's home, and the service
+  user gains traverse on each directory between the home and the tree. That keeps the home's guard:
+  the home stays mode `700` with traverse alone, so another agent cannot traverse it. A tree outside
+  the home loses that guard, and a tree equal to the home would put the service user's ACL on the
+  whole home. Teardown applies the same rule, because it removes ACL entries recursively, as root,
+  from the tree it is given.
+- A release publishes five images on GHCR: `ghcr.io/gravital-forge/agent-proxy`, the instance;
+  `ghcr.io/gravital-forge/agent-proxy-verifier`; and
+  `ghcr.io/gravital-forge/agent-proxy-plugin-git`, `-plugin-github`, and `-plugin-hcp-terraform`.
+  The operator publishes a GitHub release, and a workflow then builds and pushes the five images and
+  writes each image's digest reference into the release notes. Each package starts private on GHCR;
+  the operator makes the five public once, after the first release.
+- One version covers all five images: a repository tag `vX.Y.Z` tags every image `X.Y.Z`. Images
+  carry version tags only, never `latest`, because configs pin plugins by digest.
+- The images are linux/amd64 only. The github plugin's image checks gh's `linux_amd64` tarball
+  against one SHA-256 (`plugins/github/Dockerfile`), and arm64 waits for a deployment that needs it.
+- The verifier is pinned by digest. A release builds the verifier first and bakes its full
+  reference, `ghcr.io/gravital-forge/agent-proxy-verifier@sha256:…`, into the instance image. At
+  start the instance pulls that verifier by digest when its daemon lacks it, as it does for plugin
+  images and iron-proxy, and every cage mounts exactly that image. The instance pulls only a
+  reference pinned by digest. A source build keeps the local tag `agent-proxy-verifier:1`, which
+  provisioning builds from the checkout.
+- Dependabot watches the repository's pins: the CI actions, the base images the Dockerfiles pin, and
+  the uv lockfiles. Every CI action is pinned by commit SHA.
 
 ## The git plugin's constraints
 
@@ -363,7 +393,7 @@ agent-proxy/
 │   ├── agent-proxy/      # the core uv package (Python, FastMCP, Docker SDK)
 │   │   ├── agent_proxy/  # cli, config, auth, credentials, plugins, reload, mcp, selfcheck, runner, egress, results, audit, errors, schemas
 │   │   └── tests/        # unit/, integration/
-│   ├── docker/           # the proxy's Dockerfile and provisioning; the iron-proxy pin is in egress
+│   ├── docker/           # the proxy's Dockerfile, provisioning, and the image build script; the iron-proxy pin is in egress
 │   └── verifier/         # the in-cage root verifier: Go source, its tests, and the Dockerfile that builds it
 └── plugins/
     ├── git/              # Dockerfile, describe and the manifest it prints, scripts/, tests/, README.md
@@ -374,8 +404,9 @@ agent-proxy/
 The core is Python on uv and FastMCP. One part of the core is Go: the in-cage root verifier, built
 with `CGO_ENABLED=0` into a static executable, so it runs in any image with no libc or runtime in
 the cage. The Go toolchain is a build dependency for that verifier alone. Plugins may be written in
-any language. CI builds each plugin image and runs `manifest check` on it. Publishing images to a
-registry is deployment, and out of scope.
+any language. CI builds each plugin image and runs `manifest check` on it. CI also builds every
+image on each pull request, and a release publishes the five images, as "Deployment and isolation"
+sets out.
 
 ## Verification
 

@@ -18,3 +18,5 @@ Work lands on `main` through pull requests the operator merges.
 - `plugins/github/README.md` describes the github plugin, which runs gh in a cage.
 - `plugins/hcp-terraform/README.md` describes the hcp-terraform plugin, which reads HCP Terraform
   runs and their logs in a cage.
+- `THIRD-PARTY-NOTICES.md` names the third-party software that each published image holds, and the
+  licence that software keeps.
