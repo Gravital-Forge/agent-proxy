@@ -476,7 +476,10 @@ A grant's `domains` name each host its remote reaches. For a repository that tra
 also name each host the LFS server sends objects to, which can differ from the remote's host. The
 `git.push` and `git.checkout` grants set `GIT_BRANCH_PREFIXES` in their `env`, as "Branch rules"
 gives. Every grant whose `credentials` give `GH_TOKEN`, such as `git.push`, sets `GITHUB_REPOS` in
-its `env`, as "The repository list" gives.
+its `env`, as "The repository list" gives. Every grant for an action that creates a commit sets
+`GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL`, as [Commit identity](#commit-identity) gives. A grant that
+signs its commits gives the key as a file credential and sets `GIT_SIGNING_KEY`, as
+[Commit signing](#commit-signing) gives.
 
 Grant a root of mode `rw` to each action that can run the LFS clean filter on a working-tree file:
 `status`, `blame`, and `lfs_status`. The filter writes a temporary file under the `lfs` directory of

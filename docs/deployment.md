@@ -35,7 +35,7 @@ such a registry.
 
 ## Why each part is needed
 
-Provisioning sets up three things around the instance. Each one closes a way that the agent, the
+Provisioning sets up these parts around the instance. Each one closes a way that the agent, the
 instance, or another agent could reach too far.
 
 - **The service user.** The instance, its egress proxies, and its cages run as `agentproxy-<agent>`,
@@ -62,9 +62,9 @@ Copy `examples/instance.yaml`, and edit the copy:
 
 1. Set `agent_tree` to `<tree>`, the path that `realpath` prints for the agent's tree, such as
    `realpath /home/agent-01/Projects`. Provisioning refuses any other value.
-2. Set `overflow_dir` to a directory inside the tree, by a path with no symbolic link in it. Root
-   creates that directory at provisioning and removes it at teardown, so both scripts refuse any
-   other path.
+2. Set `overflow_dir` to a directory inside the tree, by a path with no symbolic link in it. The
+   scripts create that directory at provisioning and remove it at teardown, as the agent, so both
+   refuse any other path.
 3. Under `plugins`, give each plugin's image by its digest reference: from the release notes'
    `## Images`, or from the registry you pushed the image to.
 4. Under `scopes`, give each grant the agent needs. Each plugin's README gives the `env` settings
@@ -104,7 +104,7 @@ keeps its config in force until a reload, as [Changing the config](#changing-the
 step that fails stops the script; after the fix, run the script again from the top. To debug a step,
 run its commands by hand.
 
-Three phrases below stand for the way the script reaches the service user and the agent:
+These phrases stand for the way the script reaches the service user and the agent:
 
 - "As the service user" means through
   `systemd-run --machine=agentproxy-agent-01@.host --user --wait --pipe --quiet <command>`.
@@ -227,8 +227,9 @@ wrong, such as a credential that is not stored, a root that the instance cannot 
 proxy that does not run. Fix each one, then run the check again, until every row passes. The agent
 can run the same check on its own scope through the tool `agent-proxy_self_check`.
 
-The reference gives the rows, the report, and the exit status under
-[The self-check report](reference.md#the-self-check-report), and the architecture gives what the
+The reference gives the rows and the exit status under the `check` verb of
+[The operator command](reference.md#the-operator-command), and the report under
+[The self-check report](reference.md#the-self-check-report). The architecture gives what the
 self-check covers under [The self-check](architecture.md#the-self-check).
 
 ## Changing the config
