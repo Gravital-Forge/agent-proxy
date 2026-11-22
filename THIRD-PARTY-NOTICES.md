@@ -13,8 +13,8 @@ the Go toolchain. The executable carries the Go standard library, under the BSD-
 
 `ghcr.io/gravital-forge/agent-proxy` is built on the Python image that `core/docker/Dockerfile`
 names. That image holds Python and the operating system packages it is built from, each under its
-own licence. The instance image also installs the locked dependencies of `core/agent-proxy/uv.lock`,
-each under its own licence.
+own licence. The instance image also installs the dependencies that `core/agent-proxy/uv.lock`
+locks, without its dev group, each under its own licence.
 
 ## The plugin images
 

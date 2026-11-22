@@ -655,8 +655,8 @@ tree, which defaults to `<home>/Projects` and must lie inside the agent's home.
 
 ## Published images
 
-`core/docker/build-images.sh <version> <registry> <source-url>` builds the five images and pushes
-each one to the registry, tagged with the version, which is `<major>.<minor>.<patch>`. It finds the
+`core/docker/build-images.sh <version> <registry> <source-url>` builds the images and pushes each
+one to the registry, tagged with the version, which is `<major>.<minor>.<patch>`. It finds the
 repository from its own path, so it runs from any working directory. It builds in this order:
 
 1. `agent-proxy-verifier` from `core/verifier/`.
@@ -669,21 +669,22 @@ Every build is for `linux/amd64` with no provenance attestation, so each pushed 
 image manifest. Every image carries the label `org.opencontainers.image.source`, set to the source
 URL, and `org.opencontainers.image.version`, set to the version. After each push, the script prints
 the image's digest reference, `<registry>/<name>@sha256:<digest>`, as one line on stdout. The build
-and push output goes to stderr, so stdout holds only the five references.
+and push output goes to stderr, so stdout holds only the image references.
 
 `.github/workflows/release.yml` runs when the operator publishes a GitHub release. Its one job,
 `images`, refuses a tag that is not `v<major>.<minor>.<patch>` before it checks out. It logs in to
 GHCR with the job's token, and runs `build-images.sh` with the tag's version without the `v`, the
-registry `ghcr.io/gravital-forge`, and the repository's URL. It then writes the five references into
-the release notes under a `## Images` heading, one bullet each. On a re-run, it replaces that
+registry `ghcr.io/gravital-forge`, and the repository's URL. It then writes each image's reference
+into the release notes under a `## Images` heading, one bullet each. On a re-run, it replaces that
 heading and everything after it. The workflow holds `contents: read`; the job holds
 `contents: write`, to edit the release notes, and `packages: write`, to push. Event data reaches
 each script through the step's environment, never through the script's text.
 
 The `images` job in `.github/workflows/ci.yml` runs `build-images.sh` with the version `0.0.0` on
-each pull request. It pushes to a `registry:3` service container that lives only for the job, and no
-pull-request job logs in to a registry. The job then checks that the instance image's
-`AGENT_PROXY_VERIFIER_IMAGE` equals the first reference the script printed, the verifier's.
+each pull request and each push to `main`. It pushes to a `registry:3` service container that lives
+only for the job, and no pull-request job logs in to a registry. The job then checks that the
+instance image's `AGENT_PROXY_VERIFIER_IMAGE` equals the first reference the script printed, the
+verifier's.
 
 Every action in the workflows is pinned by commit SHA, with its version in a trailing comment.
 `.github/dependabot.yml` asks for weekly updates of those actions, of the base images that the

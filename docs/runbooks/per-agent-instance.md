@@ -448,8 +448,8 @@ check runs here and never in the project. Every `docker` command below runs as r
 
     The check passes when each result is as given.
 
-12. **Release mode.** Take a clean host and a release that the operator has published, whose five
-    packages are public on GHCR. Check out the release's tag, and provision with
+12. **Release mode.** Take a clean host and a release that the operator has published, whose
+    packages are all public on GHCR. Check out the release's tag, and provision with
     `--release <version>` and the full config. Do "The first start". Then read the verifier's
     reference from the instance image:
 
