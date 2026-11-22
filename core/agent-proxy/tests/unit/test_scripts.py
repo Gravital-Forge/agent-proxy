@@ -82,6 +82,7 @@ PROVISION_USAGE = (
     "<agent> <port> <config-file>"
 )
 TEARDOWN_USAGE = "usage: teardown-instance.sh [--tree PATH] <agent>"
+BUILD_IMAGES_USAGE = "usage: build-images.sh <version> <registry> <source-url>"
 
 
 @pytest.mark.parametrize(
@@ -89,6 +90,7 @@ TEARDOWN_USAGE = "usage: teardown-instance.sh [--tree PATH] <agent>"
     [
         ("provision-instance.sh", PROVISION_USAGE),
         ("teardown-instance.sh", TEARDOWN_USAGE),
+        ("build-images.sh", BUILD_IMAGES_USAGE),
     ],
 )
 def test_script_without_arguments_prints_its_usage(name: str, usage: str) -> None:
@@ -97,6 +99,26 @@ def test_script_without_arguments_prints_its_usage(name: str, usage: str) -> Non
 
     assert (result.returncode, result.stdout) == (2, "")
     assert result.stderr == f"{usage}\n"
+
+
+def test_build_images_needs_all_three_arguments() -> None:
+    """Two of the three arguments exit 2 with the usage line, before any build."""
+    result = run_script("build-images.sh", "0.1.0", "r")
+
+    assert (result.returncode, result.stdout) == (2, "")
+    assert result.stderr == f"{BUILD_IMAGES_USAGE}\n"
+
+
+@pytest.mark.parametrize("version", ["v0.1.0", "0.1", "0.1.0-rc.1", "0.1.0\n"])
+def test_build_images_refuses_a_version_that_is_not_bare(version: str) -> None:
+    """A version that is not <major>.<minor>.<patch> exits 1 before any build."""
+    result = run_script("build-images.sh", version, "r", "s")
+
+    assert (result.returncode, result.stdout) == (1, "")
+    assert result.stderr == (
+        "build-images.sh: the version must be <major>.<minor>.<patch>, "
+        f"got '{version}'\n"
+    )
 
 
 @pytest.mark.parametrize(
