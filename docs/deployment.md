@@ -23,10 +23,10 @@ The host needs these packages:
 - `acl`, which gives `setfacl` and `getfacl`.
 - systemd, which keeps the service user's daemon running under linger.
 
-Root must be able to read a checkout of this repository. The scripts run from it, and the
-provisioning script builds the verifier and instance images from it. In release mode, the
-provisioning script builds nothing from the checkout. The checkout must then be at the release's
-tag, so that the scripts match the release's images.
+Root must be able to read a checkout of this repository. The scripts run from it, and without
+`--release` the provisioning script builds the verifier and instance images from it. With
+`--release`, the checkout must be at the release's tag, so that the scripts match the release's
+images.
 
 Each plugin line in the config names its image by digest, in a registry that the service user's
 daemon can pull from. A release's notes list the published images under `## Images`, each by its
@@ -66,7 +66,7 @@ Copy `examples/instance.yaml`, and edit the copy:
    scripts create that directory at provisioning and remove it at teardown, as the agent, so both
    refuse any other path.
 3. Under `plugins`, give each plugin's image by its digest reference: from the release notes'
-   `## Images`, or from the registry you pushed the image to.
+   `## Images`, or from the registry that the operator pushed the image to.
 4. Under `scopes`, give each grant the agent needs. Each plugin's README gives the `env` settings
    its grants need: [git](../plugins/git/README.md#a-grant),
    [github](../plugins/github/README.md#a-grant), and
@@ -87,12 +87,12 @@ sudo core/docker/provision-instance.sh [--release <version>] [--tree <path>] age
 The config may name credentials that the operator has not stored yet;
 [The first start](#the-first-start) stores them.
 
-The options come before the positional arguments, in any order:
+Each option is optional. The options come before the positional arguments, in any order:
 
 - `--release <version>` selects release mode. The script pulls the instance image of the release
   `v<version>` and builds no image. `<version>` is `<major>.<minor>.<patch>`, with no `v`. The
   service user's daemon must be able to pull from `ghcr.io`.
-- `--tree <path>` names the agent's tree. Without it, the tree is `<home>/Projects`.
+- `--tree <path>` names the agent's tree.
 
 An unknown option, an option with no value, or a missing positional argument makes the script print
 its usage line and exit 2, before it runs any step.
@@ -117,10 +117,9 @@ These phrases stand for the way the script reaches the service user and the agen
 1. `check_arguments` checks that the agent exists, that the service user's name is at most 32
    characters, that the port is an integer from 1 to 65535, that a given `<version>` is
    `<major>.<minor>.<patch>`, that the config file is a readable regular file, and that the agent's
-   tree is a directory. It reads the agent's home, the tree as `realpath -- <path>`, where `<path>`
-   is the value of `--tree` or `<home>/Projects`, and the agent's group as `id -gn agent-01`. It
-   stops when the tree's realpath does not lie strictly inside the realpath of the home;
-   [The tree inside the home](architecture.md#the-tree-inside-the-home) gives why.
+   tree is a directory. It reads the agent's home, the tree's realpath, and the agent's group as
+   `id -gn agent-01`. It stops when the tree's realpath does not lie strictly inside the realpath of
+   the home; [The tree inside the home](architecture.md#the-tree-inside-the-home) gives why.
 2. `create_service_user` creates the service user with
    `useradd --create-home --shell /usr/sbin/nologin agentproxy-agent-01`. The service user then
    needs a line in both `/etc/subuid` and `/etc/subgid`. When either line is missing, the step stops
@@ -140,11 +139,13 @@ These phrases stand for the way the script reaches the service user and the agen
 6. `prepare_images` makes the instance image `agent-proxy:1` present on the service user's daemon.
    Without `--release`, it builds two images from the checkout:
    `build --tag agent-proxy-verifier:1 core/verifier`, then
-   `build --tag agent-proxy:1 --file core/docker/Dockerfile core/agent-proxy`. The verifier image is
-   built before the instance starts because an image mount never pulls: without it, no cage starts.
-   With `--release <version>`, the step runs `pull ghcr.io/gravital-forge/agent-proxy:<version>`,
-   then `tag ghcr.io/gravital-forge/agent-proxy:<version> agent-proxy:1`, and builds nothing. That
-   image names its verifier by digest, and the instance pulls the verifier when it starts.
+   `build --tag agent-proxy:1 --file core/docker/Dockerfile core/agent-proxy`. The verifier image
+   must be on the daemon before the first call, as
+   [The root verifier](architecture.md#the-root-verifier) gives. With `--release <version>`, the
+   step runs `pull ghcr.io/gravital-forge/agent-proxy:<version>`, then
+   `tag ghcr.io/gravital-forge/agent-proxy:<version> agent-proxy:1`, so every later step and
+   teardown use the one name. That image names its verifier by digest, and the instance pulls the
+   verifier when it starts.
 7. `install_config` creates `/etc/agent-proxy/agent-01` with `install -d -o root -g root -m 0755`
    when it is missing, and installs the config with
    `install -o root -g root -m 0644 <config-file> /etc/agent-proxy/agent-01/config.yaml`. It skips
@@ -189,10 +190,10 @@ These phrases stand for the way the script reaches the service user and the agen
     core/docker/start-instance.sh agent-proxy:1 agent-proxy <port> /etc/agent-proxy/agent-01 <service home>/state <tree>
     ```
 
-    When the container already exists, the start script starts it as it was created, so a changed
-    port or a new image takes effect only after you remove the container. The port this step prints
-    is the one you asked for, not always the one bound; `docker port agent-proxy` shows the bound
-    one.
+    To put a changed port or a new image in force, remove the container first with
+    `docker rm --force agent-proxy`; [The instance](architecture.md#the-instance) gives why. The
+    port this step prints is the port that the operator gave, not always the one bound;
+    `docker port agent-proxy` shows the bound one.
 15. `print_next_steps` prints the commands that mint a token and store a credential, and the path of
     this guide.
 
@@ -209,12 +210,13 @@ warnings. Then:
    docker exec -i agent-proxy agent-proxy credential set <name>
    ```
 
-   Each credential takes effect on the next call, with no reload. Until the operator stores it, a
-   call under a grant that names it is refused, and the refusal gives the warning's text.
+   [Credentials](architecture.md#credentials) gives when a stored credential takes effect. Until the
+   operator stores it, a call under a grant that names it is refused, and the refusal gives the
+   warning's text.
 2. Mint a token for the agent with
    `docker exec agent-proxy agent-proxy token mint --name <name> --scope <scope>`. The token prints
-   once; give it to the agent's MCP client. The mint also prints a warning for each credential that
-   is still not stored, and mints the token all the same.
+   once; give it to the agent's MCP client. The `token mint` verb under [Verbs](reference.md#verbs)
+   gives the warnings it prints.
 3. Run the self-check, as [The self-check](#the-self-check) gives.
 
 The reference gives every verb under [The operator command](reference.md#the-operator-command).
@@ -240,9 +242,8 @@ To put a changed config in force, install it over the installed config:
 install -o root -g root -m 0644 <config-file> /etc/agent-proxy/agent-01/config.yaml
 ```
 
-Then run `docker exec agent-proxy agent-proxy reload`. When it refuses the config, it prints each
-error, and the running config stays. When it accepts the config, it prints `reloaded` and each
-warning, such as one for each credential that is still not stored.
+Then run `docker exec agent-proxy agent-proxy reload`. The `reload` verb under
+[Verbs](reference.md#verbs) gives what it prints when it accepts or refuses the config.
 
 ## Teardown
 
@@ -252,10 +253,14 @@ Run the script from the checkout, with the same `--tree` that provisioning took:
 sudo core/docker/teardown-instance.sh [--tree <path>] agent-01
 ```
 
-`--tree <path>` names the agent's tree, as in provisioning. Teardown does not read the tree from the
-installed config: without the option, it clears `<home>/Projects`, and the tree that provisioning
-took keeps the service user's entries. The option comes before the agent, and the script refuses a
-bad command line as provisioning does.
+`--tree <path>` names the agent's tree, as in provisioning. The option comes before the agent, and
+the script refuses a bad command line as provisioning does.
+
+Teardown does not read the tree from the installed config, so without `--tree` it takes the default
+tree. In the usual case, provisioning took a tree outside `<home>/Projects`, that directory exists,
+and the instance is still installed. Step 2 then finds the config's `overflow_dir` outside
+`<home>/Projects`, so teardown stops with exit status 1 and removes nothing. Run it again with the
+`--tree` that provisioning took.
 
 The script runs the steps below in order. A step whose object is already gone says so and skips its
 work, so teardown also cleans up after a provisioning that stopped part way.
@@ -295,9 +300,10 @@ Teardown leaves these in place:
 - the files cages created in the tree, whose owner stays the removed service user's uid;
 - the overflow directory, when step 2 skipped its read;
 - the service user's entry on each directory between the home and the tree, when the tree is gone;
-- the service user's entries on the tree and on each directory between it and the home, when
-  provisioning took `--tree` and teardown runs without it. With no `<home>/Projects`, teardown
-  clears the home alone;
+- the service user's entries on the tree that provisioning took, and on each directory between it
+  and the home, when teardown runs without that `--tree`, the tree lies outside `<home>/Projects`,
+  and step 2 skips its read. Teardown then clears `<home>/Projects` and the home, or the home alone
+  when there is no `<home>/Projects`. A tree inside `<home>/Projects` is cleared with it;
 - `/etc/agent-proxy` itself;
 - any line for the service user in `/etc/subuid` or `/etc/subgid`. The script warns about each one;
   remove it when no user needs that range.
@@ -309,9 +315,10 @@ credentials, and the audit log stay.
 
 1. Check out the new release's tag, so that the scripts match its images.
 2. In the config, give each plugin the new digest reference from the release notes' `## Images`.
-3. Remove the instance container with `docker rm --force agent-proxy`. The start script starts an
-   existing container as it was created, so a new image takes effect only in a new container. The
-   state directory is a host path, so removing the container leaves it in place.
+3. Remove the instance container with `docker rm --force agent-proxy`, because a new image takes
+   effect only in a new container, as [The instance](architecture.md#the-instance) gives. Removing
+   the container ends any call that runs at that moment, so upgrade when no call runs. The state
+   directory is a host path, so removing the container leaves it in place.
 4. Provision again with `--release <new version>`, the same `--tree`, the same port, and the updated
    config. Provisioning pulls the new instance image, tags it `agent-proxy:1`, installs the config,
    and starts a new container, which pulls its verifier and the new plugin images.

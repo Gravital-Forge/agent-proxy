@@ -1,7 +1,7 @@
 # Acceptance checks
 
 An acceptance check is a check that needs root, a second user, or a real credential. The project's
-tests run as the agent's own user with no real credential, so they cannot run these checks. The
+tests need no root, no second user, and no real credential, so they cannot run these checks. The
 operator runs them on a host, against one agent's instance provisioned as
 [the deployment guide](deployment.md) gives. The checks use the agent `agent-01`, its service user
 `agentproxy-agent-01`, and the placeholders that the guide's opening sets. Every `docker` command
@@ -215,8 +215,8 @@ README.
 12. **Release mode.** This check shows that an instance provisioned in release mode runs on the
     published images: the instance image names its verifier by digest, the service user's daemon
     holds the verifier at that digest, and a call succeeds through it. Take a clean host and a
-    release that the operator has published, whose packages are all public on GHCR. Check out the
-    release's tag, and provision with `--release <version>` and the full config. Do
+    release that the project's maintainers have published, whose packages are all public on GHCR.
+    Check out the release's tag, and provision with `--release <version>` and the full config. Do
     [The first start](deployment.md#the-first-start). Then read the verifier's reference from the
     instance image:
 

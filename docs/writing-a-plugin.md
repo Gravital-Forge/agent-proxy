@@ -17,7 +17,7 @@ which it removes whatever happens. So `describe` reads only what the image holds
 but its output. It must exit within 30 seconds, and its stdout must stay within 1 MiB. A non-zero
 exit shows the first 1,024 bytes of stderr, so write a diagnostic there.
 
-The self-check also runs `describe`, in a cage that the runner builds as
+The self-check also runs `describe`, in a cage that the instance builds as
 [How an action runs](#how-an-action-runs) gives for an action. The cage starts behind the root
 verifier, as user `0:0`, on the Docker network `none`, with no roots, no credentials, and no grant
 `env`. So `describe` must also exit 0 there. [The self-check](architecture.md#the-self-check) gives

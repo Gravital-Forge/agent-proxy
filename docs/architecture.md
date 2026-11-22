@@ -184,8 +184,8 @@ The instance runs one egress proxy for each distinct domain list across its gran
 A proxy never changes once it starts. The instance never uses iron-proxy's management reload: a
 proxy whose config or image differs from what its list needs is replaced. The instance never writes
 a `source_ip` rule, because iron-proxy accepts such a rule and ignores it, which widens access. A
-test in `core/agent-proxy/tests/integration/test_egress.py` pins that behaviour on the pinned image,
-and an upgrade of iron-proxy runs it first. iron-proxy is pinned by digest.
+test in `core/agent-proxy/tests/integration/test_egress.py` pins that behaviour on the pinned image.
+iron-proxy is pinned by digest.
 
 Each proxy's config lives in its own directory under the state directory's `egress/`, and the daemon
 bind-mounts the directory, never a single file, read-only into the proxy. A replaced file under a
@@ -276,8 +276,11 @@ It checks the local wiring, the things that can be wrong while the instance look
 - each egress proxy that the scope's domain lists need is running;
 - for each plugin the scope uses, a cage runs the image's `describe` and exits 0. The cage goes
   through the normal path, root verifier and cage cap included, with no roots, no credentials, no
-  `env`, and no network, within 30 seconds. The check discards the output. The instance never pulls
-  for a cage, so an image that has left the daemon since the config loaded fails the check.
+  `env`, and no network, within 30 seconds. The check discards the output. A `describe` whose output
+  passes the cap still writes an overflow file in `overflow_dir` on every check, as any call's
+  output does, and the sweep removes it, as [Output past the cap](reference.md#output-past-the-cap)
+  gives. The instance never pulls for a cage, so an image that has left the daemon since the config
+  loaded fails the check.
 
 It leaves out what the config load already refuses, such as an image that does not load, a grant
 that names an undeclared action, or a root outside the agent tree. It never tests a credential
@@ -319,7 +322,8 @@ The state directory and the agent tree keep their host paths because the daemon 
 source the instance names on the host: each egress config directory under the state directory, and
 each root and credential file a cage mounts. The script refuses a state directory or an agent tree
 that is not an absolute path equal to its realpath. When a container of that name exists, the script
-starts it as it was created, or leaves it running.
+starts it as it was created, or leaves it running. So a new image, port, or path takes effect only
+in a new container.
 
 The state directory holds:
 
@@ -334,15 +338,7 @@ The one directory outside the state directory that the instance writes is the co
 `overflow_dir`, in the agent's tree. The instance creates neither it nor the state directory.
 
 `core/docker/provision-instance.sh` sets up everything an instance needs on the host and starts it,
-and `core/docker/teardown-instance.sh` removes it. Provisioning is idempotent and runs with sudo. It
-creates the service user, sets up its rootless daemon, applies the ACLs, creates the overflow
-directory, prepares the instance image, and starts the instance, which starts its egress proxies
-itself. It stops before minting, so the operator sees the token printed. Without `--release`, it
-builds the verifier and instance images from the checkout. With `--release VERSION`, it pulls the
-published instance image of that version and tags it `agent-proxy:1`, so every later step and
-teardown run unchanged, and the instance pulls its verifier at start. Both scripts take
-`--tree PATH`, the agent's tree, which defaults to `<home>/Projects`. The positional form,
-`<agent> <port> <config-file>`, works with no option. The deployment guide explains each step under
+and `core/docker/teardown-instance.sh` removes it, as the deployment guide gives under
 [Provisioning](deployment.md#provisioning) and [Teardown](deployment.md#teardown).
 
 ## Published images
@@ -372,16 +368,15 @@ URL, and `org.opencontainers.image.version`, set to the version. After each push
 the image's digest reference, `<registry>/<name>@sha256:<digest>`, as one line on stdout. The build
 and push output goes to stderr, so stdout holds only the image references.
 
-`.github/workflows/release.yml` runs when the operator publishes a GitHub release. Its one job,
-`images`, refuses a release marked as a pre-release, and a tag that is not
+`.github/workflows/release.yml` runs when the project's maintainers publish a GitHub release. Its
+one job, `images`, refuses a release marked as a pre-release, and a tag that is not
 `v<major>.<minor>.<patch>`, before it checks out, so neither publishes an image. It logs in to GHCR
 with the job's token, and runs `build-images.sh` with the tag's version without the `v`, the
 registry `ghcr.io/gravital-forge`, and the repository's URL. It then writes each image's reference
 into the release notes under a `## Images` heading, one bullet each. On a re-run, it replaces that
 heading and everything after it. The workflow holds `contents: read`; the job holds
 `contents: write`, to edit the release notes, and `packages: write`, to push. Event data reaches
-each script through the step's environment, never through the script's text. Each package starts
-private on GHCR, and the operator makes it public.
+each script through the step's environment, never through the script's text.
 
 The `images` job in `.github/workflows/ci.yml` runs `build-images.sh` with the version `0.0.0` on
 each pull request and each push to `main`. It pushes to a `registry:3` service container that lives
@@ -456,10 +451,8 @@ tree it is given.
   600 seconds for the whole reply. With about 20 or more scope-and-plugin pairs and slow describes,
   the command can time out while the instance still finishes the check and audits it. `--scope NAME`
   bounds a run to one scope.
-- A run's log through the github plugin's `run_view` with `log_failed` is out of reach under a grant
-  that names only GitHub's hosts. gh follows GitHub's redirect to a storage host GitHub picks, and a
-  domain takes no wildcard, so a grant that wants such a log names each storage host.
-  [Egress](../plugins/github/README.md#egress) in the plugin's README gives the detail.
+- The github plugin's `run_view` with `log_failed` works only under a grant that names each storage
+  host, as [Egress](../plugins/github/README.md#egress) in the plugin's README gives.
 - Credentials are not encrypted at rest: each is a plain file protected by the service user's uid.
 - The egress proxy neither masks credentials nor intercepts TLS. It allows or refuses a host by
   name, so a cage can send its credential to any host its grant names.

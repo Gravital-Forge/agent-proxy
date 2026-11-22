@@ -25,7 +25,7 @@ and repetition across grants and across instances is accepted.
   [Output past the cap](#output-past-the-cap) gives. It is an absolute path with no `..` segment,
   inside `agent_tree`, and not equal to `agent_tree`.
 - `max_cages` is the number of cages that may run at one time. It is an integer of 1 or more, given
-  as a number. A call over the cap waits for a cage to end.
+  as a number. [The cage](architecture.md#the-cage) gives what a call over the cap does.
 - `plugins` maps each plugin name to its image. A plugin name matches `^[a-z][a-z0-9-]*$`. The image
   is a reference pinned by digest, `<name>@sha256:<64 hex digits>`. The name `agent-proxy` is
   refused, so no tool name can take the self-check tool's name.
@@ -132,8 +132,8 @@ docker exec -i agent-proxy agent-proxy credential set github-token
   revoke it, then mint it again.
 - `credential set NAME` reads the value from stdin, so the value never appears in a process's
   arguments or in shell history. It stores the value verbatim, replacing any stored value, and
-  prints `stored NAME (SIZE bytes)`. It refuses an empty value. The next call uses the new value,
-  with no reload.
+  prints `stored NAME (SIZE bytes)`. It refuses an empty value.
+  [Credentials](architecture.md#credentials) gives when the new value takes effect.
 - `credential list` prints each credential's name and the time it was set, sorted by name. It never
   prints a value.
 - `credential rm NAME` deletes a credential and prints `removed NAME`. It refuses a name that the
@@ -145,9 +145,10 @@ docker exec -i agent-proxy agent-proxy credential set github-token
   the rules of [Writing a plugin](writing-a-plugin.md#the-manifest). It never pulls, so an absent
   image is a refusal. It prints a warning for each action that declares pass-through `args`. On a
   pass it prints `manifest ok: IMAGE declares COUNT actions`.
-- `reload` asks the running instance to load the config file again. It prints each warning, then
-  `reloaded` once the new config is in force. When the instance refuses the config, it prints each
-  failure, and the running config stays.
+- `reload` asks the running instance to load the config file again. When the instance accepts the
+  config, the command prints each warning on stderr, then `reloaded` on stdout. When the instance
+  refuses the config, the command prints each failure on stderr and exits 1, and the running config
+  stays.
 - `check [--scope NAME]` asks the running instance to run the self-check on one scope, or on every
   scope without `--scope`. It prints a header row, then one row for each entry of
   [The self-check report](#the-self-check-report), with five fields: the scope, the kind of check,
@@ -159,9 +160,9 @@ docker exec -i agent-proxy agent-proxy credential set github-token
   container's log shows, then serves the MCP surface at `/mcp` on that address. On SIGINT or SIGTERM
   it stops and exits 0.
 
-`reload` and `check` reach the instance through its control socket, `control.sock` in the state
-directory. Each waits at most 600 seconds for the reply. A socket with nothing listening, no reply
-in time, and a reply of another form are each a refusal that names the socket.
+[Reload](architecture.md#reload) gives how `reload` and `check` reach the instance. Each waits at
+most 600 seconds for the reply. A socket with nothing listening, no reply in time, and a reply of
+another form are each a refusal that names the socket.
 
 ### Output and exit status
 

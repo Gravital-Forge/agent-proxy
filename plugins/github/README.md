@@ -53,17 +53,30 @@ working directory.
 ### The repository list
 
 Every action checks its `repo` against `GITHUB_REPOS` in the cage's environment before gh runs. The
-grant's `env` sets the variable. The rule is the git plugin's, and `repos.py` holds this plugin's
-own copy of it. The git plugin's README gives the entry forms, the match, and the refusals of an
-unset, empty, or malformed list under [The repository list](../git/README.md#the-repository-list).
+grant's `env` sets the variable. Its value is a comma-separated list: each entry is stripped of
+whitespace, and an empty entry is ignored. An entry takes one of two forms:
+
+- `owner/name` names one repository.
+- `owner/*` names every repository of one user or organization.
+
+An owner and a name take the forms that [The `repo` input](#the-repo-input) gives. Any other entry
+is malformed: a bare `owner`, `*`, `*/name`, or a partial glob such as `owner/api-*`.
+
+A `repo` matches an entry when the owners are equal and the names are equal, or the entry's name is
+`*`. Each comparison ignores case, as GitHub's does.
+
+The list fails closed. In every cage, whether or not it holds `GH_TOKEN`, an unset list, a list with
+no entry, and a list with a malformed entry each refuse the call, and so does a `repo` that no entry
+matches. `repos.py` holds the rule.
+
+The git plugin applies the same rule with its own copy, and differs in two points: it refuses a bad
+list only in a cage that holds `GH_TOKEN`, and it judges a repository by the URL git connects to,
+not by a `repo` input. Its README gives its use under
+[The repository list](../git/README.md#the-repository-list).
 
 A script action checks `repo` before the action runs. A command action runs `gh-cage`, a wrapper
 that finds the one `--repo` in its argv and checks the value after it. On a match, `gh-cage`
 replaces itself with gh on the same argv, `--repo` kept.
-
-Two points differ from the git plugin. This plugin refuses an unset, empty, or malformed list in
-every cage, whether or not it holds `GH_TOKEN`. It judges a repository by the `repo` the call gives,
-where the git plugin judges it by the URL git connects to.
 
 `pr_create` checks `repo` alone, never `head`. `head` may name a branch on another owner's fork,
 which the pull request only reads.
