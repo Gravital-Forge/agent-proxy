@@ -48,9 +48,9 @@ is null when the run has no configuration version or its ingress attributes answ
 
 Each takes `run_id` and returns `log`, the plan's or the apply's log as text: decoded as UTF-8, with
 each invalid byte replaced by U+FFFD, and with the framing characters `\x02` and `\x03` removed. HCP
-Terraform does not document the log's format. The deployment acceptance check in
-`docs/runbooks/per-agent-instance.md` confirms it against a real run. Each fails with exit code 1
-when the run has no such log yet.
+Terraform does not document the log's format. The acceptance check "The workspace list with a real
+token" in [the acceptance checks](../../docs/acceptance-checks.md) confirms it against a real run.
+Each fails with exit code 1 when the run has no such log yet.
 
 ### What an action returns
 

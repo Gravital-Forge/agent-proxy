@@ -13,7 +13,8 @@ Work lands on `main` through pull requests the operator merges.
   the results and refusals of a call.
 - [`docs/deployment.md`](docs/deployment.md) tells the operator how to provision, start, check, tear
   down, and upgrade one agent's instance, and why each part of the setup is needed.
-- `docs/runbooks/per-agent-instance.md` holds the deployment acceptance checks.
+- [`docs/acceptance-checks.md`](docs/acceptance-checks.md) holds the checks the operator runs on a
+  deployed instance, which need root, a second user, or a real credential.
 - `examples/instance.yaml` is a sample instance config.
 - `docs/writing-a-plugin.md` tells a plugin author what the image holds, and how to write and check
   its manifest.
