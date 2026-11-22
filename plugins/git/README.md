@@ -2,7 +2,7 @@
 
 The git plugin runs git and git LFS in a cage. It offers git and git LFS actions, and it applies
 branch rules to `push` and `checkout`. `docs/writing-a-plugin.md` gives the plugin model this
-follows, and `docs/design.md` gives the decisions behind it under "The git plugin's constraints".
+follows.
 
 ## The actions
 
@@ -155,20 +155,29 @@ value the plugin passes with `-c`, a value from a file the config includes, or a
 
 ### Trusted roots
 
+The cage's process is uid 0 in its user namespace, and the agent's repositories belong to a uid that
+the namespace does not map. So git refuses them as dubious ownership, unless the plugin trusts them.
+
 The core gives every cage `AGENT_PROXY_ROOTS`, the grant's root paths as a compact JSON array.
 `git_argv` in `scripts/git_plugin/cage.py` passes git two `safe.directory` values for each root:
 `<root>` and `<root>/*`. The first trusts a repository at the root itself. The second trusts every
 repository beneath it, linked worktrees included. The function strips trailing slashes from each
 root first, so `/x/` gives `/x` and `/x/*`.
 
+The ownership check that this turns off guards against configuration that a repository plants. git
+in a cage reads none, as "Config isolation" gives.
+
 ### The credential helper
 
-Every git run clears every inherited credential helper, then names the plugin's own helper,
-`/plugin/bin/git-credential-agent-proxy`, and sets `credential.useHttpPath=true`.
-`scripts/git_plugin/credential.py` holds the helper. With `useHttpPath` set, git hands the helper
-the path of the URL it connects to, after `remote.<name>.pushurl` rewrites that URL. git in a cage
-reads no `url.<base>.insteadOf`, as "Config isolation" gives. `docs/design.md` gives why the helper
-checks this path under "The git plugin's constraints".
+gh reads `GH_TOKEN` as it is, but git does not, so the plugin hands git the token through a
+credential helper of its own. Every git run clears every inherited credential helper, then names the
+plugin's own helper, `/plugin/bin/git-credential-agent-proxy`, and sets
+`credential.useHttpPath=true`. `scripts/git_plugin/credential.py` holds the helper. With
+`useHttpPath` set, git hands the helper the path of the URL it connects to, after
+`remote.<name>.pushurl` rewrites that URL. git in a cage reads no `url.<base>.insteadOf`, as "Config
+isolation" gives. The helper checks this path, and not the remote that the repository's config
+names, because git builds the URL it connects to after `pushurl` rewrites it. So a rewritten remote
+cannot carry the token to a repository the list does not name.
 
 On git's `get`, the helper reads the path's first two segments as `owner/name`, with one trailing
 `.git` dropped from the name, and checks that repository against `GITHUB_REPOS`, as "The repository
@@ -343,17 +352,20 @@ repository's config names, as "Config isolation" gives.
 
 `git_argv` passes `-c core.hooksPath=/dev/null` on every git run, so git runs no hook of the
 repository's, `git lfs` hooks included. `push` uploads LFS objects with its own `git lfs push`, so
-it needs no LFS `pre-push` hook. `docs/design.md` gives why hooks are off under "The git plugin's
-constraints".
+it needs no LFS `pre-push` hook.
+
+A hook planted in a repository would run with the cage's credential and domains: the `push` cage
+holds `GH_TOKEN` and reaches GitHub. A value on the command line outranks the repository's config,
+so the repository cannot turn hooks back on.
 
 ### Config isolation
 
 git in a cage never takes its settings from the repository's config. The agent writes `.git/config`
 with its own file tools, and a key there can name a program for git to run: a filter driver, a
-`diff` textconv, `core.fsmonitor`, or an LFS custom transfer. So every action, through the wrapper
-or as a script, runs git against a config that the plugin builds for that action. `build_isolation`
-in `scripts/git_plugin/cage.py` builds it, and `docs/design.md` gives the decision under "The git
-plugin's constraints".
+`diff` textconv, `core.fsmonitor`, or an LFS custom transfer. That program would run with the cage's
+credential. So every action, through the wrapper or as a script, in a cage with a credential or
+without one, runs git against a config that the plugin builds for that action. The plugin never
+filters the agent's config. `build_isolation` in `scripts/git_plugin/cage.py` builds it.
 
 Before git runs, the plugin finds the repository's real git directories by reading files, with no
 git run. The git directory is `<repo>/.git`, or the directory a `.git` file names after `gitdir: `.
@@ -384,9 +396,9 @@ The scratch config holds two kinds of key, and no other key reaches git:
   remote URL in a form that runs one fails on the transport pins below. Each copied value is quoted,
   so no value or name can open a key of its own.
 
-The plugin's code fixes both sets. A key it does not name stays in the file git does not read,
-whatever the key does. An `include.path`, a `url.<base>.insteadOf`, a `credential.*` key, or a
-`config.worktree` therefore has no effect in a cage.
+The plugin's code fixes both sets, and no instance config changes them. A key it does not name stays
+in the file git does not read, whatever the key does. An `include.path`, a `url.<base>.insteadOf`, a
+`credential.*` key, or a `config.worktree` therefore has no effect in a cage.
 
 git LFS still reads a working-tree `.lfsconfig`, but takes from it only a restricted set of keys,
 and none of them names a program. git LFS reads its other keys from git's config, which is the
@@ -409,8 +421,8 @@ An `ext::` URL runs a program in the cage, and an `fd::` URL talks to a file des
 a remote. A `file://` URL or a local path starts a local `upload-pack` or `receive-pack` that git
 gives none of the plugin's `-c` values and none of the isolation's environment, so the target
 repository's own config and hooks would run in the cage. A remote URL in one of these forms fails on
-the denied transport. Network transports stay allowed: the egress proxy bounds where they go, as
-`docs/design.md` gives under "The cage".
+the denied transport. Network transports stay allowed: the egress proxy bounds where they go, as the
+core's architecture gives under [Egress](../../docs/architecture.md#egress).
 
 The pins govern git's transports only. A `.lfsconfig` can set `lfs.url` to a local path. git LFS
 then copies objects with its built-in standalone file adapter, which runs no program.

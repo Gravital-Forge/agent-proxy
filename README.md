@@ -7,8 +7,8 @@ credentials stay in the container, so the agent never holds one.
 
 Work lands on `main` through pull requests the operator merges.
 
-- `docs/design.md` is the design: the operator's closed decisions and the reasons behind them.
-- `docs/architecture.md` describes what is built, and cites the code by path.
+- [`docs/architecture.md`](docs/architecture.md) describes what is built and why, and cites the code
+  by path.
 - [`docs/reference.md`](docs/reference.md) gives the config file's fields, the operator command, and
   the results and refusals of a call.
 - `docs/runbooks/per-agent-instance.md` tells an admin how to provision, start, and tear down one

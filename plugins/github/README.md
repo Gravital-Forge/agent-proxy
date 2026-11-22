@@ -5,11 +5,11 @@ runs, and job logs. `docs/writing-a-plugin.md` gives the plugin model this follo
 
 ## The actions
 
-Each action's MCP tool name is `<plugin>_<action>`, as `docs/design.md` gives, where `<plugin>` is
-the name a config pins the image as. A config that pins the image as `github`, as "A grant" does,
-serves `pr_create` as `github_pr_create`. A config that pins it as `gh` instead serves it as
-`gh_pr_create`. `manifest.json` declares every action, its input schema, its credentials, and its
-timeout.
+Each action's MCP tool name is `<plugin>_<action>`, as the core's reference gives under
+[A scope's grants](../../docs/reference.md#a-scopes-grants), where `<plugin>` is the name a config
+pins the image as. A config that pins the image as `github`, as "A grant" does, serves `pr_create`
+as `github_pr_create`. A config that pins it as `gh` instead serves it as `gh_pr_create`.
+`manifest.json` declares every action, its input schema, its credentials, and its timeout.
 
 An action is a command action when its argv is `gh-cage`, a fixed gh prefix, and typed parameters,
 as for `pr_list`, `run_view`, and `run_list`. "The repository list" gives what `gh-cage` does. The
@@ -392,10 +392,10 @@ The `pr_create` grant allows `attach`: its root holds the files to upload, and i
 - `Dockerfile` builds the image on the Alpine base the git plugin pins, with git and Python 3 from
   apk. It installs gh from gh's release tarball, which it checks against a pinned SHA-256: the
   `GH_VERSION` and `GH_SHA256` build arguments pin the version and the hash, and a tarball whose
-  hash differs fails the build. `docs/design.md` gives, under "Plugins and actions", why gh does not
-  come from apk. The image sets `XDG_CACHE_HOME`, and links `gh-cage` on the `PATH` and each script
-  action's `executable` under `/plugin/bin/` to `/plugin/entry`. A command action runs `gh-cage`,
-  which runs the image's gh.
+  hash differs fails the build. gh does not come from apk, because Alpine's `github-cli` package
+  lacks `--attach`. The image sets `XDG_CACHE_HOME`, and links `gh-cage` on the `PATH` and each
+  script action's `executable` under `/plugin/bin/` to `/plugin/entry`. A command action runs
+  `gh-cage`, which runs the image's gh.
 - `describe` prints `manifest.json`.
 - `tests/stub/gh` stands in for gh. It writes its argv to the file `GH_STUB_LOG` names, and answers
   from a table of canned results. It answers an `--attach=` item whose file is named

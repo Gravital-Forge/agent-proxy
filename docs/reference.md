@@ -137,8 +137,8 @@ docker exec -i agent-proxy agent-proxy credential set github-token
 - `credential rm NAME` deletes a credential and prints `removed NAME`. It refuses a name that the
   store does not hold, and names the stored credentials.
 - `audit tail [-n COUNT]` prints the newest audit lines in the order they were written: ten, or
-  `COUNT`, a positive integer. A missing log prints nothing. The design gives what a line holds,
-  under [Audit](design.md#audit).
+  `COUNT`, a positive integer. A missing log prints nothing. The architecture gives what a line
+  holds, under [Audit](architecture.md#audit).
 - `manifest check IMAGE` runs the `describe` of a local image and checks the manifest it prints, by
   the rules of [Writing a plugin](writing-a-plugin.md#the-manifest). It never pulls, so an absent
   image is a refusal. It prints a warning for each action that declares pass-through `args`. On a
@@ -224,8 +224,8 @@ removes each file there that is more than 7 days old, at start and then once a d
 
 Every token that verifies lists the tool `agent-proxy_self_check`, whatever its scope grants. The
 tool takes no input: its input schema is an object that allows no property. It checks the scope of
-the calling token, and returns the report as its result. The design gives what each check covers,
-under [Surface](design.md#surface).
+the calling token, and returns the report as its result. The architecture gives what each check
+covers, under [The self-check](architecture.md#the-self-check).
 
 The report is one object:
 

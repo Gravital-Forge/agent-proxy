@@ -1,27 +1,28 @@
 # Writing a plugin
 
 A plugin is an OCI image that declares actions in a manifest. The proxy runs each action in a cage
-built from that image. `docs/design.md` gives the plugin model under "Plugins and actions" and the
-cage under "The cage". This document tells a plugin author what the image holds, how to write its
-manifest, how an action runs, and how to check the manifest.
+built from that image. The architecture defines each term under
+[Concepts](architecture.md#concepts), and gives the cage under [The cage](architecture.md#the-cage).
+This document tells a plugin author what the image holds, how to write its manifest, how an action
+runs, and how to check the manifest.
 
 ## The image
 
 The image holds an executable named `describe` on its `PATH`. `describe` prints the manifest as
 UTF-8 JSON on stdout and exits 0.
 
-The proxy runs `describe` with the image's entrypoint set to `["describe"]` and no command, in the
-container that `docs/architecture.md` gives under `plugins.py`. So `describe` reads only what the
-image holds, writes nothing but its output, and keeps within that section's time and output limits.
-A non-zero exit shows the start of stderr, so write a diagnostic there.
+The proxy runs `describe` with the image's entrypoint set to `["describe"]` and no command, in a
+container with no network, a read-only root filesystem, no capabilities, and `no-new-privileges`,
+which it removes whatever happens. So `describe` reads only what the image holds and writes nothing
+but its output. It must exit within 30 seconds, and its stdout must stay within 1 MiB. A non-zero
+exit shows the first 1,024 bytes of stderr, so write a diagnostic there.
 
 The self-check also runs `describe`, in a cage that the runner builds as "How an action runs" below
 gives for an action. The cage starts behind the root verifier, as user `0:0`, on the Docker network
 `none`, with no roots, no credentials, and no grant `env`. So `describe` must also exit 0 there.
-`docs/architecture.md` gives the check under `selfcheck.py`.
+[The self-check](architecture.md#the-self-check) gives the check.
 
-The simplest `describe` prints a manifest file that the image holds. `docs/design.md` gives where a
-plugin's source lives under "Plugins and actions" and "Repository layout".
+The simplest `describe` prints a manifest file that the image holds.
 
 ## The manifest
 
@@ -57,8 +58,8 @@ Every action states each of these members. None has a default.
   a grant supplies a credential in these forms under
   [A scope's grants](reference.md#a-scopes-grants).
 - `timeout` is the action's default timeout, a duration string matching `DURATION_PATTERN` in
-  `config.py`, such as `30s` or `5m`, whose count fits a Python `timedelta`. `docs/design.md` gives
-  how a grant overrides it under "The cage".
+  `config.py`, such as `30s` or `5m`, whose count fits a Python `timedelta`. A grant's `timeout`
+  overrides it, as [A scope's grants](reference.md#a-scopes-grants) gives.
 
 ### A command action
 
@@ -114,12 +115,13 @@ exempt, and go into argv as the input gives them.
 ## How an action runs
 
 An agent sees each action that its token's scope grants as an MCP tool, with the manifest's
-`input_schema` as the tool's input schema. `docs/design.md` gives the surface, and the tool's name,
-under "Surface".
+`input_schema` as the tool's input schema. [A scope's grants](reference.md#a-scopes-grants) gives
+the tool's name, and [The call path](architecture.md#the-call-path) gives how a call reaches its
+cage.
 
-The proxy runs each call in a new cage built from the plugin's image. `docs/architecture.md` gives
-the cage under `runner.py`, and `docs/design.md` gives it under "The cage". The cage's entrypoint
-replaces the image's entrypoint and command:
+The proxy runs each call in a new cage built from the plugin's image, as
+[The cage](architecture.md#the-cage) gives. The cage's entrypoint replaces the image's entrypoint
+and command:
 
 - A command action's entrypoint is the argv above.
 - A script action's entrypoint is its `executable`, with no arguments. The script reads its input on
@@ -128,8 +130,8 @@ replaces the image's entrypoint and command:
 The proxy's root verifier runs first in every cage, and then replaces itself with that entrypoint.
 So the action still runs as PID 1, with its argv, stdin, and environment unchanged. A bare
 executable name is found on the image's `PATH`. The proxy owns `/.agent-proxy` in the cage, so an
-image must not rely on that path. `docs/architecture.md` gives the verifier under "The root
-verifier".
+image must not rely on that path. [The root verifier](architecture.md#the-root-verifier) gives the
+verifier.
 
 Inside the cage:
 
@@ -146,8 +148,7 @@ that holds what a command action returns: the exit code, stdout, and stderr. A s
 output cap goes to an overflow file, so a script whose output passes the cap fails. The reference
 gives the cap and the result forms under [Results and refusals](reference.md#results-and-refusals).
 
-The cage's network follows the grant's `domains`. `docs/design.md` gives the egress model under "The
-cage", and `docs/architecture.md` gives the network and its proxy under `egress.py`.
+The cage's network follows the grant's `domains`, as [Egress](architecture.md#egress) gives.
 
 - The cage reaches the web only through the proxy that `HTTPS_PROXY` names, so use a tool that
   honours that variable. The proxy passes each host the grant names and refuses a host the grant

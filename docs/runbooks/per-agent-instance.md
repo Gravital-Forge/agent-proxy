@@ -1,9 +1,10 @@
 # Per-agent instance runbook
 
 This runbook takes an admin through one agent's instance: provisioning, the first start, teardown,
-and the deployment acceptance checks. `docs/design.md` gives the isolation model under "Deployment
-and isolation", and `docs/architecture.md` describes the instance under "The instance". The examples
-use the agent `agent-01`, whose service user is `agentproxy-agent-01`.
+and the deployment acceptance checks. The architecture gives the isolation model under
+[The isolation model](../architecture.md#the-isolation-model), and the instance under
+[The instance](../architecture.md#the-instance). The examples use the agent `agent-01`, whose
+service user is `agentproxy-agent-01`.
 
 Every step runs as root. Where a step names `<uid>`, it means the service user's uid, which
 `id -u agentproxy-agent-01` prints. `<home>` is the agent's home, `<tree>` is the resolved path of
@@ -97,7 +98,7 @@ Three phrases below stand for the way the script reaches the service user and th
    tree is a directory. It reads the agent's home, the tree as `realpath -- <path>`, where `<path>`
    is the value of `--tree` or `<home>/Projects`, and the agent's group as `id -gn agent-01`. It
    stops when the tree's realpath does not lie strictly inside the realpath of the home;
-   `docs/design.md` gives why under "Deployment and isolation".
+   [The tree inside the home](../architecture.md#the-tree-inside-the-home) gives why.
 2. `create_service_user` creates the service user with
    `useradd --create-home --shell /usr/sbin/nologin agentproxy-agent-01`. The service user then
    needs a line in both `/etc/subuid` and `/etc/subgid`. When either line is missing, the step stops
@@ -135,9 +136,9 @@ Three phrases below stand for the way the script reaches the service user and th
 10. `create_overflow_dir` creates the overflow directory, as the agent, with
     `install -d -m 2770 <overflow_dir>`, so the agent and its group own it. It stops when that path
     is a symbolic link.
-11. `apply_tree_permissions` gives the tree the group, setgid, and ACL entries that `docs/design.md`
-    sets under "Deployment and isolation". It runs each command as the agent, so it changes only the
-    entries the agent owns:
+11. `apply_tree_permissions` gives the tree the group, setgid, and ACL entries that
+    [The agent's tree](../architecture.md#the-agents-tree) sets. It runs each command as the agent,
+    so it changes only the entries the agent owns:
 
     ```sh
     find <tree> <closed> -o -user agent-01 ! -group <agent group> -exec chgrp -h <agent group> {} +
@@ -198,7 +199,7 @@ warnings. Then:
    as a credential that is not stored, a root that the instance cannot open, or an egress proxy that
    does not run. Fix each one, then run the check again. The command exits 1 until every row passes.
    The agent can run the same check on its own scope through the tool `agent-proxy_self_check`.
-   `docs/design.md` gives what the self-check covers under "Surface".
+   [The self-check](../architecture.md#the-self-check) gives what the self-check covers.
 
 To put a changed config in force later, install it over the installed config:
 
@@ -271,9 +272,8 @@ Teardown leaves these in place:
 
 ## Deployment acceptance checks
 
-`docs/design.md` lists the design's checks under "Deployment acceptance checks". A check that tests
-one plugin's own setting cites that plugin's README instead. `.dev/verification.md` says why every
-check runs here and never in the project. Every `docker` command below runs as root with
+A check that tests one plugin's own setting cites that plugin's README. `.dev/verification.md` says
+why every check runs here and never in the project. Every `docker` command below runs as root with
 `DOCKER_HOST=unix:///run/user/<uid>/docker.sock`.
 
 1. **Provisioning twice.** On a clean host, provision once. Then capture four records:
@@ -464,5 +464,5 @@ check runs here and never in the project. Every `docker` command below runs as r
     `ghcr.io/gravital-forge/agent-proxy-verifier@sha256:<digest>`. Run
     `docker image inspect --format '{{json .RepoDigests}}' <reference>`, then call any tool the
     token grants through the agent's MCP client. The check passes when that `inspect` prints a list
-    that holds `<reference>`, and the call succeeds. `docs/design.md` gives the verifier's pin under
-    "Deployment and isolation".
+    that holds `<reference>`, and the call succeeds.
+    [The root verifier](../architecture.md#the-root-verifier) gives the verifier's pin.

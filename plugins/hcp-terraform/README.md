@@ -15,9 +15,10 @@ a GET, and no action reads state, state outputs, variables, or plan JSON.
 ## The actions
 
 A config that pins the image as `hcp-terraform`, as "A grant" does, serves each action as the MCP
-tool `hcp-terraform_<action>`, by the rule `<plugin>_<action>` that `docs/design.md` gives:
-`run_list` becomes `hcp-terraform_run_list`. `manifest.json` declares every action, its input
-schema, its credential, and its timeout of `2m`.
+tool `hcp-terraform_<action>`, by the rule `<plugin>_<action>` that the core's reference gives under
+[A scope's grants](../../docs/reference.md#a-scopes-grants): `run_list` becomes
+`hcp-terraform_run_list`. `manifest.json` declares every action, its input schema, its credential,
+and its timeout of `2m`.
 
 ### `workspace_list`
 

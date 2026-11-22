@@ -1,554 +1,306 @@
 # agent-proxy architecture
 
-This document describes what is built, and cites the code by path. The decisions behind it live in
-`docs/design.md`; this document names the section that holds each one and does not restate it.
+An agent that needs a credential usually gets the credential. A token kept as a file the agent can
+read is held by anything that reads it, and it cannot be narrowed to particular operations. A tool
+surface hardcoded to one service serves nothing else. And a tool such as git runs code that a
+repository controls, such as hooks and the programs that `.git/config` names, so that code gets
+every reach the tool has.
 
-## The core package
+agent-proxy answers each problem. The operator mints tokens bound to a policy, and the agent holds
+only a token. Plugins put any credentialed tool behind the same surface. Each call runs in a cage
+that bounds what the executed code can touch: only the files, the hosts, and the credentials its
+grant names.
 
-The core is the uv package in `core/agent-proxy/`, placed as `docs/design.md` sets out under
-"Repository layout".
+This document describes what is built and why, and cites the code by path. The
+[reference](reference.md) gives the config file's fields, the operator command, and the results and
+refusals of a call.
 
-- `core/agent-proxy/pyproject.toml` declares the dependencies, the `agent-proxy` console script, and
-  the poe tasks that lint and test the package.
-- `core/agent-proxy/agent_proxy/` holds the source.
-- `core/agent-proxy/tests/unit/` holds the unit tests. They are plain pytest with `unittest.mock`,
-  and none of them touches Docker.
-- `core/agent-proxy/tests/integration/` holds the integration tests. They run on the Docker daemon
-  that `DOCKER_HOST` names. `conftest.py` there builds the test plugin, pushes it to a `registry:3`
-  container that keeps its storage on a tmpfs, and removes the local image, so a plugin test pulls
-  the plugin by digest. For the cage tests, it also builds the test plugin locally under its own
-  tag, and creates an internal network that each of their cages joins. For the egress tests, it
-  builds the probe image from `core/agent-proxy/tests/egress-probe/`, the pinned Alpine base with
-  curl added, and every egress test cage runs that image. It builds the verifier image from
-  `core/verifier/`, and points the runner's `VERIFIER_IMAGE` at it for every test.
-  `test_verifier.py` there runs the verifier as the entrypoint of a hardened cage, outside the
-  runner. `test_transport.py` there starts an `Instance` from `mcp.py`, serves its app on a loopback
-  port, and drives the MCP surface over HTTP with a FastMCP client. For the instance tests,
-  `conftest.py` builds the instance image from `core/docker/Dockerfile`, and its test variant from
-  `core/agent-proxy/tests/instance-image/`. That variant's `.pth` startup hook sets the test label,
-  and its Dockerfile sets `AGENT_PROXY_VERIFIER_IMAGE` to the verifier image the tests build. It
-  also pushes the git plugin, and the github plugin with its stub gh, to the registry.
-  `instance_harness.py` there holds the helpers the instance tests share: running the start script,
-  waiting for the MCP surface, `docker exec`, and cleanup. `test_instance_image.py` checks the image
-  and the run line that the start script gives it. `test_instance_serves.py` starts an instance on
-  the agent's own daemon and drives it through MCP and `docker exec`. It also drives the self-check
-  through both entrances, the tool and the command, and makes the credential, root, egress, and
-  plugin checks fail on purpose. Its `test_an_instance_pulls_its_verifier_by_digest_at_start` starts
-  an instance whose verifier is referenced by digest and absent from the daemon, and checks that a
-  call succeeds after the instance pulls the verifier.
-- `core/agent-proxy/tests/test-plugin/` holds the source of the test plugin image. The test plugin
-  holds an action for each thing the tests reach, and its `manifest.json` declares them.
+## Concepts
 
-## Modules
+These terms carry one meaning each through the code and the documents.
 
-Each module below is a file in `core/agent-proxy/agent_proxy/`.
+- **Operator** — the person who runs an instance: who writes its config, stores its credentials, and
+  mints its tokens.
+- **Instance** — one running agent-proxy serving exactly one agent user. Every agent gets its own
+  instance; nothing is shared between instances.
+- **Scope** — a named policy in the instance's config file (for example `dev-agent`): the complete
+  list of grants a token holding it may use.
+- **Token** — a bearer secret that names exactly one scope. It carries no policy of its own.
+- **Grant** — one entry in a scope: an action, plus that action's roots, domains, and credentials,
+  an optional timeout override, and an optional `env`.
+- **Action** — one operation a plugin offers, of one of two kinds:
+  - a **command** action runs a fixed argv prefix at subcommand granularity (`gh pr create`, never
+    bare `gh`), extended by typed parameters;
+  - a **script** action runs an executable in the image that takes its input as JSON on stdin and
+    prints JSON on stdout, so filtering and special logic live there.
+- **Plugin** — an OCI image, pinned by digest, whose manifest declares its actions.
+  [Writing a plugin](writing-a-plugin.md) gives what the image holds.
+- **Manifest** — the JSON a plugin image's `describe` entrypoint prints.
+  [The manifest](writing-a-plugin.md#the-manifest) gives its members and rules.
+- **Cage** — the short-lived container one action call runs in, built from its grant: only the
+  grant's roots mounted, only the grant's domains reachable, only the grant's credentials present.
+- **Egress proxy** — an iron-proxy container serving one distinct domain list.
 
-### `config.py`
+## The call path
 
-This module holds the rules the other modules share, and loads the instance config those rules
-govern. The reference gives every field and rule of the config under
-[The config file](reference.md#the-config-file). The pydantic models check each field's form, and
-the `InstanceConfig` validator checks the rules that span fields, such as a root lying inside the
-agent tree. `runner.py` matches the verifier's reference against `PINNED_IMAGE_PATTERN`, the form a
-plugin's image takes, and `egress.py` checks `DOMAIN_PATTERN` again before it writes a proxy config.
+The instance is an MCP server over the Streamable HTTP transport, at `/mcp` on a loopback port that
+is unique to the instance. The agent's MCP client sends its token as `Authorization: Bearer <token>`
+(`core/agent-proxy/agent_proxy/mcp.py`).
 
-Config validation does not consult the credential store. A credential that a grant names and the
-store lacks is a warning, not a failure, and the callers of `load_config` compute it with
-`unset_warnings` from `credentials.py`.
+A listing returns the self-check tool and one tool for each grant of the token's scope in the config
+in force, sorted by name, each named as [A scope's grants](reference.md#a-scopes-grants) gives. A
+tool's input schema is the action's input schema from the manifest, unchanged. A listing does not
+record the token's use. A token that does not verify, and a token store that cannot be read, each
+list no tools. A token whose scope the config in force does not define lists the self-check tool
+alone.
 
-### `credentials.py`
+A call goes through these steps:
 
-`CredentialStore` keeps each credential as one file in a directory, named for the credential and
-holding its value verbatim. `set` writes a value through `write_owner_only`, which writes a staging
-file whose name begins with a dot, with mode `0o600`, then renames it over the target, so `entries`
-never lists a half-written credential. `egress.py` writes each proxy config through the same
-function. `entries` reports each name with its set time, read from the file's modification time.
-`names` returns the stored names. `read` returns a stored value as bytes, and `path` returns the
-file that holds it. Each refuses a name that breaks `NAME_PATTERN` with `InvalidNameError`, and a
-name the store does not hold with `UnknownCredentialError`. `docs/design.md` gives the credential
-model under "Credentials".
+1. The instance verifies the bearer token and records its use.
+2. It takes the config in force and holds it until the call ends, so a reload during the call does
+   not change the grant the call runs under.
+3. It finds the grant that the tool names. A call of a tool that the token's scope does not grant
+   still reaches this step, so it is refused and audited like any other refusal.
+4. It refuses a bad call before the call waits for a cage: input that fails the action's input
+   schema, a value for argv that begins with `-`, a root it cannot open, and a credential that is
+   not stored.
+5. It runs the action in a cage, as [The cage](#the-cage) gives, and forms the result.
+6. It writes the call's audit line, as [Audit](#audit) gives, and only then returns the result.
 
-`unset_message` forms the one text that says a credential is not set and gives the command the
-operator stores it with. The warnings at start, at reload, and at token mint use it, and so does the
-runner's refusal. The reference gives the text under [Refusals](reference.md#refusals).
-
-`unset_warnings` takes scopes and the stored names. It returns `unset_message` of each credential a
-grant of the scopes names that the stored names lack, each name once, in the order the scopes and
-their grants first name it.
-
-### `auth.py`
-
-`TokenStore` keeps tokens in one SQLite file, one row per token. `mint` generates a token, stores
-only its SHA-256 digest with the name, scope, and optional expiry, and returns the token. The caller
-sees the token once, and the store cannot produce it again. `verify` compares the presented token's
-digest with every stored digest in constant time, and returns the record of a match that has not
-expired. `verify` writes nothing. `authenticate` matches as `verify` does, and on a match writes the
-token's last-used time and returns the record with that time. The match and the write are one
-`BEGIN IMMEDIATE` transaction, so the store holds its write lock from before the match. Any SQLite
-failure in `verify` or `authenticate`, a read or a write, raises `TokenStoreError`. `records` lists
-the stored tokens, and `revoke` deletes one. `docs/design.md` gives the token model under "Tokens".
-
-The store reads the clock through the `now` callable it takes, so tests pass a fixed clock.
-
-### `audit.py`
-
-`AuditRecord` holds the fields of one call. `AuditWriter` appends each record to `audit.log` as one
-JSON line, and rotates the file by size; `AUDIT_MAX_BYTES` and `AUDIT_BACKUP_COUNT` set the limits.
-Each write opens the log with `O_APPEND`, appends the line with `os.write`, and closes the log, so
-no file stays open between writes. Writes from several threads take turns. A write that fails part
-way truncates the log back to its size before the line, so the log holds no byte of that line. When
-that truncation also fails, the writer latches: `available` turns false, and every later write
-fails. Every failure raises `AuditError` to the caller and prints nothing. When an `AuditWriter` is
-created, it cuts a regular-file log back to just after its last newline, so a fragment never
-prefixes a later line. `tail` returns the newest lines in write order, and reads the rotated files
-only while it needs more lines. `docs/design.md` gives what a record holds and what it never holds
-under "Audit".
-
-### `schemas/manifest.schema.json`
-
-This file is the manifest schema, a JSON Schema that ships in the package as data. It fixes the
-members of a manifest and of each action kind, their types, and the patterns their strings match.
-`plugins.py` checks the rules the schema cannot state. `docs/writing-a-plugin.md` explains the
-manifest to a plugin author, and `docs/design.md` gives what a manifest declares under "Plugins and
-actions".
-
-### `plugins.py`
-
-This module reads a plugin's manifest from its image and checks it.
-
-`parse_manifest` takes the bytes a `describe` printed and returns a `Manifest`, which holds each
-action by name as a `CommandAction` or a `ScriptAction`. It checks in three stages and stops after
-the first stage that fails. First it decodes the bytes as a JSON object. Then it validates the
-document against the manifest schema. Last it checks the rules the schema cannot state, reusing the
-name, duration, and credential-path checks of `config.py`. `docs/writing-a-plugin.md` gives every
-rule each stage checks; among them, no two parameters of one action share a flag. A failure raises
-`ManifestError`, which holds one message per failure. Each message from the schema stage or the rule
-stage is located by its JSON path. `Manifest.warnings` returns one message per action that declares
-pass-through args. `decode_json_object` is the first stage, and `results.py` also uses it to read a
-script's output.
-
-`describe` runs an image's `describe` entrypoint in a container and returns its stdout. The
-container has no network, a read-only root filesystem, no capabilities, and `no-new-privileges`, and
-it is removed whatever happens. `DESCRIBE_TIMEOUT_SECONDS` bounds the run, and
-`DESCRIBE_STDOUT_LIMIT` bounds the stdout. A non-zero exit is a refusal that carries the exit status
-and the start of stderr, at most `STDERR_EXCERPT_LIMIT` bytes. Every describe container carries
-`CONTAINER_LABELS`, which the integration tests set to the test label.
-
-`ensure_image` pulls an image by its reference only when the daemon does not hold it.
-`load_manifest` makes the image present, then describes it and parses the output. `check_image`
-describes a local image and parses the output, and never pulls. A Docker failure raises
-`PluginImageError`. Each function takes the Docker client as an argument; the module opens none.
-`DOCKER_FAILURES` holds the error classes that a Docker call can raise. `WAIT_TIMEOUTS` holds the
-error classes that a container wait raises when its timeout passes, which depend on the transport.
-`runner.py` catches both.
-
-### `results.py`
-
-This module turns what a cage printed into a call's result, and removes old overflow files. The
-reference gives the result forms, the cap, and the retention under
+The reference gives the result forms and every refusal under
 [Results and refusals](reference.md#results-and-refusals).
 
-`capture_stream` reads one stream of a cage as chunks and returns a `CapturedStream`, which holds
-the bytes of a stream within the cap, or the overflow file's path and the stream's size. The module
-holds at most the cap and one more chunk in memory. It opens the overflow directory one component at
-a time from `/`, and refuses a symbolic link at any component. It refuses an overflow file that
-already exists. A file it cannot create or write raises `OverflowWriteError`. `check_overflow_dir`
-walks a directory the same way, then opens a file with no name in it through `O_TMPFILE` and closes
-it, so it leaves no file, and raises `OverflowWriteError` when it cannot.
+### Reload
 
-`command_content` and `script_content` form a command's and a script's result.
+The config file is the operator's. The operator installs it root-owned on the host, and the instance
+reads it through a read-only mount, so neither the agent nor the instance can change it.
 
-`sweep_overflow` judges and removes a symbolic link as itself, never its target, and skips an entry
-that is gone before it acts. `OverflowSweeper` runs the sweep on a daemon thread. It reads the
-directory and the time through the callables it takes, fresh for each sweep. A sweep that fails logs
-a warning, and the thread keeps its schedule.
+`agent-proxy reload` asks the running instance to load the file again
+(`core/agent-proxy/agent_proxy/reload.py`). The instance validates the new config whole, loads the
+manifest of each of its plugins, and starts every egress proxy the new config needs. Only then does
+it put the new config in force, in one step, and one reload runs at a time. A config that fails any
+of these steps is refused, and the running config stays. Calls already running finish under the
+config they started with.
 
-### `egress.py`
+After a reload, and after the last call under a config that is no longer in force, the instance
+removes each egress proxy and network that neither the config in force nor a config still in use
+names.
 
-This module gives each cage the egress its grant names: one proxy for each distinct domain list,
-each on its own internal network. `docs/design.md` gives the egress model under "The cage".
+`reload` and `check` reach the instance through its control socket, which serves one request at a
+time. Editing a scope changes the reach of every token naming it, from the next reload.
 
-`list_key` returns the key of a domain list, a SHA-256 digest of the sorted list cut short, so two
-grants that name the same domains in any order share one key. `network_name` forms, from the key,
-the name of the list's internal network and of its proxy container. `domain_lists` returns each
-distinct sorted list that the grants of a config name. The empty list has a key and a network like
-any other list.
+## The cage
 
-`CageNetwork` holds the network a cage joins and the environment that network gives it.
-`cage_network` returns it for a grant's domains. For a non-empty list, the environment holds one
-variable, `HTTPS_PROXY=http://egress:1080`, which names the proxy's tunnel. For the empty list, the
-environment is empty.
+Every action call runs in a fresh sibling container on the instance's rootless Docker daemon, never
+inside the instance's process (`core/agent-proxy/agent_proxy/runner.py`).
 
-`render_config` returns, as YAML, the iron-proxy config that allows exactly the domains of a list.
-It refuses an empty list, and a domain that does not match `DOMAIN_PATTERN`, with
-`EgressConfigError`. Every listener but the tunnel binds loopback, so a cage on the network reaches
-only the tunnel on `TUNNEL_PORT`. The config has no management block, which keeps the management
-listener off. The proxy passes TLS through by SNI and holds no CA.
+- **Files:** each root in the grant is bind-mounted at its own host path with the grant's mode.
+  Same-path mounting keeps git worktrees working. Nothing else of the host is visible. A plugin
+  carries no path metadata: the cage is the only file boundary, and a path outside the grant's roots
+  does not exist in it, so the tool fails with its own error. The cage's environment names the roots
+  in `AGENT_PROXY_ROOTS`, a JSON array in grant order, so a plugin acts on exactly its roots without
+  inferring them.
+- **Credentials:** the cage receives each credential its grant gives, as an environment variable or
+  as a read-only file mounted from the credential store, and no other.
+- **Hardening:** the cage runs as container root, which the rootless daemon maps to the instance's
+  service user. It drops every capability, sets `no-new-privileges`, and has a read-only root
+  filesystem with a 64 MiB tmpfs at `/tmp` for scratch.
+- **Concurrency:** the config's `max_cages` caps the cages that run at one time. A call over the cap
+  waits, with no bound, for a cage to end. Every call and every self-check of an instance shares one
+  count, so calls that started under different configs still count together.
+- **Timeout:** the grant's `timeout`, or else the action's. It runs from the cage's start and covers
+  a script's input and the wait for the exit. On timeout the cage is killed.
 
-`start_proxy` creates the proxy of a list from `IRON_PROXY_IMAGE`, joins it to the list's network
-under the alias `PROXY_ALIAS` and then to `BRIDGE_NETWORK`, starts it, and returns it once it
-serves. Both networks must already exist. The proxy runs as uid 0 with a read-only root filesystem,
-every capability dropped, and `no-new-privileges`. The daemon bind-mounts the proxy's config
-directory into it read-only, and the proxy's command names the config file. It is ready when its log
-holds the tunnel's start line and it still runs. A proxy that stops, or is not ready within
-`PROXY_READY_TIMEOUT_SECONDS`, raises `EgressStartError`, which carries the tail of its log, and is
-removed. A Docker failure raises `EgressError`. `IRON_PROXY_IMAGE` pins the proxy image by digest.
+The instance removes each cage by force whatever happens, and the cage holds its place under the cap
+until it is removed. Files the agent owns belong to a uid that the cage's user namespace does not
+map, so the cage writes them through the ACL but cannot change their mode or owner.
 
-`EgressProxies` manages the egress networks and proxies on one daemon. `ensure` takes domain lists,
-and makes the proxy image, the bridge, and each list's network and proxy present. The empty list
-gets its network and no proxy. `ensure` keeps a proxy that runs, on `IRON_PROXY_IMAGE`, from a
-config file that holds exactly what `render_config` renders, and replaces any other proxy of that
-name. A proxy that fails to start is removed with its config directory. A failed image lookup or
-pull raises `PluginImageError`, and any other failure raises `EgressError` or `EgressStartError`.
-`prune` takes the lists to keep. It removes every other egress proxy with its config directory, then
-every other egress network, and the bridge always stays. `prune` never raises: a failure logs a
-warning, and the next prune tries again.
+Before it creates a cage, the instance opens each root's directory one path component at a time from
+`/`, and follows no symbolic link anywhere in the path. A root that is a symbolic link, is not a
+directory, or does not exist is refused. The instance records the device and inode of each
+directory, and holds each one open until the cage is removed. A held directory keeps its inode from
+any other directory, so a root deleted and created again cannot match the recorded pair.
 
-`proxy_status` returns the Docker status of a domain list's proxy, or `None` when the daemon holds
-no proxy of that name, and raises `EgressError` when the lookup fails in any other way.
+### The root verifier
 
-Every egress network and proxy carries the label `agent-proxy.egress`, set to the list's key, or to
-`bridge` on the bridge, and `prune` finds them by that label. Each also carries `LABELS`, which the
-integration tests set to the test label.
-
-### `runner.py`
-
-This module runs one action call in one cage, a container that exists for that call only.
-`docs/design.md` gives the cage under "The cage".
-
-A `CageCall` holds the call ID, the image, the action, the grant, the arguments, the cage's network
-as a `CageNetwork`, and the config's `overflow_dir` and `max_cages`. `CageRunner.run` takes a call
-and returns an `Outcome`. It refuses a bad call before it takes a slot under the cap:
-
-1. The call ID must match `CALL_ID_PATTERN`.
-2. `validate_input` checks the arguments against the action's input schema, draft 2020-12, and
-   raises `InputError` with one message per violation.
-3. For a command action, `form_argv` forms argv as `docs/writing-a-plugin.md` gives under "How argv
-   is formed", and raises `InputError` for a value that begins with `-`. For a script action, the
-   entrypoint is the executable, and `script_stdin` gives the arguments as compact UTF-8 JSON.
-4. `hold_roots` opens each root's directory one component at a time from `/`, with `O_DIRECTORY` at
-   every step and `O_NOFOLLOW` on each component after `/`, so it follows no symbolic link anywhere
-   in the path. The daemon follows a link in a bind source. A component that is a symbolic link, is
-   not a directory, or does not exist raises `RootError`. For each root, `hold_roots` returns a
-   `RootIdentity`: the path, and the device and inode of the directory it opened. It holds each
-   directory's descriptor open until the run ends, whether it returns or raises. A cage, if there is
-   one, is removed before the descriptors close. A released inode can be reused, so a root deleted
-   and recreated in the meantime could match the recorded pair; a held descriptor keeps its inode
-   from any other directory.
-5. `roots_environment` gives the cage `ROOTS_ENV_NAME`, which holds the grant's root paths in grant
-   order as a compact JSON array. `cage_environment` reads each credential the grant gives as an
-   environment variable. The grant's `env` adds each of its pairs as given. `cage_mounts` binds each
-   root at its own path with the grant's mode, then binds each credential the grant gives as a file,
-   read-only, from its file in the credential store. A credential that is not stored raises
-   `CredentialError` with `unset_message` of its name. When several are not stored, the refusal
-   names the first env credential in grant order that is not stored, else the first such file
-   credential. A credential's environment value that is not UTF-8 or holds a NUL also raises
-   `CredentialError`. The runner reads the store on every call. `_create` adds one more mount to
-   these: the verifier image, read-only, at `VERIFIER_MOUNT`.
-
-The run then waits for a slot, creates the cage, starts it, and removes it by force whatever
-happens. The slot stays taken until the cage is removed. The cage's entrypoint is the verifier's
-argv wrapped around the action's: `VERIFIER_PATH`, a nonce that is new for each call, each root's
-path, device, and inode as decimal text, `--`, then the argv or the executable. The entrypoint also
-clears the image's command. "The root verifier" below gives what the verifier checks. The cage runs
-as `CONTAINER_USER`, with a read-only root filesystem, every capability dropped,
-`no-new-privileges`, a tmpfs at `TMPFS_PATH` with `TMPFS_OPTIONS`, `CONTAINER_LABELS`, and the
-`LOG_DRIVER` log driver. The runner applies the call's `CageNetwork` as given: the cage joins its
-network, and gets its environment beside the roots variable, the grant's credentials, and the
-grant's `env`. A script's input goes to the cage's stdin, then end of file. A script that stops
-reading its input is not a failure in itself.
-
-The timeout is the grant's, or else the action's. It runs from the start, and covers the input and
-the wait for the exit. After the exit, an exit code of `VERIFIER_REFUSED_EXIT` sends the run to the
-cage's stderr first. `_first_stderr_line` reads stderr up to its first newline, at most
-`_VERIFIER_LINE_BYTES` of it. A line that begins with the call's nonce and `root` is the verifier's
-refusal of a root, and raises `RootError`. A line that begins with the nonce and `exec` raises
-`CageStartError`. Any other line leaves the exit code to the action. An action can exit with that
-code itself, but it never sees the nonce, so it cannot forge a refusal. A root refused in the cage
-is refused after the call takes its slot, unlike the refusals listed above. Otherwise the run reads
-stdout and stderr from the cage's log through `capture_stream`, and forms the result in
-`results.py`. The `Outcome` holds the result, the exit code, the duration in milliseconds, the size
-of each stream, and whether a stream overflowed.
-
-Every refusal and failure that `runner.py` raises itself is a `RunnerError`. A create, an attach of
-stdin, or a start that fails raises `CageStartError`. The verifier's `exec` refusal comes after the
-start, and still raises `CageStartError`, as any action that cannot start does. The verifier's
-`root` refusal raises `RootError`. A cage past its timeout raises `CageTimeoutError`. Any other
-failure after the start, a failed removal included, raises `CageFailedError`. An
-`OverflowWriteError` passes through unchanged.
-
-`CageLimiter` counts the running cages of an instance, and every call shares one. `slot` waits with
-no bound until fewer cages run than the limit it is given. Each call brings its own limit, so calls
-that started under different configs still share one count. `CageRunner` takes the Docker client,
-the credential store, and the limiter; the module opens none of them.
-
-`VERIFIER_IMAGE` is the reference of the verifier image that every cage mounts. The module sets it
-when it loads, with `verifier_image(os.environ)`: the value of `AGENT_PROXY_VERIFIER_IMAGE`, or
-`SOURCE_VERIFIER_IMAGE`, which is `agent-proxy-verifier:1`, when the variable is unset or empty.
-`ensure_verifier` takes the Docker client and makes a verifier pinned by digest present: when
-`VERIFIER_IMAGE` matches `PINNED_IMAGE_PATTERN`, it calls `ensure_image` from `plugins.py`, which
-pulls the image when the daemon does not hold it and raises `PluginImageError` on a Docker failure.
-It neither looks up nor pulls a tag reference.
-
-### `reload.py`
-
-This module holds the config in force and replaces it on request.
-
-A `Snapshot` holds an `InstanceConfig`, the manifest of each of its plugins, and its warnings. The
-warnings are those of the manifests, then one per credential a grant names that the credential store
-lacks, from `unset_warnings` over the stored names that `build_snapshot` takes. `build_snapshot`
-loads the config file with `load_config`, then loads each plugin's manifest through the
-`load_manifest` callable it takes. A `load_config` refusal propagates unchanged, and no plugin
-loads. Otherwise `build_snapshot` gathers each plugin that fails to load and each grant whose action
-its plugin's manifest does not declare into one `ConfigError`, and every message names the config
-file. It checks a grant only against a plugin whose manifest loaded. The callable is the seam to
-Docker: a caller binds `plugins.load_manifest` to a client, and a unit test passes a fake.
-
-`LiveConfig` holds the snapshot in force and an egress collaborator, an object with the `ensure` and
-`prune` of the `Egress` protocol, as `EgressProxies` has. `LiveConfig.start` builds the first
-snapshot, ensures the egress its grants name, prunes every other egress resource, and returns the
-`LiveConfig`. A call takes its snapshot through `use`, which holds the snapshot in use from the
-call's start to its end, so the egress that snapshot names stays through a reload. `current` returns
-the snapshot in force.
-
-`reload` builds a snapshot, ensures its egress, and only then puts it in force with one reference
-assignment, one reload at a time. A build or an ensure that fails raises, and the snapshot in force
-stays. A prune keeps each domain list that the snapshot in force or a snapshot in use names. A
-reload prunes after it ends, whether it succeeded or failed. The last use of a snapshot no longer in
-force also starts a prune when it ends. That prune runs on a daemon thread named `egress-prune` once
-no reload holds the reload lock, and the use returns without waiting for it. `docs/design.md` gives
-the reload decisions under "Config".
-
-`ControlServer` serves reload and check requests on a Unix socket, one at a time, from a daemon
-thread. It takes the `LiveConfig` to reload, the build that a reload calls, and the check to run: a
-callable that takes a scope name or `None` and returns one report per scope it checked. It binds the
-socket, sets its mode to `0o600`, and only then listens. It replaces a socket left at the path, and
-refuses a path that holds anything else. A path it cannot bind raises `ControlError`. A request is
-one line of at most 128 bytes: `reload`, `check`, or `check <scope>`. The reply is one JSON line. A
-reload's reply is `{"ok": true, "warnings": [...]}` or `{"ok": false, "errors": [...]}`. A check's
-reply is `{"ok": true, "reports": [...]}`, which holds the report of each scope checked, or
-`{"ok": false, "errors": [...]}` when the check is refused. The outer `ok` says whether the server
-served the request; each report's own `ok` says whether its checks passed. Any other request gets an
-error that names it and the requests the server takes.
-
-`request_reload` and `request_check` are the clients. `request_check` takes a scope name, or `None`
-for every scope. Each sends its request, waits at most `CONTROL_REPLY_TIMEOUT_SECONDS` for the
-reply, and returns it as a `ReloadReply` or a `CheckReply`. A socket with nothing listening or out
-of reach, no reply in time, a connection that closes with no reply, and a reply of another form each
-raise `ControlError`, which names the socket path. A check reply whose report or entry lacks a field
-of the report's form is a reply of another form.
-
-### `selfcheck.py`
-
-This module is the self-check. It checks one scope's local wiring against a snapshot: the things
-that can be wrong while the instance looks healthy. `docs/design.md` gives what it checks, and what
-it leaves out, under "Surface". The reference gives the report's form under
-[The self-check report](reference.md#the-self-check-report).
-
-`SelfCheck` takes the instance's Docker client, credential store, and `CageRunner`. `SelfCheck.run`
-takes a `Snapshot` and the name of a scope that its config defines, and returns a `CheckReport`.
-Each kind of check does this:
-
-- `credential` — each credential that a grant names is among the store's names, read afresh on each
-  run.
-- `root` — each root path opens through `hold_roots` from `runner.py`, as it opens for a call, and
-  closes again. A root that several grants name is checked once, by its path.
-- `overflow_dir` — the config's overflow directory passes `check_overflow_dir` from `results.py`.
-- `egress` — the proxy of each distinct non-empty domain list has the status `running`, which
-  `proxy_status` from `egress.py` reads.
-- `plugin` — for each plugin that the scope's grants use, the instance's `CageRunner` runs the
-  image's `describe` in a cage. The cage gets an empty grant, so it has no roots, no credentials,
-  and no `env`. It joins the Docker network `none`, so it has no network, and
-  `DESCRIBE_TIMEOUT_SECONDS` from `plugins.py` bounds it. It goes through the root verifier and
-  counts against `max_cages`, as the cage of a call does. The check passes when `describe` exits 0,
-  and it discards the output. The runner never pulls, so an image that has left the daemon since the
-  config loaded fails the check. A `describe` whose output passes the output cap writes an overflow
-  file on each check, as the output of any call does, and the sweep removes it.
-
-`run` turns every failed check into an entry, never an error. The refusal or Docker failure that a
-check meets becomes the detail of an entry whose `ok` is false.
-
-### `mcp.py`
-
-This module is the MCP surface: the call path, its glue to FastMCP, and the instance that serves it.
-`docs/design.md` gives the surface under "Surface" and the audit line under "Audit". The reference
-gives the result forms and the refusals under
-[Results and refusals](reference.md#results-and-refusals).
-
-`CallGateway` is the call path, and it is synchronous. `list_tools` takes the request's
-`Authorization` header, verifies its bearer token, and returns the self-check tool and one
-`ToolSpec` per grant of the token's scope in the config in force, sorted by name. A tool's input
-schema is the action's `input_schema`, and the self-check tool's is `SELF_CHECK_INPUT_SCHEMA`. A
-listing does not record the token's use. A token that does not verify and a token store that cannot
-be read each list no tools. A token whose scope the config in force does not define lists the
-self-check tool alone.
-
-`CallGateway.call` runs one call and audits it in one line. It authenticates the token, which
-records its use. It then holds the snapshot in force through `LiveConfig.use`, finds the grant that
-the tool names, and runs the cage through `CageRunner`. Its reply holds the result's content.
-
-A call of the self-check tool goes to `SelfCheck.run` from `selfcheck.py` instead of a cage. It
-holds the snapshot in force through `LiveConfig.use` for the whole check, refuses a call that
-carries any argument, and returns the report's content. Its audit line names the token and its
-scope, holds `agent-proxy_self_check` as the action and the call's arguments, and holds no exit code
-and no output size, because no single cage's output is the result. The cages that the check runs
-write no line of their own.
-
-`CallGateway.check_scopes` serves the control socket's check request. It takes a scope name, or
-`None` for every scope that the config in force defines, sorted by name, and holds the snapshot in
-force through `LiveConfig.use` for the whole request. It returns the content of each scope's report,
-and writes one audit line for each scope it checks, with no token name. While the audit writer is
-not `available`, it refuses the request. It refuses a scope that the config in force does not
-define, and names the scopes it defines. When a scope's line cannot be written, it refuses the
-request and withholds every report.
-
-Every refusal is a `CallRefusedError`, whose message is the refusal. Each error that the runner
-raises is a refusal. The audit line of a refused call holds that message in its `refusal` field. A
-call whose audit line cannot be written is refused, and its result is withheld. While the audit
-writer is not `available`, each call is refused before its token is checked, and writes no line.
-
-`ScopedTools` and `ProxyTool` connect the gateway to FastMCP. `ScopedTools` is a FastMCP `Provider`.
-It lists the tools of each request's bearer token, and resolves every tool name to a `ProxyTool`, so
-a call of a tool that the token does not list still reaches the gateway, which refuses and audits
-it. `ProxyTool.run` hands the call to the gateway on a worker thread. It returns the reply as a
-normal result, and turns a `CallRefusedError` into a FastMCP `ToolError` whose text is the refusal
-behind its prefix. The audit line's `refusal` field holds the refusal without the prefix.
-
-`build_app` returns the ASGI app that serves the gateway's tools over MCP's Streamable HTTP
-transport at `/mcp`. The app gives each input schema as the listing gives it, unchanged.
-
-`snapshot_builder` returns the build that `LiveConfig.start` and each reload call. Each build reads
-the config file, reads the credential names afresh, and loads each plugin's manifest through the
-Docker client.
-
-`Instance.start` opens the token store, the credential store, and the audit writer under the state
-directory. It then makes the verifier present with `ensure_verifier` from `runner.py`, and starts
-the live config with `EgressProxies` over `egress/`, the control server on `control.sock`, and the
-overflow sweeper, in that order. A verifier that cannot be pulled raises `PluginImageError`, and
-nothing after it starts. Before the control server, it builds the one `CageRunner` and the one
-`CallGateway`, with a `SelfCheck` over that runner, and the control server serves the gateway's
-`check_scopes`. A step that fails closes what the steps before it started, except that the egress
-proxies that `LiveConfig.start` made ready stay, and then its error propagates. The calls of one
-instance and its checks share one `CageLimiter`. `Instance.app` is the app that `build_app` returns.
-`Instance.warnings` holds the warnings of the snapshot that the live config started with.
-`Instance.close` closes the control socket, stops the sweeper, and closes the audit writer. The
-egress proxies stay, and the next `LiveConfig.start` keeps or prunes them.
-
-### `cli.py`
-
-This module is the operator command, which the reference gives under
-[The operator command](reference.md#the-operator-command). It reads the environment, and the one
-other module that does is `runner.py`, which reads only `AGENT_PROXY_VERIFIER_IMAGE`, as `runner.py`
-above gives. Outside `serve`, it opens each store under the state directory itself, and `token mint`
-hands the credential store's names to `unset_warnings`. It opens the Docker client for
-`manifest check` and `serve`, and calls `request_reload` for `reload` and `request_check` for
-`check`. For `serve --host HOST --port PORT`, it starts an `Instance` from `mcp.py`, which opens the
-stores, and serves its app on that address. No store imports another; within the package, the stores
-import only `config.py` and `errors.py`.
-
-## The root verifier
-
-The verifier closes the race between the runner's check of a root and the daemon's mount of it. The
-daemon resolves a bind source when it starts the cage, after the check and after the wait for a
-slot. In that time the agent can swap a root, or a directory above it, for a symbolic link, or
+The verifier closes the race between the instance's check of a root and the daemon's mount of it.
+The daemon resolves a bind source when it starts the cage, after the check and after the wait for a
+cage. In that time the agent can swap a root, or a directory above it, for a symbolic link, or
 delete the root and create a new directory at its path. The verifier runs in the cage after the
 daemon has fixed the cage's mounts, so it checks what the action will see.
 
-The verifier is the Go program in `core/verifier/main.go`. Its argv is
-`verify <nonce> [<root-path> <st_dev> <st_ino>]... -- <action argv...>`. It stats each root path,
-following links as the daemon does when it places a mount, and compares the device and inode with
-the pair the runner recorded. When every pair matches, it finds the action's executable from the
-first item of the action's argv. It looks up a bare name on `PATH`, and uses a name that holds a
-slash as given. It then replaces itself with the action through `execve`, with the environment
-unchanged. Otherwise it writes one line to stderr and exits 125, the value of
-`VERIFIER_REFUSED_EXIT`:
+The verifier is the Go program in `core/verifier/main.go`. It is built with `CGO_ENABLED=0` into a
+static executable, so it runs in any plugin image, with no libc or runtime in the cage. The cage's
+entrypoint is the verifier, wrapped around the action:
+`verify <nonce> [<root-path> <st_dev> <st_ino>]... -- <action argv...>`. The nonce is new for each
+call.
+
+The verifier stats each root path, following links as the daemon does when it places a mount, and
+compares the device and inode with the pair the instance recorded. When every pair matches, it finds
+the action's executable, a bare name on `PATH` or a name with a slash as given, and replaces itself
+with the action through `execve`. The action then runs as PID 1, with its argv, stdin, and
+environment unchanged. Otherwise the verifier writes one line to stderr and exits 125:
 
 - `<nonce> root <reason>` when the argv is malformed, or a root's stat fails or gives another pair.
-  A reason about a root names its path, and the reason for a mismatch gives both pairs.
-- `<nonce> exec <reason>` when the lookup or the exec fails.
+  A reason about a root names its path, and the reason for a mismatch gives both pairs. The call is
+  refused for its root.
+- `<nonce> exec <reason>` when the lookup or the exec fails. The call is refused because the action
+  cannot run.
 
-`runner.py` above gives how the runner reads each line.
+An action can exit 125 itself, but it never sees the nonce, so it cannot forge a refusal. Any other
+first line of stderr leaves the exit code to the action.
 
-`core/verifier/Dockerfile` builds the verifier with `CGO_ENABLED=0` on a Go image pinned by digest.
-Its build stage runs `gofmt`, `go vet`, and the tests in `core/verifier/main_test.go`, so a failing
-check fails the build. The final stage is `FROM scratch` and holds the one file `/verify`. The cage
-sees that one file, read-only, at `VERIFIER_PATH`.
+`core/verifier/Dockerfile` builds the verifier on a Go image pinned by digest. Its build stage runs
+`gofmt`, `go vet`, and the verifier's tests, so a failing check fails the build. The final stage is
+`FROM scratch` and holds the one file `/verify`. Each cage mounts that image read-only and sees the
+one file at `/.agent-proxy/verify`.
 
-The cage mounts the image under the reference `VERIFIER_IMAGE`, which comes from the instance
-image's environment, as `runner.py` above gives. An image mount never pulls, so the image must be on
-the instance's daemon before the first call; a missing image fails the create with `CageStartError`.
-A reference pinned by digest, as a published instance image carries, is pulled at the instance's
-start by `ensure_verifier` when the daemon lacks it. A tag reference, such as the source build's
-`agent-proxy-verifier:1`, must already be on the daemon.
+An image mount never pulls, so the verifier image must be on the instance's daemon before the first
+call; a missing image fails the cage's start. The instance image names its verifier in
+`AGENT_PROXY_VERIFIER_IMAGE`. A reference pinned by digest, as a published instance image carries,
+is pulled at the instance's start when the daemon lacks it. A tag reference, such as the source
+build's `agent-proxy-verifier:1`, must already be on the daemon.
 
-## The git plugin
+## Egress
 
-The git plugin is the uv package in `plugins/git/`, placed as `docs/design.md` sets out under
-"Repository layout". The `manifest-check` job in `.github/workflows/ci.yml` builds the image of each
-plugin under `plugins/` and runs `agent-proxy manifest check` on it. `plugins/git/README.md` gives
-everything about the plugin itself: its actions, its rules, commit signing, its layout, and its
-tests.
+The instance runs one egress proxy for each distinct domain list across its grants
+(`core/agent-proxy/agent_proxy/egress.py`).
 
-## The github plugin
+- A proxy is named for its list: `apx-egress-` and the first 16 hex digits of the SHA-256 of the
+  sorted list, so two grants that name the same domains in any order share one proxy. The proxy sits
+  on its own internal Docker network of the same name, under the network alias `egress`. Every proxy
+  also joins one shared bridge, `apx-egress-bridge`, which is its only route out.
+- A cage joins its grant's network and gets `HTTPS_PROXY=http://egress:1080`. A process that ignores
+  that variable has no route out. A grant with `domains: []` gets an internal network with no proxy,
+  and so no egress at all.
+- A cage reaches only the proxy's tunnel listener, on port 1080, where CONNECT requests arrive.
+  Every other listener (DNS, plain HTTP, TLS, and metrics) binds loopback inside the proxy. The
+  config has no management block, so the management listener stays off.
+- TLS passes through by SNI with `tls.mode: "sni-only"` and no CA, so the proxy never intercepts it.
+  The allowlist is `transforms: [{name: allowlist, config: {domains: [...]}}]`.
+- iron-proxy rejects traffic that is not HTTP, so git reaches GitHub over HTTPS with a token, never
+  over SSH.
 
-The github plugin is the uv package in `plugins/github/`, placed as `docs/design.md` sets out under
-"Repository layout". The `manifest-check` job in `.github/workflows/ci.yml` checks its image as it
-checks the git plugin's. `plugins/github/README.md` gives everything about the plugin itself: its
-actions, its attachments, its egress, its layout, and its tests.
+A proxy never changes once it starts. The instance never uses iron-proxy's management reload: a
+proxy whose config or image differs from what its list needs is replaced. The instance never writes
+a `source_ip` rule, because iron-proxy accepts such a rule and ignores it, which widens access. A
+test in `core/agent-proxy/tests/integration/test_egress.py` pins that behaviour on the pinned image,
+and an upgrade of iron-proxy runs it first. iron-proxy is pinned by digest.
 
-## The hcp-terraform plugin
+Each proxy's config lives in its own directory under the state directory's `egress/`, and the daemon
+bind-mounts the directory, never a single file, read-only into the proxy. A replaced file under a
+single-file mount keeps its old inode. The config sets `dns.proxy_ip`, which iron-proxy requires
+while its DNS listener is on, and the proxy's command passes `-config` on every run, because the
+image's entrypoint has no default arguments.
 
-The hcp-terraform plugin is the uv package in `plugins/hcp-terraform/`, placed as `docs/design.md`
-sets out under "Repository layout". The `manifest-check` job in `.github/workflows/ci.yml` checks
-its image as it checks the git plugin's. Its code is in
-`plugins/hcp-terraform/scripts/hcp_terraform_plugin/`. `plugins/hcp-terraform/README.md` gives
-everything about the plugin itself: its actions, its workspace list, where the token goes, its
-egress, its layout, and its tests.
+The proxy runs as uid 0 in its container with a read-only root filesystem, every capability dropped,
+and `no-new-privileges`. It is ready when its log holds the tunnel's start line and it still runs:
+iron-proxy exits 0 when a listener fails to bind, so no exit code marks a good start. A proxy that
+stops, or is not ready within 10 seconds, is removed with its config directory, so a config that
+iron-proxy refuses never sits behind a running proxy.
 
-## Where state lives
+The instance starts every proxy its config needs at start and at each reload, before the config goes
+in force, and removes the proxies and networks no config names, as [Reload](#reload) gives. The
+bridge always stays. A removal that fails logs a warning, and the next one tries again.
 
-The operator command keeps its state in the state directory, which the environment names, as the
-reference gives under [Environment](reference.md#environment). The config file places the one
-directory outside the state directory that the cage runner writes.
+## Tokens
 
-The state directory holds:
+A token is `apx_` followed by 256 random bits, URL-safe encoded. The prefix lets secret scanners
+recognize a leaked token (`core/agent-proxy/agent_proxy/auth.py`).
 
-- `tokens.sqlite3` is the token store. The store creates it with mode `0o600`.
-- `credentials/` is the credential store. The store creates the directory, narrows it to mode
-  `0o700`, and writes each credential file with mode `0o600`.
-- `audit/` holds `audit.log` and its rotated files, `audit.log.1` onward. The writer creates the
-  directory and narrows it to mode `0o700`. `tail` reads a missing directory or log as no lines.
-- `control.sock` is the control socket. `serve` binds it, and `reload` and `check` connect to it. A
-  `ControlServer` from `reload.py` serves a socket at the path it is given, with mode `0o600`.
-- `egress/` is the config root that `serve` gives `EgressProxies`. The paragraph on `EgressProxies`
-  below gives what it keeps there.
+The instance stores the SHA-256 of each token, never the token, with its name, scope, created time,
+last-used time, and optional expiry, in `tokens.sqlite3`. The operator sees a token once, when it is
+minted, and the store cannot produce it again. A presented token's digest is compared with every
+stored digest in constant time. An expired token does not verify. A call writes the token's
+last-used time in the same transaction as the match.
 
-`docs/design.md` gives where the config file comes from under "Config".
+Only the operator manages tokens, with the `token` verbs of
+[The operator command](reference.md#the-operator-command). Agents cannot mint, narrow, or refresh a
+token. The operator delivers a token by writing it into the agent's MCP client config as the
+`Authorization` header.
 
-The cage runner mounts credential files from the credential store's directory, as `runner.py` gives
-above. It writes each overflow file under the config's `overflow_dir`, in the agent's tree, and the
-sweep removes old entries there. The runner creates neither directory.
+## Credentials
 
-`EgressProxies` keeps the config of each proxy in its own directory, named for the proxy, under the
-config root it is given. It creates each directory with mode `0o700`, and writes the config file in
-it with mode `0o600`. The daemon bind-mounts that directory into the proxy by its path, so the path
-must name the same directory for the daemon as for the instance. `prune` removes a directory with
-its proxy.
+A credential is an opaque named value, stored verbatim as one file in the state directory's
+`credentials/`, which only the instance's service user can read
+(`core/agent-proxy/agent_proxy/credentials.py`). A write goes to a staging file first, then renames
+it over the target, so a listing never shows a half-written credential.
+
+Only the operator manages credentials, with the `credential` verbs of
+[The operator command](reference.md#the-operator-command). A grant gives each credential it uses to
+the cage as an environment variable or as a file, in the forms of
+[A scope's grants](reference.md#a-scopes-grants).
+
+The instance reads the store on every call, so a stored credential takes effect on the next call
+with no reload. A call under a grant whose credential is not stored is refused before a cage starts,
+and audited like any other refusal. The grant's tools stay listed for the token. The config load
+never consults the store: a credential that a grant names and the store lacks is a warning, as
+[Failures and warnings](reference.md#failures-and-warnings) gives.
+
+## Audit
+
+The instance writes one JSON line per call to `audit/audit.log` in the state directory
+(`core/agent-proxy/agent_proxy/audit.py`). A line holds `timestamp`, `call_id`, `token_name`,
+`scope`, `action`, the full input `arguments`, `exit_code`, `duration_ms`, `stdout_bytes`,
+`stderr_bytes`, `truncated`, and, for a refused call, the `refusal` without its MCP prefix. A line
+never holds a credential's value or any output's content.
+
+The log rotates at 10 MiB and keeps five rotated files, `audit.log.1` onward. Only the operator
+reads it, with `audit tail` from [The operator command](reference.md#the-operator-command).
+
+The log never holds part of a line. Each line is appended in one write. A write that fails part way
+cuts the log back to its size before the line. When that cut also fails, the writer stops: every
+later call is refused before its token is checked, and writes no line. When the instance starts, it
+cuts a log that ends in a fragment back to its last whole line.
+
+A call whose audit line cannot be written is refused, and its result is withheld. So every result an
+agent receives has its line.
+
+Each self-check writes one line, with `agent-proxy_self_check` as its action, and with no exit code
+and no output sizes, because no single cage's output is the result. The line of a tool call names
+the call's token. The operator's command writes one line for each scope it checks, with no token
+name. The cages that a check runs write no line of their own.
+
+## The self-check
+
+The self-check is one check with two entrances: the MCP tool `agent-proxy_self_check`, which checks
+the calling token's scope alone, and the operator's `check`, which checks one scope or every scope
+(`core/agent-proxy/agent_proxy/selfcheck.py`). It holds the config in force for the whole check.
+
+It checks the local wiring, the things that can be wrong while the instance looks healthy:
+
+- each credential a grant names is stored, read afresh on each check, and reported by name, never by
+  value;
+- each root a grant names opens as it opens for a call;
+- the overflow directory exists, and the instance can create a file in it;
+- each egress proxy that the scope's domain lists need is running;
+- for each plugin the scope uses, a cage runs the image's `describe` and exits 0. The cage goes
+  through the normal path, root verifier and cage cap included, with no roots, no credentials, no
+  `env`, and no network, within 30 seconds. The check discards the output. The instance never pulls
+  for a cage, so an image that has left the daemon since the config loaded fails the check.
+
+It leaves out what the config load already refuses, such as an image that does not load, a grant
+that names an undeclared action, or a root outside the agent tree. It never tests a credential
+against its service.
+
+A check that fails is an entry in the report, never an error. The reference gives the report under
+[The self-check report](reference.md#the-self-check-report), and the `check` verb under
+[The operator command](reference.md#the-operator-command).
 
 ## The instance
 
 The instance image is built by `core/docker/Dockerfile` from `core/agent-proxy/`. Its build stage
 installs the package with uv from the lockfile, and its final stage holds only the environment that
-stage made. The image's process is `agent-proxy serve` on container port 8000, on all interfaces.
-The image sets `DOCKER_HOST` to the socket path the run line mounts, `AGENT_PROXY_CONFIG` to
+stage made. The image's process is `agent-proxy serve` on container port 8000. The image sets
+`DOCKER_HOST` to the socket path the run line mounts, `AGENT_PROXY_CONFIG` to
 `/etc/agent-proxy/config.yaml`, and `AGENT_PROXY_VERIFIER_IMAGE` to the build argument
 `VERIFIER_IMAGE`, which defaults to `agent-proxy-verifier:1`.
 
-`serve` starts an `Instance` from `mcp.py` and serves its MCP surface, as the reference gives under
-[The operator command](reference.md#the-operator-command), and closes the instance when it stops.
-`serve` in `cli.py` runs the app under uvicorn through `_Server` from `mcp.py`. `_Server` routes
-SIGINT and SIGTERM to uvicorn's shutdown on the main thread, restores the previous handlers when the
-server stops, and re-raises neither signal.
+At start the instance opens its stores and its audit log, makes the verifier present, loads the
+config and starts its egress, then serves the control socket and starts the daily sweep of old
+overflow files. A step that fails stops the start, and the steps before it are undone, except that
+the egress proxies stay for the next start to keep or remove. On SIGINT or SIGTERM the instance
+stops, and its egress proxies stay too.
 
 `core/docker/start-instance.sh` holds the run line. It takes the image, the container name, the host
 port, the config directory, the state directory, and the agent tree, and passes any further
@@ -569,14 +321,39 @@ each root and credential file a cage mounts. The script refuses a state director
 that is not an absolute path equal to its realpath. When a container of that name exists, the script
 starts it as it was created, or leaves it running.
 
-`core/docker/provision-instance.sh` sets up everything the instance needs on the host and starts it,
-and `core/docker/teardown-instance.sh` removes it. Provisioning builds the verifier and instance
-images from the checkout. With `--release VERSION`, it pulls the published instance image of that
-release in their place, and tags it `agent-proxy:1`. Both scripts take `--tree PATH`, the agent's
-tree, which defaults to `<home>/Projects` and must lie inside the agent's home.
-`docs/runbooks/per-agent-instance.md` explains each of their steps.
+The state directory holds:
+
+- `tokens.sqlite3`, the token store, with mode `0600`;
+- `credentials/`, the credential store, with mode `0700`, each credential file with mode `0600`;
+- `audit/`, with mode `0700`, which holds `audit.log` and its rotated files;
+- `control.sock`, the control socket, with mode `0600`;
+- `egress/`, which holds each egress proxy's config directory, with mode `0700`, and its config file
+  in it, with mode `0600`.
+
+The one directory outside the state directory that the instance writes is the config's
+`overflow_dir`, in the agent's tree. The instance creates neither it nor the state directory.
+
+`core/docker/provision-instance.sh` sets up everything an instance needs on the host and starts it,
+and `core/docker/teardown-instance.sh` removes it. Provisioning is idempotent and runs with sudo. It
+creates the service user, sets up its rootless daemon, applies the ACLs, creates the overflow
+directory, prepares the instance image, and starts the instance, which starts its egress proxies
+itself. It stops before minting, so the operator sees the token printed. Without `--release`, it
+builds the verifier and instance images from the checkout. With `--release VERSION`, it pulls the
+published instance image of that version and tags it `agent-proxy:1`, so every later step and
+teardown run unchanged, and the instance pulls its verifier at start. Both scripts take
+`--tree PATH`, the agent's tree, which defaults to `<home>/Projects`. The positional form,
+`<agent> <port> <config-file>`, works with no option. The
+[runbook](runbooks/per-agent-instance.md#provisioning) explains each step.
 
 ## Published images
+
+A release publishes its images on GHCR: the instance image, `ghcr.io/gravital-forge/agent-proxy`;
+the verifier image, `ghcr.io/gravital-forge/agent-proxy-verifier`; and
+`ghcr.io/gravital-forge/agent-proxy-plugin-<plugin>` for each directory under `plugins/` that holds
+a `Dockerfile`. One version covers every image: the repository tag `vX.Y.Z` tags every image
+`X.Y.Z`. Images carry version tags only, never `latest`, because a config pins each plugin by
+digest. The images are built for `linux/amd64` only; the github plugin's image checks gh's
+`linux_amd64` tarball against one SHA-256 (`plugins/github/Dockerfile`).
 
 `core/docker/build-images.sh <version> <registry> <source-url>` builds the images and pushes each
 one to the registry, tagged with the version, which is `<major>.<minor>.<patch>`. It finds the
@@ -584,7 +361,8 @@ repository from its own path, so it runs from any working directory. It builds i
 
 1. `agent-proxy-verifier` from `core/verifier/`.
 2. `agent-proxy`, the instance, from `core/agent-proxy/` with `core/docker/Dockerfile`. The build
-   argument `VERIFIER_IMAGE` takes the verifier's digest reference.
+   argument `VERIFIER_IMAGE` takes the verifier's digest reference, so the instance image names
+   exactly the verifier built with it.
 3. `agent-proxy-plugin-<plugin>` from each directory under `plugins/` that holds a `Dockerfile`, in
    name order.
 
@@ -602,7 +380,8 @@ registry `ghcr.io/gravital-forge`, and the repository's URL. It then writes each
 into the release notes under a `## Images` heading, one bullet each. On a re-run, it replaces that
 heading and everything after it. The workflow holds `contents: read`; the job holds
 `contents: write`, to edit the release notes, and `packages: write`, to push. Event data reaches
-each script through the step's environment, never through the script's text.
+each script through the step's environment, never through the script's text. Each package starts
+private on GHCR, and the operator makes it public.
 
 The `images` job in `.github/workflows/ci.yml` runs `build-images.sh` with the version `0.0.0` on
 each pull request and each push to `main`. It pushes to a `registry:3` service container that lives
@@ -612,5 +391,77 @@ verifier's.
 
 Every action in the workflows is pinned by commit SHA, with its version in a trailing comment.
 `.github/dependabot.yml` asks for weekly updates of those actions, of the base images that the
-Dockerfiles pin by tag and digest, and of the uv lockfiles. `docs/design.md` gives the decisions
-behind the published images under "Deployment and isolation".
+Dockerfiles pin by tag and digest, and of the uv lockfiles.
+
+## The isolation model
+
+Each agent user gets its own instance, and each part of the setup below closes one way that the
+agent, the instance, or another agent could reach too far. Tests in
+`core/agent-proxy/tests/integration/` demonstrate each cage property on a real rootless daemon.
+
+### The service user and its daemon
+
+Each instance runs as a service user, `agentproxy-<agent>`, with its own subordinate uid and gid
+range, linger enabled, and its own rootless `dockerd`. The instance container, its egress proxies,
+and its cages all run on that daemon. Root only provisions.
+
+- Whoever reaches a Docker socket can start any container with any mount the daemon can make, so the
+  socket gives everything the daemon reaches. The agent cannot reach the service user's socket, so
+  it cannot run a container that skips its grants.
+- A rootless daemon maps container root to the service user. So a compromised instance or cage holds
+  `agentproxy-<agent>`, not root, and reaches only what that user reaches: one agent's tree and one
+  instance's credentials.
+- Running cages under the agent's own uid is rejected. A process of the same uid can read another's
+  `/proc/<pid>/environ` and `/proc/<pid>/root`, which would expose a cage's credentials to the
+  agent.
+
+### The agent's tree
+
+The agent's tree carries three things, and provisioning applies each:
+
+- A user ACL entry `user:agentproxy-<agent>:rwx`, with a matching default ACL. The instance reaches
+  the agent's tree through this entry alone.
+- A default entry `default:user:<agent>:rwx`, so the agent keeps access to a file even when the
+  file's group goes wrong.
+- Setgid with the agent's own group on every directory, so a file a cage creates is grouped to the
+  agent. Supplementary groups do not reach a rootless container, so provisioning never adds the
+  service user to a group, the agent's group included. Setgid is the only thing that groups cage
+  files to the agent, and the instance never relies on a cage to fix a file's group.
+
+The agent's home stays mode `700`, and gains only traverse (`x`) for `agentproxy-<agent>`.
+
+So files the instance creates in the agent's tree are owned by `agentproxy-<agent>`, grouped to the
+agent, and read-write for the agent; files the agent creates are read-write for the instance.
+Another agent is `other` on every such file, and cannot traverse the home.
+
+### The tree inside the home
+
+The tree's realpath lies strictly inside the realpath of the agent's home, and the service user
+gains traverse on each directory between the home and the tree. That keeps the home's guard: the
+home stays mode `700` with traverse alone, so another agent cannot traverse it. A tree outside the
+home loses that guard, and a tree equal to the home would put the service user's ACL on the whole
+home. Teardown applies the same rule, because it removes ACL entries recursively, as root, from the
+tree it is given.
+
+## Known limits
+
+- A bug in the instance's own code reaches that agent's tree and that instance's credentials.
+- Traverse on the agent's home lets `agentproxy-<agent>` open any world-readable file there by path.
+- A file created with an explicit restrictive mode, such as a mode-preserving copy of a `0644` file,
+  is read-only to the other side; the ACL cannot widen it.
+- Every call pays a cage start: a median of about half a second on a rootless daemon, and the root
+  verifier adds about a tenth of a second more.
+- A bare `agent-proxy check` runs one `describe` cage for each plugin of each scope, one after
+  another. Each takes up to 30 seconds plus any wait for a free cage, and the command waits at most
+  600 seconds for the whole reply. With about 20 or more scope-and-plugin pairs and slow describes,
+  the command can time out while the instance still finishes the check and audits it. `--scope NAME`
+  bounds a run to one scope.
+- A run's log through the github plugin's `run_view` with `log_failed` is out of reach under a grant
+  that names only GitHub's hosts. gh follows GitHub's redirect to a storage host GitHub picks, and a
+  domain takes no wildcard, so a grant that wants such a log names each storage host.
+  [Egress](../plugins/github/README.md#egress) in the plugin's README gives the detail.
+- Credentials are not encrypted at rest: each is a plain file protected by the service user's uid.
+- The egress proxy neither masks credentials nor intercepts TLS. It allows or refuses a host by
+  name, so a cage can send its credential to any host its grant names.
+- A call's output returns when the call ends, never as it streams.
+- Each instance has one config file. Configs do not layer, and instances share no config.
