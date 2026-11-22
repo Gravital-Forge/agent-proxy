@@ -7,15 +7,17 @@ from datetime import timedelta
 from pathlib import Path
 from unittest import mock
 
+import docker.errors
 import pytest
 import yaml
 from egress_fakes import RecordingEgress
 
+from agent_proxy import runner
 from agent_proxy.audit import tail
 from agent_proxy.config import ConfigError
 from agent_proxy.credentials import unset_message
 from agent_proxy.mcp import Instance
-from agent_proxy.plugins import CommandAction, Manifest
+from agent_proxy.plugins import CommandAction, Manifest, PluginImageError
 from agent_proxy.reload import (
     CONTROL_SOCKET_NAME,
     ControlError,
@@ -26,6 +28,7 @@ from agent_proxy.selfcheck import SELF_CHECK_TOOL
 
 SWEEPER_THREAD = "overflow-sweeper"
 GITHUB_IMAGE = "ghcr.io/example/github@sha256:" + "c" * 64
+PINNED_VERIFIER = "ghcr.io/example/agent-proxy-verifier@sha256:" + "d" * 64
 CONFIG = {
     "agent_tree": "/srv/agents/alpha",
     "overflow_dir": "/srv/agents/alpha/overflow",
@@ -198,4 +201,24 @@ def test_a_step_that_fails_closes_the_steps_started_before_it(
     with pytest.raises(RuntimeError, match="sweeper"):
         Instance.start(state_dir, _config(tmp_path, CONFIG), mock.MagicMock())
 
+    assert not (state_dir / CONTROL_SOCKET_NAME).exists()
+
+
+def test_a_pinned_verifier_that_cannot_be_pulled_raises_and_starts_nothing(
+    state_dir: Path,
+    tmp_path: Path,
+    egress: RecordingEgress,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed pull of the verifier stops the start before the live config."""
+    monkeypatch.setattr(runner, "VERIFIER_IMAGE", PINNED_VERIFIER)
+    client = mock.MagicMock()
+    client.images.get.side_effect = docker.errors.ImageNotFound("no such image")
+    client.images.pull.side_effect = docker.errors.APIError("manifest unknown")
+
+    with pytest.raises(PluginImageError, match="manifest unknown"):
+        Instance.start(state_dir, _config(tmp_path, CONFIG), client)
+
+    client.images.pull.assert_called_once_with(PINNED_VERIFIER)
+    assert egress.calls == []
     assert not (state_dir / CONTROL_SOCKET_NAME).exists()

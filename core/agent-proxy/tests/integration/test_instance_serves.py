@@ -63,6 +63,7 @@ PR_VIEW_ARGUMENTS = {"repo": "example-org/n", "pr": "77"}
 CHECK_DOMAIN = "api.github.com"
 ABSENT_ROOT = "absent"
 CHECK_HEADER = "SCOPE\tCHECK\tSUBJECT\tRESULT\tDETAIL"
+PULL_SCOPE = "pull"
 
 
 @dataclass(frozen=True)
@@ -434,3 +435,54 @@ def test_the_self_check_reports_each_kind_through_both_entrances(
             refused.stdout + refused.stderr,
         )
         assert all(probe_secret not in text for text in seen)
+
+
+def test_an_instance_pulls_its_verifier_by_digest_at_start(
+    docker_client: DockerClient,
+    labelled_instance_image: str,
+    pinned_plugin: str,
+    pinned_verifier: str,
+    tmp_path: Path,
+) -> None:
+    """A verifier the daemon lacks, named by digest, is pulled, and a cage mounts it."""
+    tree = _make_tree(tmp_path)
+    config = {
+        "agent_tree": str(tree.agent_tree),
+        "overflow_dir": str(tree.agent_tree / ".agent-proxy-overflow"),
+        "max_cages": 1,
+        "plugins": {"probe": pinned_plugin},
+        "scopes": {
+            PULL_SCOPE: {
+                "grants": {
+                    "probe.echo": {"roots": [], "domains": [], "credentials": {}}
+                }
+            }
+        },
+    }
+    _write_yaml(tree.config_dir / "config.yaml", config)
+    name = f"apx-it-verifier-{secrets.token_hex(4)}"
+    port = free_port()
+
+    with removed_on_exit(docker_client, name):
+        started = run_start_script(
+            (
+                labelled_instance_image,
+                name,
+                str(port),
+                str(tree.config_dir),
+                str(tree.state_dir),
+                str(tree.agent_tree),
+                "--env",
+                f"AGENT_PROXY_VERIFIER_IMAGE={pinned_verifier}",
+            )
+        )
+        assert started.returncode == 0, started.stderr
+        url = wait_for_mcp(docker_client, name, port)
+        mint = ["agent-proxy", "token", "mint", "--name", PULL_SCOPE]
+        token = _exec_ok(name, [*mint, "--scope", PULL_SCOPE]).strip()
+
+        echoed = _content(_call(url, token, "probe_echo", {"text": "pulled"}))
+
+        assert echoed["exit_code"] == 0
+        assert echoed["stdout"] == "pulled\n"
+        docker_client.images.get(pinned_verifier)

@@ -37,7 +37,13 @@ from agent_proxy.reload import (
     build_snapshot,
 )
 from agent_proxy.results import OverflowSweeper, new_call_id
-from agent_proxy.runner import CageCall, CageLimiter, CageRunner, Outcome
+from agent_proxy.runner import (
+    CageCall,
+    CageLimiter,
+    CageRunner,
+    Outcome,
+    ensure_verifier,
+)
 from agent_proxy.selfcheck import (
     SELF_CHECK_INPUT_SCHEMA,
     SELF_CHECK_TOOL,
@@ -506,13 +512,16 @@ class Instance:
     def start(cls, state_dir: Path, config_path: Path, client: DockerClient) -> Self:
         """Open the stores under state_dir, then start the config and its servers.
 
-        The order is the stores, the live config, the control socket, and the
-        overflow sweeper. The control socket serves reloads of the live config
-        and the gateway's checks. A step that fails closes what the steps
-        before it started, then its error propagates. The instance's warnings
-        are those of the first snapshot.
+        The order is the stores, the verifier, the live config, the control
+        socket, and the overflow sweeper. The verifier step pulls a verifier
+        pinned by digest when the daemon lacks it. The control socket serves
+        reloads of the live config and the gateway's checks. A step that fails
+        closes what the steps before it started, then its error propagates.
+        The instance's warnings are those of the first snapshot.
 
         Raises:
+            PluginImageError: a verifier pinned by digest cannot be looked up
+                or pulled.
             ProxyError: the audit log cannot be prepared, the config cannot be
                 built, its egress cannot be made ready, or the control socket
                 cannot be bound.
@@ -523,6 +532,7 @@ class Instance:
         build = snapshot_builder(config_path, credentials, client)
         with contextlib.ExitStack() as started:
             started.callback(audit.close)
+            ensure_verifier(client)
             live = LiveConfig.start(build, EgressProxies(client, state_dir / "egress"))
             runner = CageRunner(client, credentials, CageLimiter())
             gateway = CallGateway(

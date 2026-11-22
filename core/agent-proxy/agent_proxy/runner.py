@@ -21,7 +21,14 @@ from docker import DockerClient
 from docker.models.containers import Container
 from jsonschema import Draft202012Validator
 
-from agent_proxy.config import ROOTS_ENV_NAME, EnvMount, FileMount, Grant, Root
+from agent_proxy.config import (
+    PINNED_IMAGE_PATTERN,
+    ROOTS_ENV_NAME,
+    EnvMount,
+    FileMount,
+    Grant,
+    Root,
+)
 from agent_proxy.credentials import (
     CredentialStore,
     UnknownCredentialError,
@@ -34,6 +41,7 @@ from agent_proxy.plugins import (
     WAIT_TIMEOUTS,
     CommandAction,
     ScriptAction,
+    ensure_image,
 )
 from agent_proxy.results import (
     CALL_ID_PATTERN,
@@ -49,7 +57,16 @@ TMPFS_PATH = "/tmp"  # noqa: S108 - the path is inside the cage, on its own tmpf
 TMPFS_OPTIONS = "rw,size=64m"
 CONTAINER_USER = "0:0"
 LOG_DRIVER = "json-file"
-VERIFIER_IMAGE = "agent-proxy-verifier:1"
+VERIFIER_IMAGE_VARIABLE = "AGENT_PROXY_VERIFIER_IMAGE"
+SOURCE_VERIFIER_IMAGE = "agent-proxy-verifier:1"
+
+
+def verifier_image(environ: Mapping[str, str]) -> str:
+    """Return the verifier reference environ names, or the source build's tag."""
+    return environ.get(VERIFIER_IMAGE_VARIABLE) or SOURCE_VERIFIER_IMAGE
+
+
+VERIFIER_IMAGE = verifier_image(os.environ)
 VERIFIER_MOUNT = "/.agent-proxy"
 VERIFIER_PATH = f"{VERIFIER_MOUNT}/verify"
 VERIFIER_REFUSED_EXIT = 125
@@ -340,6 +357,19 @@ class CageLimiter:
                 # Each call brings its own limit, so the waiter one notify would
                 # wake may still be over its limit while another could go.
                 self._condition.notify_all()
+
+
+def ensure_verifier(client: DockerClient) -> None:
+    """Pull VERIFIER_IMAGE when it is pinned by digest and absent from the daemon.
+
+    A tag reference is neither looked up nor pulled: it must already be on
+    the daemon, because an image mount never pulls.
+
+    Raises:
+        PluginImageError: a pinned verifier cannot be looked up or pulled.
+    """
+    if re.fullmatch(PINNED_IMAGE_PATTERN, VERIFIER_IMAGE):
+        ensure_image(client, VERIFIER_IMAGE)
 
 
 @dataclass(frozen=True)

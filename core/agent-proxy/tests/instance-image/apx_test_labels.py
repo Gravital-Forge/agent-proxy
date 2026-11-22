@@ -11,4 +11,3 @@ TEST_LABELS = {"agent-proxy.test": "1"}
 egress.LABELS = TEST_LABELS
 plugins.CONTAINER_LABELS = TEST_LABELS
 runner.CONTAINER_LABELS = TEST_LABELS
-runner.VERIFIER_IMAGE = "apx-verifier:it"
