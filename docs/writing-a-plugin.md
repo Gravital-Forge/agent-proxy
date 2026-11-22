@@ -17,10 +17,11 @@ which it removes whatever happens. So `describe` reads only what the image holds
 but its output. It must exit within 30 seconds, and its stdout must stay within 1 MiB. A non-zero
 exit shows the first 1,024 bytes of stderr, so write a diagnostic there.
 
-The self-check also runs `describe`, in a cage that the runner builds as "How an action runs" below
-gives for an action. The cage starts behind the root verifier, as user `0:0`, on the Docker network
-`none`, with no roots, no credentials, and no grant `env`. So `describe` must also exit 0 there.
-[The self-check](architecture.md#the-self-check) gives the check.
+The self-check also runs `describe`, in a cage that the runner builds as
+[How an action runs](#how-an-action-runs) gives for an action. The cage starts behind the root
+verifier, as user `0:0`, on the Docker network `none`, with no roots, no credentials, and no grant
+`env`. So `describe` must also exit 0 there. [The self-check](architecture.md#the-self-check) gives
+the check.
 
 The simplest `describe` prints a manifest file that the image holds.
 
@@ -95,7 +96,8 @@ A script action runs an executable in the image. It states these members, and do
 - `output_schema` is a JSON Schema whose `type` is `"object"`, and it passes the draft 2020-12
   meta-schema check.
 
-"How an action runs" gives how a script receives its input and returns its output.
+[How an action runs](#how-an-action-runs) gives how a script receives its input and returns its
+output.
 
 ## How argv is formed
 
@@ -137,16 +139,14 @@ Inside the cage:
 
 - The root filesystem is read-only. Write scratch files under `/tmp`, a small tmpfs.
 - The environment holds `AGENT_PROXY_ROOTS`: the grant's root paths, in grant order, as a compact
-  JSON array of strings, `[]` for a grant with no roots. Neither a credential nor a grant's `env`
-  can take that environment name. The config refuses a grant that gives one.
+  JSON array of strings, `[]` for a grant with no roots. The config reserves that name, as
+  [A scope's grants](reference.md#a-scopes-grants) gives.
 - The environment also holds each variable that the grant's `env` sets.
 
-A script succeeds when it exits 0 and prints on stdout one JSON object that its `output_schema`
-validates. That stdout must decode as the manifest must, by the rules under "The manifest". The call
-then returns that object. Otherwise the script has failed. The call then returns a normal result
-that holds what a command action returns: the exit code, stdout, and stderr. A stdout over the
-output cap goes to an overflow file, so a script whose output passes the cap fails. The reference
-gives the cap and the result forms under [Results and refusals](reference.md#results-and-refusals).
+A script's stdout must decode as the manifest must, by the rules under
+[The manifest](#the-manifest). The reference gives when a script succeeds and what its call returns
+under [A script action's result](reference.md#a-script-actions-result), and what an output over the
+cap does to a script under [Output past the cap](reference.md#output-past-the-cap).
 
 The cage's network follows the grant's `domains`, as [Egress](architecture.md#egress) gives.
 
@@ -154,8 +154,8 @@ The cage's network follows the grant's `domains`, as [Egress](architecture.md#eg
   honours that variable. The proxy passes each host the grant names and refuses a host the grant
   does not name.
 - The cage gets no proxy variable for plain HTTP.
-- Neither a credential nor a grant's `env` can take the environment name `HTTPS_PROXY`. The config
-  refuses a grant that gives one.
+- The config reserves the name `HTTPS_PROXY`, as [A scope's grants](reference.md#a-scopes-grants)
+  gives.
 
 ## Checking a manifest
 
@@ -178,7 +178,8 @@ script action whose executable the image also holds. `COPY` keeps each file's mo
 must already be executable in the build context.
 
 `plugins/git/` is a full plugin: a uv package with its own tests, whose actions run git in the cage.
-Its `README.md` gives what it offers and how it is built. `plugins/github/` is also a full plugin,
-whose actions run gh in a cage, and its `README.md` gives what it offers. `plugins/hcp-terraform/`
-is a full plugin whose script actions call HCP Terraform's API with Python's standard library, and
-its `README.md` gives what it offers.
+Its [README](../plugins/git/README.md) gives what it offers and how it is built. `plugins/github/`
+is also a full plugin, whose actions run gh in a cage, and its [README](../plugins/github/README.md)
+gives what it offers. `plugins/hcp-terraform/` is a full plugin whose script actions call HCP
+Terraform's API with Python's standard library, and its [README](../plugins/hcp-terraform/README.md)
+gives what it offers.

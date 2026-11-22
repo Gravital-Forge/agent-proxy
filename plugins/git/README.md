@@ -1,15 +1,16 @@
 # The git plugin
 
 The git plugin runs git and git LFS in a cage. It offers git and git LFS actions, and it applies
-branch rules to `push` and `checkout`. `docs/writing-a-plugin.md` gives the plugin model this
-follows.
+branch rules to `push` and `checkout`. The core's architecture defines the cage, the action, the
+grant, and the other terms this README uses, under [Concepts](../../docs/architecture.md#concepts).
+[Writing a plugin](../../docs/writing-a-plugin.md) gives the plugin model this follows.
 
 ## The actions
 
-Each action's MCP tool name is `<plugin>_<action>`, where `<plugin>` is the name a config pins the
-image as. A config that pins the image as `git`, as "A grant" does, serves `status` as `git_status`
-and `lfs_pull` as `git_lfs_pull`. `manifest.json` declares every action, its input schema, its
-credentials, and its timeout.
+A config that pins the image as `git`, as [A grant](#a-grant) does, serves `status` as the MCP tool
+`git_status` and `lfs_pull` as `git_lfs_pull`, by the rule that the core's reference gives under
+[A scope's grants](../../docs/reference.md#a-scopes-grants). `manifest.json` declares every action,
+its input schema, its credentials, and its timeout.
 
 An action is a command action when its git argv is a fixed prefix plus typed parameters. It is a
 script action when it does more than that:
@@ -20,7 +21,8 @@ script action when it does more than that:
 - It names a file git reads, as `config_get` does with the repository's config file.
 
 No action takes pass-through `args`. Its items would be exempt from the core's refusal of a value
-that begins with `-`, so they could pass git an option such as `diff --output`.
+that begins with `-`, as [How argv is formed](../../docs/writing-a-plugin.md#how-argv-is-formed)
+gives, so they could pass git an option such as `diff --output`.
 
 ### The `repo` input
 
@@ -31,19 +33,19 @@ cage, so git fails with its own error. A command action passes `repo` to the wra
 
 `repo` names the top level of a checkout: a main checkout or a linked worktree. The plugin refuses a
 `repo` that is a directory with no `.git`, such as a directory inside a checkout. A `repo` that does
-not exist reaches git, and git's error is the result. "Repository shapes" gives the checkouts the
-plugin refuses for their shape.
+not exist reaches git, and git's error is the result. [Repository shapes](#repository-shapes) gives
+the checkouts the plugin refuses for their shape.
 
 A file or pattern input with a `..` segment fails the input schema, so the core refuses the call
 before a cage starts.
 
 ### What an action returns
 
-A command action returns `{exit_code, stdout, stderr}`, as the core's reference gives under
-[Results and refusals](../../docs/reference.md#results-and-refusals). A script action prints the
-same three members, and its `output_schema` states them. The script exits 0 whenever it runs to its
-end, and git's exit code goes in `exit_code`. `diff` with `output` is the one exception to both
-rules: "`diff`" gives its result.
+A command action returns the core's result, as
+[A command action's result](../../docs/reference.md#a-command-actions-result) gives. A script action
+prints the same three members, `exit_code`, `stdout`, and `stderr`, and its `output_schema` states
+them. The script exits 0 whenever it runs to its end, and git's exit code goes in `exit_code`.
+`diff` with `output` is the one exception to both rules: [`diff`](#diff) gives its result.
 
 When a git step inside a script fails for a reason other than the outcome that step checks, the
 script stops and returns that step's git result. For example, `push` returns git's own result when
@@ -72,7 +74,7 @@ gives the reason. The wrapper refuses as its own exit; a script refuses through 
   staged.
 - `repo` is a directory with no `.git`, its `.git` file names no git directory, or the plugin cannot
   read a file it reads to find the repository's git directories or config.
-- `repo` has a shape that "Repository shapes" refuses.
+- `repo` has a shape that [Repository shapes](#repository-shapes) refuses.
 - The image's executable runs under a name that is not `git-cage`, `git-credential-agent-proxy`, or
   a script action's.
 
@@ -82,9 +84,9 @@ The credential helper refuses in its own way: it writes the refusal to stderr an
 ### Output past the cap
 
 A large `diff` is the usual call whose output passes the core's cap. Give it `output`, and the diff
-goes to a file while the result holds only the file's path and a stat. `docs/writing-a-plugin.md`
-gives what happens to a script whose output passes the cap, and the core's reference gives the cap
-and the result forms under [Results and refusals](../../docs/reference.md#results-and-refusals).
+goes to a file while the result holds only the file's path and a stat. The core's reference gives
+the cap, and what becomes of a script's output that passes it, under
+[Output past the cap](../../docs/reference.md#output-past-the-cap).
 
 ### `diff`
 
@@ -120,8 +122,8 @@ read-only file system error, and `diff` returns that failure.
 
 `worktree` takes an `action`: `add`, `list`, or `remove`. `list` runs `git worktree list`, and
 `remove` removes the worktree at `path`. git names the main worktree after the common directory it
-reads, which in a cage is the scratch directory that "Config isolation" gives, so `list` puts the
-main worktree's real path in its place.
+reads, which in a cage is the scratch directory that [Config isolation](#config-isolation) gives, so
+`list` puts the main worktree's real path in its place.
 
 `add` makes a linked worktree at `path`:
 
@@ -158,14 +160,15 @@ value the plugin passes with `-c`, a value from a file the config includes, or a
 The cage's process is uid 0 in its user namespace, and the agent's repositories belong to a uid that
 the namespace does not map. So git refuses them as dubious ownership, unless the plugin trusts them.
 
-The core gives every cage `AGENT_PROXY_ROOTS`, the grant's root paths as a compact JSON array.
-`git_argv` in `scripts/git_plugin/cage.py` passes git two `safe.directory` values for each root:
-`<root>` and `<root>/*`. The first trusts a repository at the root itself. The second trusts every
-repository beneath it, linked worktrees included. The function strips trailing slashes from each
-root first, so `/x/` gives `/x` and `/x/*`.
+The core gives every cage the grant's root paths in `AGENT_PROXY_ROOTS`, as
+[How an action runs](../../docs/writing-a-plugin.md#how-an-action-runs) gives. `git_argv` in
+`scripts/git_plugin/cage.py` passes git two `safe.directory` values for each root: `<root>` and
+`<root>/*`. The first trusts a repository at the root itself. The second trusts every repository
+beneath it, linked worktrees included. The function strips trailing slashes from each root first, so
+`/x/` gives `/x` and `/x/*`.
 
 The ownership check that this turns off guards against configuration that a repository plants. git
-in a cage reads none, as "Config isolation" gives.
+in a cage reads none, as [Config isolation](#config-isolation) gives.
 
 ### The credential helper
 
@@ -174,22 +177,22 @@ credential helper of its own. Every git run clears every inherited credential he
 plugin's own helper, `/plugin/bin/git-credential-agent-proxy`, and sets
 `credential.useHttpPath=true`. `scripts/git_plugin/credential.py` holds the helper. With
 `useHttpPath` set, git hands the helper the path of the URL it connects to, after
-`remote.<name>.pushurl` rewrites that URL. git in a cage reads no `url.<base>.insteadOf`, as "Config
-isolation" gives. The helper checks this path, and not the remote that the repository's config
-names, because git builds the URL it connects to after `pushurl` rewrites it. So a rewritten remote
-cannot carry the token to a repository the list does not name.
+`remote.<name>.pushurl` rewrites that URL. git in a cage reads no `url.<base>.insteadOf`, as
+[Config isolation](#config-isolation) gives. The helper checks this path, and not the remote that
+the repository's config names, because git builds the URL it connects to after `pushurl` rewrites
+it. So a rewritten remote cannot carry the token to a repository the list does not name.
 
 On git's `get`, the helper reads the path's first two segments as `owner/name`, with one trailing
-`.git` dropped from the name, and checks that repository against `GITHUB_REPOS`, as "The repository
-list" gives. When the list names it, the helper answers with `x-access-token` and the value of
-`GH_TOKEN`. Otherwise the helper refuses: it writes the reason to stderr and answers `quit=1`, so
-git stops and fails. The helper refuses the same way when `GH_TOKEN` is unset or empty, or when the
-path does not name `owner/name`:
+`.git` dropped from the name, and checks that repository against `GITHUB_REPOS`, as
+[The repository list](#the-repository-list) gives. When the list names it, the helper answers with
+`x-access-token` and the value of `GH_TOKEN`. Otherwise the helper refuses: it writes the reason to
+stderr and answers `quit=1`, so git stops and fails. The helper refuses the same way when `GH_TOKEN`
+is unset or empty, or when the path does not name `owner/name`:
 
 - The request has no path, or a path of fewer than two segments.
 - A segment anywhere in the path is `.` or `..`.
 - The first segment is not an owner, or the second, its `.git` dropped, is not a name, by the
-  patterns "The repository list" gives.
+  patterns [The repository list](#the-repository-list) gives.
 
 git decodes percent escapes in the path it hands the helper, but sends the request still encoded. A
 `%2F..` in a URL therefore reaches the helper as a `..` segment that the request never resolves, so
@@ -246,9 +249,9 @@ forms:
 - `owner/*` names every repository of one user or organization.
 
 An owner is letters, digits, and `-`, and begins with a letter or a digit. A name is letters,
-digits, `_`, `.`, and `-`, and is not only dots. These are the two halves of the github plugin's
-`repo` pattern. Any other entry is malformed: a bare `owner`, `*`, `*/name`, or a partial glob such
-as `owner/api-*`.
+digits, `_`, `.`, and `-`, and is not only dots. These are the two halves of the
+[github plugin's `repo` pattern](../github/README.md#the-repo-input). Any other entry is malformed:
+a bare `owner`, `*`, `*/name`, or a partial glob such as `owner/api-*`.
 
 A repository matches an entry when the owners are equal and the names are equal, or the entry's name
 is `*`. Each comparison ignores case, as GitHub's does. A renamed or transferred repository is
@@ -256,10 +259,11 @@ judged by the name in the URL git connects to, never by the name GitHub redirect
 
 The list fails closed. In a cage that holds `GH_TOKEN`, an unset list, a list with no entry, and a
 list with a malformed entry each refuse the call. `rules.py` holds the rule. The github plugin
-applies the same rule with its own copy.
+applies the same rule with
+[its own copy](../github/README.md#the-repository-list).
 
 The list guards against an agent's mistake. No code a repository plants runs in a git cage to get
-past it, as "Config isolation" gives.
+past it, as [Config isolation](#config-isolation) gives.
 
 ### Commit identity
 
@@ -268,7 +272,7 @@ Every action that creates a commit takes its identity from the grant's `env` alo
 `GIT_AUTHOR_EMAIL`. For each of `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL` that the grant leaves
 unset, the plugin sets the author's value, so the committer is the author. A grant that sets all
 four keeps its own committer. git takes no `user.name` or `user.email` from the repository's config,
-as "Config isolation" gives, and the cage holds no global config of the agent's.
+as [Config isolation](#config-isolation) gives, and the cage holds no global config of the agent's.
 
 `commit` refuses when `GIT_AUTHOR_NAME` or `GIT_AUTHOR_EMAIL` is unset or empty. `merge` and `stash`
 check no identity themselves, so their grants set the two variables too.
@@ -326,8 +330,8 @@ on its first call, a `status` call included.
 GitHub shows a signed commit as Verified when both of these hold:
 
 - The public key is on a GitHub account as a signing key.
-- The commit's committer email is a verified email of that same account. "Commit identity" gives
-  where `commit` takes the committer from.
+- The commit's committer email is a verified email of that same account.
+  [Commit identity](#commit-identity) gives where `commit` takes the committer from.
 
 A `git.commit` grant that signs each commit:
 
@@ -345,8 +349,8 @@ git.commit:
 A `git.merge` grant signs its commits only when it also gives the key and sets `GIT_SIGNING_KEY`.
 
 The key stays a file mounted in each cage whose grant gives it. No code that a repository plants can
-run in the cage to read it: hooks are off, as "Hooks" gives, and git runs no program that the
-repository's config names, as "Config isolation" gives.
+run in the cage to read it: hooks are off, as [Hooks](#hooks) gives, and git runs no program that
+the repository's config names, as [Config isolation](#config-isolation) gives.
 
 ### Hooks
 
@@ -405,7 +409,8 @@ and none of them names a program. git LFS reads its other keys from git's config
 scratch config.
 
 git writes each config change that an action makes to the scratch config, and the cage discards it.
-`push` writes the branch's tracking to the real config itself, as "Branch rules" gives.
+`push` writes the branch's tracking to the real config itself, as [Branch rules](#branch-rules)
+gives.
 
 #### Transport pins
 
@@ -474,12 +479,12 @@ scopes:
 
 A grant's `domains` name each host its remote reaches. For a repository that tracks LFS files, they
 also name each host the LFS server sends objects to, which can differ from the remote's host. The
-`git.push` and `git.checkout` grants set `GIT_BRANCH_PREFIXES` in their `env`, as "Branch rules"
-gives. Every grant whose `credentials` give `GH_TOKEN`, such as `git.push`, sets `GITHUB_REPOS` in
-its `env`, as "The repository list" gives. Every grant for an action that creates a commit sets
-`GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL`, as [Commit identity](#commit-identity) gives. A grant that
-signs its commits gives the key as a file credential and sets `GIT_SIGNING_KEY`, as
-[Commit signing](#commit-signing) gives.
+`git.push` and `git.checkout` grants set `GIT_BRANCH_PREFIXES` in their `env`, as
+[Branch rules](#branch-rules) gives. Every grant whose `credentials` give `GH_TOKEN`, such as
+`git.push`, sets `GITHUB_REPOS` in its `env`, as [The repository list](#the-repository-list) gives.
+Every grant for an action that creates a commit sets `GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL`, as
+[Commit identity](#commit-identity) gives. A grant that signs its commits gives the key as a file
+credential and sets `GIT_SIGNING_KEY`, as [Commit signing](#commit-signing) gives.
 
 Grant a root of mode `rw` to each action that can run the LFS clean filter on a working-tree file:
 `status`, `blame`, and `lfs_status`. The filter writes a temporary file under the `lfs` directory of
@@ -532,5 +537,5 @@ poe test-integration
 
 `poe test` runs the unit tests and needs only the host's git, git LFS, and `ssh-keygen` at
 `/usr/bin/ssh-keygen`. `poe test-integration` runs on the Docker daemon that `DOCKER_HOST` names.
-`.dev/verification.md` gives which bar runs each check, and what the integration tests must leave
-behind.
+[`.dev/verification.md`](../../.dev/verification.md) gives which bar runs each check, and what the
+integration tests must leave behind.

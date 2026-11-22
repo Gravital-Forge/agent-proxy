@@ -1,28 +1,32 @@
 # The github plugin
 
 The github plugin runs gh, the GitHub CLI, in a cage. It offers actions on pull requests, workflow
-runs, and job logs. `docs/writing-a-plugin.md` gives the plugin model this follows.
+runs, and job logs. The core's architecture defines the cage, the action, the grant, and the other
+terms this README uses, under [Concepts](../../docs/architecture.md#concepts).
+[Writing a plugin](../../docs/writing-a-plugin.md) gives the plugin model this follows.
 
 ## The actions
 
-Each action's MCP tool name is `<plugin>_<action>`, as the core's reference gives under
-[A scope's grants](../../docs/reference.md#a-scopes-grants), where `<plugin>` is the name a config
-pins the image as. A config that pins the image as `github`, as "A grant" does, serves `pr_create`
-as `github_pr_create`. A config that pins it as `gh` instead serves it as `gh_pr_create`.
-`manifest.json` declares every action, its input schema, its credentials, and its timeout.
+A config that pins the image as `github`, as [A grant](#a-grant) does, serves `pr_create` as the MCP
+tool `github_pr_create`, by the rule that the core's reference gives under
+[A scope's grants](../../docs/reference.md#a-scopes-grants). A config that pins it as `gh` instead
+serves it as `gh_pr_create`. `manifest.json` declares every action, its input schema, its
+credentials, and its timeout.
 
 An action is a command action when its argv is `gh-cage`, a fixed gh prefix, and typed parameters,
-as for `pr_list`, `run_view`, and `run_list`. "The repository list" gives what `gh-cage` does. The
-others are script actions, because each does more than that:
+as for `pr_list`, `run_view`, and `run_list`. [The repository list](#the-repository-list) gives what
+`gh-cage` does. The others are script actions, because each does more than that:
 
 - It runs more than one gh command, as `pr_fetch` does.
-- It reads a job's log URL from GitHub's API itself, as `pr_checks` and `job_log_url` do. "Job log
-  URLs" gives why gh cannot.
+- It reads a job's log URL from GitHub's API itself, as `pr_checks` and `job_log_url` do.
+  [Job log URLs](#job-log-urls) gives why gh cannot.
 - It applies a default that a command action cannot state, as `pr_view` does with its field list.
 - It takes free text, such as a title, a body, or a comment, that may begin with `-`. The core
-  refuses such a value for a command action, and a Markdown body that opens with a list item begins
-  with `-`. `pr_create`, `pr_edit`, `pr_reply`, and `pr_close` pass each text value as one argv
-  item, `--flag=value` or gh api's `-f body=<text>`, so gh never reads it as an option.
+  refuses such a value for a command action, as
+  [How argv is formed](../../docs/writing-a-plugin.md#how-argv-is-formed) gives, and a Markdown body
+  that opens with a list item begins with `-`. `pr_create`, `pr_edit`, `pr_reply`, and `pr_close`
+  pass each text value as one argv item, `--flag=value` or gh api's `-f body=<text>`, so gh never
+  reads it as an option.
 
 A value that a script places alone in argv cannot begin with `-` either: `pr_view`'s `pr` must not,
 and each number is an integer from 1 up.
@@ -36,7 +40,7 @@ Every action takes a required `repo`, the GitHub repository as `owner/name`, and
 `--repo`. gh needs no checkout for that. So a grant of the plugin has `roots: []`, because a cage
 with no roots reaches less than one that mounts the agent's tree. The one exception is a grant of
 `pr_create` or `pr_edit` that allows `attach`: it mounts a root that holds the files to upload, as
-"The grant" under "Attachments" gives.
+[the grant for attachments](#the-grant) gives.
 
 The input schema takes an owner of letters, digits, and `-` that begins with a letter or a digit,
 then one slash, then a name of letters, digits, `_`, `.`, and `-` that is not only dots. A script
@@ -50,8 +54,8 @@ working directory.
 
 Every action checks its `repo` against `GITHUB_REPOS` in the cage's environment before gh runs. The
 grant's `env` sets the variable. The rule is the git plugin's, and `repos.py` holds this plugin's
-own copy of it. `plugins/git/README.md` gives the entry forms, the match, and the refusals of an
-unset, empty, or malformed list under "The repository list".
+own copy of it. The git plugin's README gives the entry forms, the match, and the refusals of an
+unset, empty, or malformed list under [The repository list](../git/README.md#the-repository-list).
 
 A script action checks `repo` before the action runs. A command action runs `gh-cage`, a wrapper
 that finds the one `--repo` in its argv and checks the value after it. On a match, `gh-cage`
@@ -69,13 +73,14 @@ that `attach` needs supplies only the files that gh uploads.
 
 ### What an action returns
 
-A command action returns `{exit_code, stdout, stderr}`, as the core's reference gives under
-[Results and refusals](../../docs/reference.md#results-and-refusals). A script action prints the
-same three members, and its `output_schema` states them. The script exits 0 whenever it runs to its
-end, and gh's exit code goes in `exit_code`. `job_log_url` runs no gh, so its exit code is its own,
-as given below. Each action returns gh's stdout as gh prints it, except for `pr_fetch`, `pr_checks`,
-and `job_log_url`, and for `pr_create` and `pr_edit` with `attach`, where the script replaces each
-private path, as "Attachments" gives.
+A command action returns the core's result, as
+[A command action's result](../../docs/reference.md#a-command-actions-result) gives. A script action
+prints the same three members, `exit_code`, `stdout`, and `stderr`, and its `output_schema` states
+them. The script exits 0 whenever it runs to its end, and gh's exit code goes in `exit_code`.
+`job_log_url` runs no gh, so its exit code is its own, as given below. Each action returns gh's
+stdout as gh prints it, except for `pr_fetch`, `pr_checks`, and `job_log_url`, and for `pr_create`
+and `pr_edit` with `attach`, where the script replaces each private path, as
+[Attachments](#attachments) gives.
 
 `pr_create` and `pr_edit` add two members when the last non-empty line of gh's stdout is a pull
 request's URL, `https://github.com/<owner>/<name>/pull/<number>`: `pr_url`, that URL, and
@@ -107,7 +112,7 @@ empty. When it gets no URL, `exit_code` is 1, `stdout` is empty, and `stderr` gi
 
 The URL is signed and short-lived. Fetch it soon after the call returns, and call `job_log_url`
 again for a fresh URL when it has expired. The agent fetches the URL itself, outside the cage, as
-"Egress" gives.
+[Egress](#egress) gives.
 
 ### Job log URLs
 
@@ -132,28 +137,27 @@ refuses as its own exit. The plugin refuses these:
   `owner/*`.
 - `repo` names a repository that `GITHUB_REPOS` does not list.
 - `gh-cage` finds `--repo` missing, repeated, or with no value after it.
-- A call passes `attach`, and the setting, the roots, or an entry fails a check. "What `attach`
-  refuses" gives each reason and the order of the checks.
+- A call passes `attach`, and the setting, the roots, or an entry fails a check.
+  [What `attach` refuses](#what-attach-refuses) gives each reason and the order of the checks.
 
 The core refuses a call before a cage starts when the input fails the action's input schema. These
 calls fail it:
 
-- `repo` is not in the form "The `repo` input" gives.
+- `repo` is not in the form [The `repo` input](#the-repo-input) gives.
 - `pr_view`'s `pr` begins with `-`, or a number is below 1.
 - `pr_edit` has none of `title`, `body`, `base`, and `attach`.
 - `pr_create` has an empty `base`, `head`, or `title`, or `pr_list` has an empty `head`.
-- `attach` is not in the form "The `attach` input" gives: it is empty or holds more than 50 entries,
-  or an entry lacks `path`, has a `path` that does not begin with `/`, has a `#` in `path` or in
-  `alt`, or has a member other than these two.
+- `attach` is not in the form [The `attach` input](#the-attach-input) gives: it is empty or holds
+  more than 50 entries, or an entry lacks `path`, has a `path` that does not begin with `/`, has a
+  `#` in `path` or in `alt`, or has a member other than these two.
 
 ### Output past the cap
 
 `pr_fetch` on a busy pull request is the call most likely to pass the core's cap. It is a script
-action. `pr_checks` returns no log, only one line for each failed job. `docs/writing-a-plugin.md`
-gives what happens to a script whose output passes the cap, and the core's reference gives the cap
-and the result forms under [Results and refusals](../../docs/reference.md#results-and-refusals).
-`run_view` with `log_failed` fetches one run's failed logs as a command action, whose stdout past
-the cap goes to an overflow file.
+action. `pr_checks` returns no log, only one line for each failed job. `run_view` with `log_failed`
+fetches one run's failed logs as a command action. The core's reference gives the cap, and what
+becomes of a command's or a script's output that passes it, under
+[Output past the cap](../../docs/reference.md#output-past-the-cap).
 
 ### Optional inputs
 
@@ -166,7 +170,7 @@ the cap goes to an overflow file.
 - `pr_close` passes `comment` only when it is not empty, and passes `--delete-branch` when
   `delete_branch` is true.
 - `pr_create` and `pr_edit` pass each `attach` entry as one `--attach=` item, after every other
-  flag, as "Attachments" gives. A call without `attach` passes no `--attach=` item.
+  flag, as [Attachments](#attachments) gives. A call without `attach` passes no `--attach=` item.
 
 ## Attachments
 
@@ -181,8 +185,9 @@ the call.
 The script holds each checked file open until it exits. A private path lies on the cage's tmpfs,
 which the agent cannot reach, and leads to the open file. So a later change to what the agent's name
 leads to does not change what uploads. A private path cleans lexically to the agent's path, so gh's
-body matching and upload name work as "Body references" gives. The script replaces each private path
-with the entry's `path` in `stdout` and `stderr`, so a result names only the agent's paths.
+body matching and upload name work as [Body references](#body-references) gives. The script replaces
+each private path with the entry's `path` in `stdout` and `stderr`, so a result names only the
+agent's paths.
 
 ### The `attach` input
 
@@ -213,8 +218,8 @@ A call without `attach` runs under every value.
 
 ### What `attach` refuses
 
-The script refuses a call before gh runs, as "Refusals" gives, with one of these reasons. `<path>`
-is the entry's `path` as given:
+The script refuses a call before gh runs, as [Refusals](#refusals) gives, with one of these reasons.
+`<path>` is the entry's `path` as given:
 
 - `attach is off: GITHUB_PR_ATTACHMENTS is 'off'`
 - `GITHUB_PR_ATTACHMENTS must be 'on' or 'off', got '<value>'`
@@ -260,8 +265,8 @@ never compares base names. So:
 ### What an upload returns
 
 gh uploads the files in order, and stops at the first failure. Its failure exit is 1, and its errors
-go to `stderr`. "What an action returns" gives `pr_url` and `pr_number`. A call that passes `attach`
-ends in one of three ways:
+go to `stderr`. [What an action returns](#what-an-action-returns) gives `pr_url` and `pr_number`. A
+call that passes `attach` ends in one of three ways:
 
 - **All uploaded.** `exit_code` is 0, and the result has `pr_url` and `pr_number`. `pr_create`
   opened the pull request, and `pr_edit` changed it.
@@ -286,16 +291,17 @@ The caller's rules:
 
 ### The grant
 
-A grant of `pr_create` or `pr_edit` that allows `attach` needs these members. "A grant" shows one.
+A grant of `pr_create` or `pr_edit` that allows `attach` needs these members. [A grant](#a-grant)
+shows one.
 
 - `roots`: a root that holds every attached file. Mode `ro` suffices. A grant with `roots: []`
   refuses every `attach` with the outside-the-roots reason, because the core then passes `[]`.
-- `domains`: `api.github.com` and `uploads.github.com`, as "Egress" gives.
+- `domains`: `api.github.com` and `uploads.github.com`, as [Egress](#egress) gives.
 - `credentials`: the GitHub token as `GH_TOKEN`, with write access to the repository. gh uploads
   only with a classic or fine-grained personal access token, an OAuth token, or a user-to-server
   token. It checks the viewer's permission on the repository first, and refuses below `WRITE`.
-- `env`: `GITHUB_REPOS`, as for every grant of the plugin, and `GITHUB_PR_ATTACHMENTS`, as "The
-  setting" gives.
+- `env`: `GITHUB_REPOS`, as for every grant of the plugin, and `GITHUB_PR_ATTACHMENTS`, as
+  [The setting](#the-setting) gives.
 
 A grant that turns attachments off sets `GITHUB_PR_ATTACHMENTS: "off"`, and may drop the root and
 `uploads.github.com`. The grant then loses the reach along with the input.
@@ -340,8 +346,9 @@ redirect and do not follow it. The agent fetches the URL itself, outside the cag
 `attach` needs one more host. gh sends each file in one
 `POST https://uploads.github.com/user-attachments/assets`, with the token in its `Authorization`
 header, and calls no storage host. A grant of `pr_create` or `pr_edit` that allows `attach` names
-`uploads.github.com` beside `api.github.com`, as "A grant" shows. When an upload reaches a host the
-grant does not name, the egress proxy's refusal names that host, and the fix is a grant edit.
+`uploads.github.com` beside `api.github.com`, as [A grant](#a-grant) shows. When an upload reaches a
+host the grant does not name, the egress proxy's refusal names that host, and the fix is a grant
+edit.
 
 `run_view` with `log_failed` needs one more host. gh asks `api.github.com` for the run's log at
 `repos/<repo>/actions/runs/<id>/logs`, and follows GitHub's redirect to a storage host GitHub picks,
@@ -375,12 +382,12 @@ scopes:
         env: {GITHUB_REPOS: "example-org/*"}
 ```
 
-Every grant sets `GITHUB_REPOS` in its `env`, as "The repository list" gives.
+Every grant sets `GITHUB_REPOS` in its `env`, as [The repository list](#the-repository-list) gives.
 
 The `pr_create` grant allows `attach`: its root holds the files to upload, and it names
-`uploads.github.com`. "The grant" under "Attachments" gives what each member is for.
+`uploads.github.com`. [The grant for attachments](#the-grant) gives what each member is for.
 
-"Egress" gives the hosts a grant must add for `run_view` with `log_failed`.
+[Egress](#egress) gives the hosts a grant must add for `run_view` with `log_failed`.
 
 ## Layout
 
@@ -450,5 +457,5 @@ poe test-integration
 ```
 
 `poe test` runs the unit tests and needs neither Docker nor gh. `poe test-integration` runs on the
-Docker daemon that `DOCKER_HOST` names. `.dev/verification.md` gives which bar runs each check, and
-what the integration tests must leave behind.
+Docker daemon that `DOCKER_HOST` names. [`.dev/verification.md`](../../.dev/verification.md) gives
+which bar runs each check, and what the integration tests must leave behind.

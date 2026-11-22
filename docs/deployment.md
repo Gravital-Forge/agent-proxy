@@ -68,7 +68,7 @@ Copy `examples/instance.yaml`, and edit the copy:
 3. Under `plugins`, give each plugin's image by its digest reference: from the release notes'
    `## Images`, or from the registry you pushed the image to.
 4. Under `scopes`, give each grant the agent needs. Each plugin's README gives the `env` settings
-   its grants need, under "A grant": [git](../plugins/git/README.md#a-grant),
+   its grants need: [git](../plugins/git/README.md#a-grant),
    [github](../plugins/github/README.md#a-grant), and
    [hcp-terraform](../plugins/hcp-terraform/README.md#a-grant).
 

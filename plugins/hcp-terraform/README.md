@@ -1,8 +1,10 @@
 # The hcp-terraform plugin
 
 The hcp-terraform plugin reads HCP Terraform runs and their logs, for the workspaces a grant lists,
-and does nothing else. Each of its actions is a script action. `docs/writing-a-plugin.md` gives the
-plugin model this follows.
+and does nothing else. Each of its actions is a script action. The core's architecture defines the
+cage, the action, the grant, and the other terms this README uses, under
+[Concepts](../../docs/architecture.md#concepts). [Writing a plugin](../../docs/writing-a-plugin.md)
+gives the plugin model this follows.
 
 ## Why it only reads
 
@@ -14,11 +16,10 @@ a GET, and no action reads state, state outputs, variables, or plan JSON.
 
 ## The actions
 
-A config that pins the image as `hcp-terraform`, as "A grant" does, serves each action as the MCP
-tool `hcp-terraform_<action>`, by the rule `<plugin>_<action>` that the core's reference gives under
-[A scope's grants](../../docs/reference.md#a-scopes-grants): `run_list` becomes
-`hcp-terraform_run_list`. `manifest.json` declares every action, its input schema, its credential,
-and its timeout of `2m`.
+A config that pins the image as `hcp-terraform`, as [A grant](#a-grant) does, serves `run_list` as
+the MCP tool `hcp-terraform_run_list`, by the rule that the core's reference gives under
+[A scope's grants](../../docs/reference.md#a-scopes-grants). `manifest.json` declares every action,
+its input schema, its credential, and its timeout of `2m`.
 
 ### `workspace_list`
 
@@ -58,7 +59,7 @@ Every result holds `exit_code`, `stdout`, and `stderr`, as each action's `output
 `manifest.json` states, and `stdout` is always empty. A success is exit code 0 with its data in the
 member named above. In that data, a member that HCP Terraform's answer lacks is null, and
 `workspace_list` leaves out a workspace whose answer holds no name. A refusal is exit code 2, as
-"Refusals" gives. A failure is exit code 1 with the reason on `stderr`.
+[Refusals](#refusals) gives. A failure is exit code 1 with the reason on `stderr`.
 
 A failed request gives `GET <path> answered <status>: <body>`, with the first 200 characters of the
 answer's body, or `GET <path> failed: <error>` when no answer came, or when the answer's status came
@@ -137,8 +138,8 @@ refuses a host the grant does not name.
 
 `workspace_list`, `run_list`, and `run_view` reach only `app.terraform.io`. `plan_log` and
 `apply_log` reach `app.terraform.io` and `archivist.terraform.io`. The egress proxy blocks a log
-redirect to any other host, and the action then fails with exit code 1. "A grant" names both hosts
-for every action, as `examples/instance.yaml` does. A grant of the first three may name
+redirect to any other host, and the action then fails with exit code 1. [A grant](#a-grant) names
+both hosts for every action, as `examples/instance.yaml` does. A grant of the first three may name
 `app.terraform.io` alone.
 
 ## A grant
@@ -163,8 +164,9 @@ scopes:
         env: {HCP_TERRAFORM_WORKSPACES: "example-org/example-workspace"}
 ```
 
-Every grant sets `HCP_TERRAFORM_WORKSPACES` in its `env`, as "The workspace list" gives. Every grant
-has `roots: []`, because no action reads a file.
+Every grant sets `HCP_TERRAFORM_WORKSPACES` in its `env`, as
+[The workspace list](#the-workspace-list) gives. Every grant has `roots: []`, because no action
+reads a file.
 
 ## Layout
 
@@ -208,5 +210,5 @@ poe test-integration
 ```
 
 `poe test` runs the unit tests and needs no Docker. `poe test-integration` runs on the Docker daemon
-that `DOCKER_HOST` names. `.dev/verification.md` gives which bar runs each check, and what the
-integration tests must leave behind.
+that `DOCKER_HOST` names. [`.dev/verification.md`](../../.dev/verification.md) gives which bar runs
+each check, and what the integration tests must leave behind.

@@ -63,7 +63,9 @@ A grant has these fields:
   `_`, and holds only upper-case letters, digits, and `_`. It is neither `HTTPS_PROXY`,
   `AGENT_PROXY_ROOTS`, nor a name that a credential of the same grant takes. A value holds no NUL.
   The values are settings, not secrets: they live in the config file, and the credential store holds
-  none of them. Each plugin's README gives the settings it reads under "A grant".
+  none of them. Each plugin's README gives the settings it reads:
+  [git](../plugins/git/README.md#a-grant), [github](../plugins/github/README.md#a-grant), and
+  [hcp-terraform](../plugins/hcp-terraform/README.md#a-grant).
 
 A grant, for example:
 

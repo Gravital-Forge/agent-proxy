@@ -55,10 +55,11 @@ README.
    ```
 
    The check passes when every test passes and, afterwards, the label checks in
-   `.dev/verification.md` print nothing on the service user's daemon. Read the cage-cost median from
-   the `MEASURE cage-cost` line the run prints. `test_the_cage_passes_the_hardening_probes` checks
-   that the cage's root filesystem refuses a write, `/tmp` takes one, the cage holds no effective
-   capability, and `no_new_privs` is set. Remove the copy with `rm -rf <service home>/agent-proxy`.
+   [`.dev/verification.md`](../.dev/verification.md#constraints) print nothing on the service user's
+   daemon. Read the cage-cost median from the `MEASURE cage-cost` line the run prints.
+   `test_the_cage_passes_the_hardening_probes` checks that the cage's root filesystem refuses a
+   write, `/tmp` takes one, the cage holds no effective capability, and `no_new_privs` is set.
+   Remove the copy with `rm -rf <service home>/agent-proxy`.
 6. **Git over HTTPS with a real credential.** This check shows that git over HTTPS, through the
    credential helper, reaches a private repository. Store a real `github-token`, as
    [The first start](deployment.md#the-first-start) does, and give a `git.fetch` grant shaped like
