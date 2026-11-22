@@ -436,7 +436,7 @@ def test_remove_acls_clears_the_tree_the_directories_above_it_and_the_home(
         f"setfacl -x u:agentproxy-agent-01 {agent_home}",
     ]
     assert result.stdout == (
-        "removed the ACL entries of agentproxy-agent-01 from the agent's tree "
+        f"removed the ACL entries of agentproxy-agent-01 from the agent's tree {tree} "
         f"and from {agent_home / 'work'} {agent_home}\n"
     )
 
@@ -451,6 +451,9 @@ def test_remove_acls_clears_the_home_alone_when_the_tree_is_gone(
     assert stub_calls(agent_home.parent / "stub.log") == [
         f"setfacl -x u:agentproxy-agent-01 {agent_home}",
     ]
+    assert result.stdout == (
+        f"removed the ACL entries of agentproxy-agent-01 from {agent_home}\n"
+    )
 
 
 def test_check_agent_refuses_a_tree_outside_the_home(agent_home: Path) -> None:

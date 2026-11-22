@@ -113,15 +113,16 @@ remove_acls() {
         echo "skipped removing ACL entries: service user $service_user is already gone"
         return
     fi
+    local cleared_tree="" cleared=("${tree_parents_in_home[@]}" "$agent_home") directory
     if [[ -n "$agent_tree" ]]; then
         setfacl -R -P -x "u:$service_user" "$agent_tree"
         setfacl -R -P -x "d:u:$service_user" "$agent_tree"
+        cleared_tree="the agent's tree $agent_tree and from "
     fi
-    local cleared=("${tree_parents_in_home[@]}" "$agent_home") directory
     for directory in "${cleared[@]}"; do
         setfacl -x "u:$service_user" "$directory"
     done
-    echo "removed the ACL entries of $service_user from the agent's tree and from ${cleared[*]}"
+    echo "removed the ACL entries of $service_user from $cleared_tree${cleared[*]}"
 }
 
 remove_overflow_dir() {
