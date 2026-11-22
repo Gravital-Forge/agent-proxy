@@ -537,5 +537,5 @@ poe test-integration
 
 `poe test` runs the unit tests and needs only the host's git, git LFS, and `ssh-keygen` at
 `/usr/bin/ssh-keygen`. `poe test-integration` runs on the Docker daemon that `DOCKER_HOST` names.
-[`.dev/verification.md`](../../.dev/verification.md) gives which bar runs each check, and what the
-integration tests must leave behind.
+The contributing guide gives under [The checks](../../CONTRIBUTING.md#the-checks) what each check
+needs, and what the integration tests must leave behind.
