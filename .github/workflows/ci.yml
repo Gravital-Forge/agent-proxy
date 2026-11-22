@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           python-version: "3.12"
@@ -22,6 +24,8 @@ jobs:
       plugins: ${{ steps.list.outputs.plugins }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - id: list
         run: |
           {
@@ -58,6 +62,8 @@ jobs:
         package: ${{ fromJSON(needs.discover.outputs.packages) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           python-version: "3.12"
@@ -85,11 +91,15 @@ jobs:
         plugin: ${{ fromJSON(needs.discover.outputs.plugins) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           python-version: "3.12"
       - name: Build the plugin image
-        run: docker build -t apx-plugin:ci ${{ matrix.plugin }}
+        env:
+          PLUGIN: ${{ matrix.plugin }}
+        run: docker build -t apx-plugin:ci "$PLUGIN"
       - name: Check the manifest
         working-directory: core/agent-proxy
         run: uv run agent-proxy manifest check apx-plugin:ci
