@@ -21,8 +21,8 @@ runs it and when. `CONTRIBUTING.md` under "The packages" says what a package is.
 - After a heavy run, each label check in `CONTRIBUTING.md` under "What a test leaves behind" prints
   nothing, or the heavy bar is red.
 - Every check runs as the agent's own user.
-- An acceptance check, as `CONTRIBUTING.md` defines it under "Writing tests", is written into
-  `docs/acceptance-checks.md` and never run in the project.
+- An acceptance check, as the opening of `docs/acceptance-checks.md` defines it, is written into
+  that document and never run in the project.
 
 Everything else resolves to the workspace root's `verification` topic, which owns how a package
 declares its checks.

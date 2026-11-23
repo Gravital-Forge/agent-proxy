@@ -94,8 +94,8 @@ The prune needs `--all`, because without it a tagged image survives.
 - An upgrade of iron-proxy runs `test_iron_proxy_ignores_a_rules_source_ip` in
   `core/agent-proxy/tests/integration/test_egress.py` first.
 
-A check that needs root, a second user, or a real credential is an acceptance check. It goes into
-[the acceptance checks](docs/acceptance-checks.md), never into the test suites.
+An [acceptance check](docs/acceptance-checks.md) goes into that document, never into the test
+suites.
 
 ## Plugins
 
