@@ -12,9 +12,9 @@ credentials stay in the container, so the agent never holds one.
 ## Why
 
 An agent that needs a credential usually gets the credential. It then holds all of it, because a
-token the agent can read cannot be narrowed to particular operations. A tool surface tied to one
-service serves nothing else. And a tool such as git runs code that a repository controls, such as
-its hooks, with every reach the tool has. [The architecture](docs/architecture.md) gives how
+credential the agent can read cannot be narrowed to particular operations. A tool surface tied to
+one service serves nothing else. And a tool such as git runs code that a repository controls, such
+as its hooks, with every reach the tool has. [The architecture](docs/architecture.md) gives how
 agent-proxy answers each of these problems.
 
 ## How a call works
