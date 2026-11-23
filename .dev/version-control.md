@@ -28,8 +28,8 @@ Before you remove an item worktree:
    find <worktree> \( -name .venv -o -name __pycache__ -o -name .pytest_cache -o -name .ruff_cache -o -name .rumdl_cache \) -prune -print
    ```
 
-2. Run `docker image prune --all --force --filter label=agent-proxy.test=1`. `--all` is required,
-   because a tagged test image survives the prune without it.
+2. Remove the labelled test images with the prune command that `CONTRIBUTING.md` gives under "What a
+   test leaves behind".
 
 Then remove the worktree with `git -C <primary clone> worktree remove <worktree>`. Its branch stays.
 

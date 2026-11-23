@@ -10,9 +10,9 @@ This file holds one entry per release, newest first.
   [The operator command](docs/reference.md#the-operator-command) gives.
 - The [git](plugins/git/README.md), [github](plugins/github/README.md), and
   [hcp-terraform](plugins/hcp-terraform/README.md) plugins.
-- The instance starts and reloads its config, and `token mint` mints a token, before the operator
-  stores a grant's credential, as [Failures and warnings](docs/reference.md#failures-and-warnings)
-  gives.
+- The instance can start and reload its config, and `token mint` can mint a token, before the
+  operator stores a grant's credential, as
+  [Failures and warnings](docs/reference.md#failures-and-warnings) gives.
 - The self-check, which the agent runs as the MCP tool `agent-proxy_self_check` and the operator
   runs as `agent-proxy check`. [The self-check](docs/architecture.md#the-self-check) gives what it
   covers.
