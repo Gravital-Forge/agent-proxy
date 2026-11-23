@@ -54,12 +54,12 @@ README.
    sudo -u agentproxy-agent-01 env HOME=<service home> DOCKER_HOST=unix:///run/user/<uid>/docker.sock uv run pytest --showlocals tests/integration/test_runner.py
    ```
 
-   The check passes when every test passes and, afterwards, the label checks in
-   [`.dev/verification.md`](../.dev/verification.md#constraints) print nothing on the service user's
-   daemon. Read the cage-cost median from the `MEASURE cage-cost` line the run prints.
-   `test_the_cage_passes_the_hardening_probes` checks that the cage's root filesystem refuses a
-   write, `/tmp` takes one, the cage holds no effective capability, and `no_new_privs` is set.
-   Remove the copy with `rm -rf <service home>/agent-proxy`.
+   The check passes when every test passes and, afterwards, the label checks in the contributing
+   guide under [What a test leaves behind](../CONTRIBUTING.md#what-a-test-leaves-behind) print
+   nothing on the service user's daemon. Read the cage-cost median from the `MEASURE cage-cost` line
+   the run prints. `test_the_cage_passes_the_hardening_probes` checks that the cage's root
+   filesystem refuses a write, `/tmp` takes one, the cage holds no effective capability, and
+   `no_new_privs` is set. Remove the copy with `rm -rf <service home>/agent-proxy`.
 6. **Git over HTTPS with a real credential.** This check shows that git over HTTPS, through the
    credential helper, reaches a private repository. Store a real `github-token`, as
    [The first start](deployment.md#the-first-start) does, and give a `git.fetch` grant shaped like

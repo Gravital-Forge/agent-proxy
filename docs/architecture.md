@@ -385,8 +385,7 @@ instance image's `AGENT_PROXY_VERIFIER_IMAGE` equals the first reference the scr
 verifier's.
 
 Every action in the workflows is pinned by commit SHA, with its version in a trailing comment.
-`.github/dependabot.yml` asks for weekly updates of those actions, of the base images that the
-Dockerfiles pin by tag and digest, and of the uv lockfiles.
+[Pins](../CONTRIBUTING.md#pins) in the contributing guide gives which pins Dependabot updates.
 
 ## The isolation model
 
