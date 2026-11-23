@@ -13,9 +13,9 @@ You need these tools on the host:
 - shellcheck, which the core package's lint runs on the scripts in `core/docker/`.
 - Docker with a rootless daemon, for the integration tests.
 
-The verifier's Go code is formatted, vetted, tested, and built inside its Dockerfile, so you need no
-Go toolchain. Each plugin's README gives, under "Build and test", what that plugin's unit tests need
-on the host.
+The verifier's Go code is format-checked, vetted, tested, and built inside its Dockerfile, so you
+need no Go toolchain to check it. Each plugin's README gives, under "Build and test", what that
+plugin's unit tests need on the host.
 
 ## The packages
 
@@ -74,10 +74,10 @@ The prune needs `--all`, because without it a tagged image survives.
 
 - The core's unit tests, in `core/agent-proxy/tests/unit/`, are plain pytest with Docker mocked.
 - The core's integration tests, in `core/agent-proxy/tests/integration/`, run on a real rootless
-  daemon. Their `conftest.py` builds what the tests run: the test plugin, which it pushes to a
-  throwaway registry container so that a test pulls it by digest; the egress probe; the verifier;
-  and the instance image, with a test variant built from `core/agent-proxy/tests/instance-image/`
-  that sets the test label.
+  daemon. Their `conftest.py` builds the images the tests run, among them the test plugin, which it
+  pushes to a throwaway registry container so that a test pulls it by digest; the egress probe; the
+  verifier; and the instance image, with a test variant built from
+  `core/agent-proxy/tests/instance-image/` that sets the test label.
 - The transport test, `core/agent-proxy/tests/integration/test_transport.py`, starts the server and
   drives its MCP surface with a FastMCP client.
 - `core/agent-proxy/tests/test-plugin/` holds the source of the test plugin, and
@@ -108,8 +108,8 @@ its manifest.
 ## Pins
 
 Dependabot, configured in `.github/dependabot.yml`, proposes updates for three kinds of pin: the
-`uses:` lines of the workflows, the `FROM` line of each Dockerfile in a directory that file lists,
-and each package's `uv.lock`.
+`uses:` lines of the workflows, each `FROM` line of a Dockerfile in a directory that file lists, and
+each package's `uv.lock`.
 
 Every other pin is updated by hand. That is a version or digest written in Python source or a test;
 in a workflow's `run` script, step input, or service container; in a Dockerfile `RUN` line or `ARG`;
