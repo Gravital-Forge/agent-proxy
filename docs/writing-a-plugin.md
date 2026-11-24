@@ -12,10 +12,12 @@ The image holds an executable named `describe` on its `PATH`. `describe` prints 
 UTF-8 JSON on stdout and exits 0.
 
 The proxy runs `describe` with the image's entrypoint set to `["describe"]` and no command, in a
-container with no network, a read-only root filesystem, no capabilities, and `no-new-privileges`,
-which it removes whatever happens. So `describe` reads only what the image holds and writes nothing
-but its output. It must exit within 30 seconds, and its stdout must stay within 1 MiB. A non-zero
-exit shows the first 1,024 bytes of stderr, so write a diagnostic there.
+container with no network, a read-only root filesystem, no capabilities, and `no-new-privileges`. So
+`describe` reads only what the image holds and writes nothing but its output. It must exit within 30
+seconds, and its stdout must stay within 1 MiB. A non-zero exit shows the first 1,024 bytes of
+stderr, so write a diagnostic there. The proxy removes the container once the run ends, whatever its
+result, so long as the process that runs `describe` lives on: the instance, or
+`agent-proxy manifest check`.
 
 The self-check also runs `describe`, in a cage that the instance builds as
 [How an action runs](#how-an-action-runs) gives for an action. The cage starts behind the root

@@ -112,10 +112,10 @@ inside the instance's process (`core/agent-proxy/agent_proxy/runner.py`).
   a script's input and the wait for the exit. On timeout the cage is killed.
 
 The instance removes each cage by force whatever the call's outcome, and the cage holds its place
-under the cap until it is removed. A forced removal of the instance container while calls run leaves
-their cages, as [Known limits](#known-limits) gives. Files the agent owns belong to a uid that the
-cage's user namespace does not map, so the cage writes them through the ACL but cannot change their
-mode or owner.
+under the cap until it is removed. A kill of the instance's process while calls run leaves their
+cages, as [Known limits](#known-limits) gives. Files the agent owns belong to a uid that the cage's
+user namespace does not map, so the cage writes them through the ACL but cannot change their mode or
+owner.
 
 Before it creates a cage, the instance opens each root's directory one path component at a time from
 `/`, and follows no symbolic link anywhere in the path. A root that is a symbolic link, is not a
@@ -455,17 +455,32 @@ tree it is given.
 - The github plugin's `run_view` with `log_failed` works only under a grant that names each storage
   host, as [Egress](../plugins/github/README.md#egress) in the plugin's README gives.
 - Credentials are not encrypted at rest: each is a plain file protected by the service user's uid.
-- When the operator removes the instance container by force while calls run, the instance never
-  removes those calls' cages. Each cage runs until its command ends, with no timeout, because the
-  instance holds the timeout. It then stays on the service user's daemon as a stopped container. Its
-  container config still holds the value of every credential that its grant passes as an environment
-  variable, and `docker inspect` shows it. A file credential leaves only its mount. The next start
-  removes none of these cages. The operator finds them with the first command below, which matches
-  the mount of [the root verifier](#the-root-verifier) that every cage carries and no other
-  container does. The operator removes them with the second, after the instance container is removed
-  and before the next start: the filter also matches a running instance's cages, and removing one
-  ends its call. Both commands run on the service user's daemon, as every `docker` command in
-  [the deployment guide](deployment.md) does.
+- A call's cage outlives the instance when the instance's process is killed while the call runs.
+  Nothing but that process removes a cage on its own: when the call ends, or when the process stops
+  on SIGINT or SIGTERM, which waits for its running calls to end. These kill the process while a
+  call runs:
+  - `docker rm --force` or `docker kill` on the instance container;
+  - `docker stop` when a call outlasts Docker's stop grace period, 10 seconds by default, after
+    which Docker kills the instance;
+  - the kernel's out-of-memory kill of the instance's process;
+  - a stop or restart of the service user's Docker daemon, which sends the instance SIGTERM and
+    kills it after the same grace period.
+
+  A cage that has started runs until its command ends or the daemon stops, with no timeout, because
+  the instance holds the timeout. It then stays on the service user's daemon as a stopped container.
+  A cage stays there as a created container when the instance was killed between creating the cage
+  and starting it. The container config of each such cage still holds the value of every credential
+  that its grant passes as an environment variable, and `docker inspect` shows it. A file credential
+  leaves only its mount. The next start removes none of these cages. The operator finds them with
+  the first command below, which matches the mount of [the root verifier](#the-root-verifier) that
+  every cage carries and no other container does. The operator removes them with the second, while
+  the instance container is stopped or removed and before its next start: the filter also matches a
+  running instance's cages, and removing one ends its call. After an out-of-memory kill, or a stop
+  or restart of the daemon, the restart policy `unless-stopped` starts the instance again as soon as
+  the daemon runs, with no operator at hand. The operator then stops it with
+  `docker stop agent-proxy` when no call runs, removes the cages with the second command, and starts
+  it with `docker start agent-proxy`. Each `docker` command in this entry runs on the service user's
+  daemon, as every `docker` command in [the deployment guide](deployment.md) does.
 
   ```sh
   docker ps -a --filter volume=/.agent-proxy
