@@ -35,9 +35,11 @@ from agent_proxy.mcp import (
 )
 from agent_proxy.plugins import parse_manifest
 from agent_proxy.reload import LiveConfig, Snapshot
-from agent_proxy.results import CALL_ID_PATTERN
+from agent_proxy.results import CALL_ID_PATTERN, OverflowWriteError
 from agent_proxy.runner import (
     CageCall,
+    CageFailedError,
+    CageStartError,
     CageTimeoutError,
     CredentialError,
     InputError,
@@ -690,6 +692,54 @@ def test_a_failed_audit_write_replaces_a_refusal_past_authentication(
 
     assert AUDIT_REFUSAL.fullmatch(
         _refusal(harness, _bearer(harness.token), "other_echo")
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(InputError("$.text: 3 is not of type 'string'"), id="input"),
+        pytest.param(CredentialError(unset_message("api-token")), id="credential"),
+        pytest.param(CageStartError("the cage cannot be started"), id="start"),
+    ],
+)
+def test_a_failed_audit_write_of_a_refusal_before_the_cage_ran_is_plain(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, error: ProxyError
+) -> None:
+    """A runner refusal that comes before the action runs keeps the plain text."""
+    harness.runner.result = error
+    fail_next_write_after_half(monkeypatch)
+
+    assert AUDIT_REFUSAL.fullmatch(_refusal(harness, _bearer(harness.token)))
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        pytest.param(
+            CageTimeoutError("action 'echo' did not finish within its timeout"),
+            id="timeout",
+        ),
+        pytest.param(CageFailedError("action 'echo': the cage failed"), id="failed"),
+        pytest.param(
+            OverflowWriteError("the overflow file cannot be written"), id="overflow"
+        ),
+    ],
+)
+def test_a_failed_audit_write_of_a_refusal_after_the_cage_ran_says_it_ran(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch, error: ProxyError
+) -> None:
+    """A cage that started and then failed may have acted, and the refusal says so."""
+    harness.runner.result = error
+    fail_next_write_after_half(monkeypatch)
+
+    refusal = _refusal(harness, _bearer(harness.token))
+
+    call_id = harness.runner.calls[0].call_id
+    assert refusal == (
+        "the action ran and may have taken effect, but the audit log could not"
+        f" record call {call_id}, so its result is withheld; check what it"
+        " changed before a retry"
     )
 
 

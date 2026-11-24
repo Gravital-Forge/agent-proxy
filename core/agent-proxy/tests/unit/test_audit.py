@@ -155,7 +155,7 @@ def test_arguments_past_the_cap_are_cut_to_their_head_and_size(
 
 
 def test_cut_arguments_count_the_bytes_of_the_whole_json(directory: Path) -> None:
-    """The size is the UTF-8 length of the whole compact JSON the line would hold."""
+    """The size counts the whole compact JSON, escapes included, not just its head."""
     arguments = {"text": "é" * 20_000, "more": list(range(1000))}
     text = json.dumps(arguments, separators=(",", ":"))
 

@@ -36,11 +36,13 @@ from agent_proxy.reload import (
     Snapshot,
     build_snapshot,
 )
-from agent_proxy.results import OverflowSweeper, new_call_id
+from agent_proxy.results import OverflowSweeper, OverflowWriteError, new_call_id
 from agent_proxy.runner import (
     CageCall,
+    CageFailedError,
     CageLimiter,
     CageRunner,
+    CageTimeoutError,
     Outcome,
     ensure_verifier,
 )
@@ -60,6 +62,7 @@ _SERVER_NAME = "agent-proxy"
 _MCP_PATH = "/mcp"
 _AUTHORIZATION_HEADER = "authorization"
 _HANDLED_SIGNALS = (signal.SIGINT, signal.SIGTERM)
+_AFTER_START_ERRORS = (CageTimeoutError, CageFailedError, OverflowWriteError)
 
 
 class CallRefusedError(ProxyError):
@@ -240,16 +243,18 @@ class CallGateway:
 
         Raises:
             CallRefusedError: the call is refused, or its audit line cannot be
-                written; that refusal says the action ran.
+                written; once the cage has started, that refusal says the
+                action ran.
         """
         try:
             outcome = self._run(call, token.scope)
+        except _AFTER_START_ERRORS as error:
+            refusal = str(error)
+            self._write_ran(call.refusal_line(token, refusal))
+            raise CallRefusedError(refusal) from error
         except ProxyError as error:
             self._refuse(call, token, error)
-        try:
-            self._audit.write(call.outcome_line(token, outcome))
-        except AuditError as error:
-            raise CallRefusedError(_ran_audit_refusal(call.call_id)) from error
+        self._write_ran(call.outcome_line(token, outcome))
         return outcome.content
 
     def _self_check_call(self, call: _Call, token: TokenRecord) -> Mapping[str, object]:
@@ -418,6 +423,18 @@ class CallGateway:
             self._audit.write(line)
         except AuditError as error:
             raise CallRefusedError(_audit_refusal(line.call_id)) from error
+
+    def _write_ran(self, line: AuditRecord) -> None:
+        """Write the line of a call whose cage ran to the audit log.
+
+        Raises:
+            CallRefusedError: the log cannot record the line; the refusal says
+                the action ran and may have taken effect.
+        """
+        try:
+            self._audit.write(line)
+        except AuditError as error:
+            raise CallRefusedError(_ran_audit_refusal(line.call_id)) from error
 
 
 def _bearer_token(authorization: str | None) -> str | None:
