@@ -130,26 +130,31 @@ class TokenStore:
     def authenticate(self, token: str) -> TokenRecord | None:
         """Verify token as verify does, and record its use on a match.
 
-        The match and the last-used time are one transaction, which holds the
-        write lock from before the match.
+        The match is a read, so a token that matches nothing never waits for
+        the write lock. A match takes the lock only to record its use, and
+        that update matches the digest as well as the name, so a token revoked
+        after its match updates no row.
 
         Returns:
             The token's record with last_used_at set to now, or None when the
-            token is unknown or expired.
+            token is unknown, expired, or revoked after its match.
 
         Raises:
             TokenStoreError: the store's file cannot be read.
         """
         used_at = self._now()
         with self._checked() as connection:
-            connection.execute("BEGIN IMMEDIATE")
             matched = _match(connection, token, used_at)
             if matched is None:
                 return None
-            connection.execute(
-                "UPDATE tokens SET last_used_at = ? WHERE name = ?",
-                (used_at.isoformat(), matched.name),
-            )
+            connection.execute("BEGIN IMMEDIATE")
+            updated = connection.execute(
+                "UPDATE tokens SET last_used_at = ?"
+                " WHERE name = ? AND token_sha256 = ?",
+                (used_at.isoformat(), matched.name, _digest(token)),
+            ).rowcount
+        if updated == 0:
+            return None
         return dataclasses.replace(matched, last_used_at=used_at)
 
     @contextmanager

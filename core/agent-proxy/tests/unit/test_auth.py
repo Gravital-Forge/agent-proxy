@@ -2,6 +2,7 @@ import hashlib
 import hmac
 import sqlite3
 import stat
+import time
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -9,6 +10,7 @@ from unittest import mock
 
 import pytest
 
+from agent_proxy import auth
 from agent_proxy.auth import (
     TokenNameInUseError,
     TokenRecord,
@@ -467,11 +469,8 @@ def test_authenticate_compares_every_row(store: TokenStore, minted: list[str]) -
     assert compare.call_count == 3
 
 
-def test_authenticate_matches_and_writes_in_one_immediate_transaction(
-    store: TokenStore,
-) -> None:
-    """The match runs after BEGIN IMMEDIATE, so no revoke lands before the update."""
-    token = store.mint("ci-bot", "ci", None)
+def _authenticate_verbs(store: TokenStore, token: str) -> list[str]:
+    """Return the first word of each statement one authenticate runs."""
     statements: list[str] = []
     real_connect = sqlite3.connect
 
@@ -482,10 +481,81 @@ def test_authenticate_matches_and_writes_in_one_immediate_transaction(
 
     with mock.patch("agent_proxy.auth.sqlite3.connect", tracing_connect):
         store.authenticate(token)
+    return [statement.split()[0].upper() for statement in statements]
 
-    assert statements[0].strip().upper() == "BEGIN IMMEDIATE"
-    verbs = [statement.split()[0].upper() for statement in statements]
-    assert verbs == ["BEGIN", "SELECT", "UPDATE", "COMMIT"]
+
+def test_authenticate_matches_before_it_takes_the_write_lock(
+    store: TokenStore,
+) -> None:
+    """The match is a plain read; BEGIN IMMEDIATE comes only before the update."""
+    token = store.mint("ci-bot", "ci", None)
+
+    assert _authenticate_verbs(store, token) == ["SELECT", "BEGIN", "UPDATE", "COMMIT"]
+
+
+def test_authenticate_of_an_unknown_token_never_takes_the_write_lock(
+    store: TokenStore,
+) -> None:
+    """A token that matches nothing runs the read alone."""
+    store.mint("ci-bot", "ci", None)
+
+    assert _authenticate_verbs(store, UNKNOWN_TOKEN) == ["SELECT"]
+
+
+def test_an_unknown_token_does_not_wait_for_a_held_write_lock(
+    store: TokenStore, path: Path
+) -> None:
+    """While another connection holds the write lock, an unknown token fails at once."""
+    store.mint("ci-bot", "ci", None)
+    with closing(sqlite3.connect(path, isolation_level=None)) as holder:
+        holder.execute("BEGIN IMMEDIATE")
+        started = time.monotonic()
+
+        assert store.authenticate(UNKNOWN_TOKEN) is None
+
+        assert time.monotonic() - started < 1
+        holder.execute("ROLLBACK")
+
+
+def test_a_token_revoked_after_its_match_does_not_authenticate(
+    store: TokenStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A revoke that lands between the match and the update leaves no record."""
+    token = store.mint("ci-bot", "ci", None)
+    real_match = auth._match
+
+    def match_then_revoke(
+        connection: sqlite3.Connection, presented: str, now: datetime
+    ) -> TokenRecord | None:
+        matched = real_match(connection, presented, now)
+        store.revoke("ci-bot")
+        return matched
+
+    monkeypatch.setattr("agent_proxy.auth._match", match_then_revoke)
+
+    assert store.authenticate(token) is None
+
+
+def test_a_name_reminted_after_the_match_keeps_its_new_token_unused(
+    store: TokenStore, monkeypatch: pytest.MonkeyPatch, clock: Clock
+) -> None:
+    """The update matches the digest too, so a new token under the name stays unused."""
+    token = store.mint("ci-bot", "ci", None)
+    real_match = auth._match
+
+    def match_then_remint(
+        connection: sqlite3.Connection, presented: str, now: datetime
+    ) -> TokenRecord | None:
+        matched = real_match(connection, presented, now)
+        store.revoke("ci-bot")
+        store.mint("ci-bot", "ci", None)
+        return matched
+
+    monkeypatch.setattr("agent_proxy.auth._match", match_then_remint)
+    clock.moment = LATER
+
+    assert store.authenticate(token) is None
+    assert _last_used(store, "ci-bot") is None
 
 
 def test_verify_never_writes(store: TokenStore, path: Path) -> None:

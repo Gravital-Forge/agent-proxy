@@ -2,6 +2,7 @@ import errno
 import json
 import os
 import re
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -12,7 +13,14 @@ import pytest
 from audit_faults import fail_next_write_after_half
 from egress_fakes import RecordingEgress
 
-from agent_proxy.audit import AuditError, AuditRecord, AuditWriter, tail
+from agent_proxy.audit import (
+    ACTION_CAP_CHARACTERS,
+    REFUSAL_CAP_CHARACTERS,
+    AuditError,
+    AuditRecord,
+    AuditWriter,
+    tail,
+)
 from agent_proxy.auth import TokenStore
 from agent_proxy.config import InstanceConfig
 from agent_proxy.credentials import unset_message
@@ -20,6 +28,7 @@ from agent_proxy.egress import cage_network
 from agent_proxy.errors import ProxyError
 from agent_proxy.mcp import (
     REFUSAL_PREFIX,
+    TOKENLESS_LINE_INTERVAL,
     CallGateway,
     CallRefusedError,
     ToolSpec,
@@ -558,6 +567,7 @@ def test_a_granted_calls_audit_line(harness: Harness) -> None:
             "scope": "dev",
             "action": "tools_echo",
             "arguments": ECHO_ARGUMENTS,
+            "arguments_cut": None,
             "exit_code": 0,
             "duration_ms": 42,
             "stdout_bytes": 6,
@@ -568,8 +578,10 @@ def test_a_granted_calls_audit_line(harness: Harness) -> None:
     ]
 
 
-def test_a_bad_tokens_audit_line_has_no_token_fields(harness: Harness) -> None:
-    """A token that does not authenticate leaves the token fields None."""
+def test_a_bad_tokens_audit_line_has_no_token_fields_and_no_arguments(
+    harness: Harness,
+) -> None:
+    """A token that does not authenticate leaves the token and argument fields None."""
     _refusal(harness, _bearer(UNKNOWN_TOKEN))
 
     [line] = _audit_lines(harness)
@@ -584,7 +596,8 @@ def test_a_bad_tokens_audit_line_has_no_token_fields(harness: Harness) -> None:
         "token_name": None,
         "scope": None,
         "action": "tools_echo",
-        "arguments": ECHO_ARGUMENTS,
+        "arguments": None,
+        "arguments_cut": None,
         "exit_code": None,
         "stdout_bytes": None,
         "stderr_bytes": None,
@@ -645,7 +658,9 @@ def test_a_failed_audit_write_withholds_the_result_and_the_next_call_succeeds(
         harness.gateway.call(bearer, "tools_echo", ECHO_ARGUMENTS)
     first_id = harness.runner.calls[0].call_id
     assert str(caught.value) == (
-        f"the audit log could not record call {first_id}, so its result is withheld"
+        "the action ran and may have taken effect, but the audit log could not"
+        f" record call {first_id}, so its result is withheld; check what it"
+        " changed before a retry"
     )
 
     reply = harness.gateway.call(bearer, "tools_echo", ECHO_ARGUMENTS)
@@ -665,6 +680,182 @@ def test_a_failed_audit_write_replaces_a_refusal(
     fail_next_write_after_half(monkeypatch)
 
     assert AUDIT_REFUSAL.fullmatch(_refusal(harness, _bearer(UNKNOWN_TOKEN)))
+
+
+def test_a_failed_audit_write_replaces_a_refusal_past_authentication(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A call refused before any cage ran keeps the plain audit refusal."""
+    fail_next_write_after_half(monkeypatch)
+
+    assert AUDIT_REFUSAL.fullmatch(
+        _refusal(harness, _bearer(harness.token), "other_echo")
+    )
+
+
+def test_a_long_refusal_reaches_the_caller_whole_and_the_line_cut(
+    harness: Harness,
+) -> None:
+    """The cap applies to the line alone; the caller gets every character."""
+    error = InputError("$.text: " + "x" * (REFUSAL_CAP_CHARACTERS + 100))
+    harness.runner.result = error
+
+    assert _refusal(harness, _bearer(harness.token)) == str(error)
+
+    [line] = _audit_lines(harness)
+    assert line["refusal"] == str(error)[:REFUSAL_CAP_CHARACTERS] + " [cut]"
+
+
+def test_a_long_tool_name_is_cut_in_its_line(harness: Harness) -> None:
+    """A tool name the caller chose is cut to its cap in the line."""
+    tool = "tools_" + "z" * ACTION_CAP_CHARACTERS
+
+    _refusal(harness, _bearer(harness.token), tool)
+
+    [line] = _audit_lines(harness)
+    assert line["action"] == tool[:ACTION_CAP_CHARACTERS] + " [cut]"
+
+
+def test_the_tokenless_line_interval_is_sixty_seconds() -> None:
+    """At most one line each minute is written for calls with no verified token."""
+    assert timedelta(seconds=60) == TOKENLESS_LINE_INTERVAL
+
+
+def _tokenless_refusals(harness: Harness, count: int) -> list[str]:
+    return [_refusal(harness, _bearer(UNKNOWN_TOKEN)) for _ in range(count)]
+
+
+def test_tokenless_calls_inside_one_interval_write_one_line(
+    harness: Harness,
+) -> None:
+    """A hundred calls at one moment are each refused, and one line is written."""
+    refusals = _tokenless_refusals(harness, 100)
+
+    assert refusals == [TOKEN_REFUSAL] * 100
+    [line] = _audit_lines(harness)
+    assert line["refusal"] == TOKEN_REFUSAL
+
+
+def test_the_first_tokenless_line_after_the_interval_counts_the_unwritten(
+    harness: Harness,
+) -> None:
+    """Once the interval has passed, the next line counts the calls with no line."""
+    _tokenless_refusals(harness, 100)
+    harness.clock.moment = MINTED_AT + TOKENLESS_LINE_INTERVAL
+
+    assert _refusal(harness, _bearer(UNKNOWN_TOKEN)) == TOKEN_REFUSAL
+
+    first, second = _audit_lines(harness)
+    assert first["refusal"] == TOKEN_REFUSAL
+    assert second["refusal"] == (
+        f"{TOKEN_REFUSAL}; 99 more calls with no verified token were refused"
+        " since the last such line"
+    )
+
+
+def test_a_tokenless_call_just_inside_the_interval_writes_no_line(
+    harness: Harness,
+) -> None:
+    """A call a microsecond before the interval ends is counted, not written."""
+    _tokenless_refusals(harness, 1)
+    harness.clock.moment = (
+        MINTED_AT + TOKENLESS_LINE_INTERVAL - timedelta(microseconds=1)
+    )
+
+    _tokenless_refusals(harness, 1)
+
+    assert len(_audit_lines(harness)) == 1
+
+
+def test_the_count_restarts_after_each_tokenless_line(harness: Harness) -> None:
+    """A line with no call unwritten before it carries the refusal alone."""
+    _tokenless_refusals(harness, 3)
+    harness.clock.moment = MINTED_AT + TOKENLESS_LINE_INTERVAL
+    _tokenless_refusals(harness, 1)
+    harness.clock.moment = MINTED_AT + 2 * TOKENLESS_LINE_INTERVAL
+
+    _tokenless_refusals(harness, 1)
+
+    assert [line["refusal"] for line in _audit_lines(harness)] == [
+        TOKEN_REFUSAL,
+        f"{TOKEN_REFUSAL}; 2 more calls with no verified token were refused"
+        " since the last such line",
+        TOKEN_REFUSAL,
+    ]
+
+
+def test_an_unreadable_token_store_shares_the_tokenless_interval(
+    harness: Harness,
+) -> None:
+    """A store refusal inside the interval of an unknown-token line writes none."""
+    _tokenless_refusals(harness, 1)
+    harness.tokens_path.write_bytes(NOT_SQLITE)
+
+    assert _refusal(harness, _bearer(harness.token)) == TOKEN_STORE_REFUSAL
+
+    [line] = _audit_lines(harness)
+    assert line["refusal"] == TOKEN_REFUSAL
+
+
+def test_a_verified_call_is_audited_inside_the_tokenless_interval(
+    harness: Harness,
+) -> None:
+    """The interval holds back tokenless lines only."""
+    _tokenless_refusals(harness, 1)
+
+    harness.gateway.call(_bearer(harness.token), "tools_echo", ECHO_ARGUMENTS)
+    _refusal(harness, _bearer(harness.token), "other_echo")
+
+    assert [line["token_name"] for line in _audit_lines(harness)] == [
+        None,
+        "ci-bot",
+        "ci-bot",
+    ]
+
+
+def test_a_failed_tokenless_line_is_counted_and_the_next_call_writes(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tokenless line that fails leaves the interval open and counts its call."""
+    fail_next_write_after_half(monkeypatch)
+    assert AUDIT_REFUSAL.fullmatch(_refusal(harness, _bearer(UNKNOWN_TOKEN)))
+
+    assert _refusal(harness, _bearer(UNKNOWN_TOKEN)) == TOKEN_REFUSAL
+
+    [line] = _audit_lines(harness)
+    assert line["refusal"] == (
+        f"{TOKEN_REFUSAL}; 1 more calls with no verified token were refused"
+        " since the last such line"
+    )
+
+
+def test_concurrent_tokenless_calls_inside_one_interval_write_one_line(
+    harness: Harness,
+) -> None:
+    """Eight threads of twenty-five calls write one line, and the next counts 199."""
+    refusals: list[str] = []
+    lock = threading.Lock()
+
+    def refuse_twenty_five() -> None:
+        for _ in range(25):
+            refusal = _refusal(harness, _bearer(UNKNOWN_TOKEN))
+            with lock:
+                refusals.append(refusal)
+
+    threads = [threading.Thread(target=refuse_twenty_five) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    harness.clock.moment = MINTED_AT + TOKENLESS_LINE_INTERVAL
+    _tokenless_refusals(harness, 1)
+
+    assert refusals == [TOKEN_REFUSAL] * 200
+    assert [line["refusal"] for line in _audit_lines(harness)] == [
+        TOKEN_REFUSAL,
+        f"{TOKEN_REFUSAL}; 199 more calls with no verified token were refused"
+        " since the last such line",
+    ]
 
 
 def test_a_latched_writer_refuses_before_authenticating(
@@ -774,6 +965,7 @@ def test_the_self_checks_audit_line(harness: Harness) -> None:
         "scope": "dev",
         "action": SELF_CHECK_TOOL,
         "arguments": {},
+        "arguments_cut": None,
         "exit_code": None,
         "stdout_bytes": None,
         "stderr_bytes": None,
@@ -881,6 +1073,7 @@ def test_check_scopes_writes_one_audit_line_per_scope(harness: Harness) -> None:
             "scope": scope,
             "action": SELF_CHECK_TOOL,
             "arguments": {},
+            "arguments_cut": None,
             "exit_code": None,
             "stdout_bytes": None,
             "stderr_bytes": None,
