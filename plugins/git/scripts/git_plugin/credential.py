@@ -2,7 +2,8 @@
 
 git runs it with credential.useHttpPath set, so a request carries the path of
 the URL git connects to, after any insteadOf or pushurl. The helper answers
-with GH_TOKEN only when that path names a repository GITHUB_REPOS lists.
+with GH_TOKEN only when the request is for https://github.com and that path
+names a repository GITHUB_REPOS lists.
 """
 
 import sys
@@ -13,7 +14,11 @@ from git_plugin import cage, rules
 
 GET_OPERATION = "get"
 USERNAME = "x-access-token"
+PROTOCOL_KEY = "protocol"
+HOST_KEY = "host"
 PATH_KEY = "path"
+ANSWERED_PROTOCOL = "https"
+ANSWERED_HOST = "github.com"
 GIT_SUFFIX = ".git"
 DOT_SEGMENTS = frozenset({".", ".."})
 
@@ -30,7 +35,11 @@ def helper(argv: Sequence[str], stdin: TextIO, environ: Mapping[str, str]) -> in
     if operation != GET_OPERATION:
         return 0
     try:
-        token = _token_for(_requested_path(request), environ)
+        _check_origin(
+            _requested_value(request, PROTOCOL_KEY),
+            _requested_value(request, HOST_KEY),
+        )
+        token = _token_for(_requested_value(request, PATH_KEY), environ)
     except cage.RefusalError as refusal:
         print(f"{cage.REFUSAL_PREFIX}{refusal}", file=sys.stderr)
         print("quit=1")
@@ -40,13 +49,27 @@ def helper(argv: Sequence[str], stdin: TextIO, environ: Mapping[str, str]) -> in
     return 0
 
 
-def _requested_path(request: str) -> str | None:
-    """Return the value of the request's path line, or None if it has none."""
+def _requested_value(request: str, wanted: str) -> str | None:
+    """Return the value of the request's first line for key wanted, or None."""
     for line in request.splitlines():
         key, _, value = line.partition("=")
-        if key == PATH_KEY:
+        if key == wanted:
             return value
     return None
+
+
+def _check_origin(protocol: str | None, host: str | None) -> None:
+    """Return if the request is for https and github.com, with no port.
+
+    Raises:
+        RefusalError: the protocol or the host is missing or is another.
+    """
+    if protocol != ANSWERED_PROTOCOL or host != ANSWERED_HOST:
+        raise cage.RefusalError(
+            f"credential request names protocol {protocol!r} and host {host!r}; "
+            f"the git plugin answers only protocol {ANSWERED_PROTOCOL!r} "
+            f"and host {ANSWERED_HOST!r}"
+        )
 
 
 def _token_for(path: str | None, environ: Mapping[str, str]) -> str:

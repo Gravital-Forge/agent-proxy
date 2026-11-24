@@ -1,4 +1,5 @@
 import hashlib
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -19,8 +20,9 @@ from harness import (
     write_allowed_signers,
 )
 
-LISTED_URL = "http://auth:8080/listed-org/repo.git"
-UNLISTED_URL = "http://auth:8080/other-org/repo.git"
+LISTED_URL = "https://github.com/listed-org/repo.git"
+UNLISTED_URL = "https://github.com/other-org/repo.git"
+OTHER_HOST_URL = "https://auth/listed-org/repo.git"
 LISTED = {"GITHUB_REPOS": "listed-org/repo"}
 PUSH_ENV = {**LISTED, "GIT_BRANCH_PREFIXES": "task/"}
 TOKEN = {"gh-token": (EnvMount(env="GH_TOKEN"), b"dummy")}
@@ -35,6 +37,12 @@ NO_REPOS_REFUSAL = (
     "git plugin refused: "
     "GITHUB_REPOS is not set or names no repository; the grant's env sets it\n"
 )
+OTHER_HOST_REFUSAL = (
+    "git plugin refused: credential request names protocol 'https' and host 'auth'; "
+    "the git plugin answers only protocol 'https' and host 'github.com'\n"
+)
+
+type TrustServer = Callable[[Path], dict[str, str]]
 
 
 def _push_from_peer(pair: RemotePair) -> str:
@@ -61,6 +69,19 @@ def _run_with_token(
 ) -> Outcome:
     """Run the action name on repo with root granted, GH_TOKEN dummy, and env."""
     return run_action(name, {"repo": str(repo)}, [root], TOKEN, env=env)
+
+
+def _run_against_server(
+    run_action: RunAction,
+    trust_auth_server: TrustServer,
+    name: str,
+    repo: Path,
+    root: Path,
+    env: dict[str, str],
+) -> Outcome:
+    """Run the action name as _run_with_token does, the cage trusting the server."""
+    trusted = {**env, **trust_auth_server(root)}
+    return _run_with_token(run_action, name, repo, root, trusted)
 
 
 def _refused(outcome: Outcome, reason: str, log: str) -> None:
@@ -268,14 +289,19 @@ def test_lfs_fetch_then_lfs_pull_fill_in_the_lfs_file(
 
 
 def test_credential_helper_answers_the_servers_challenge(
-    run_action: RunAction, lfs_remote_pair: RemotePair, auth_server: Container
+    run_action: RunAction,
+    lfs_remote_pair: RemotePair,
+    auth_server: Container,
+    trust_auth_server: TrustServer,
 ) -> None:
     """Both git and git LFS send GH_TOKEN to a listed server that answers 401."""
     peer = lfs_remote_pair.peer
     _point_lfs_clone_at(peer, LISTED_URL)
 
     for name in ("fetch", "lfs_fetch"):
-        outcome = _run_with_token(run_action, name, peer, lfs_remote_pair.root, LISTED)
+        outcome = _run_against_server(
+            run_action, trust_auth_server, name, peer, lfs_remote_pair.root, LISTED
+        )
         assert outcome.content["exit_code"] != 0, outcome.content
 
     log = auth_server.logs().decode()
@@ -284,14 +310,19 @@ def test_credential_helper_answers_the_servers_challenge(
 
 
 def test_push_hands_the_helper_the_listed_path(
-    run_action: RunAction, remote_pair: RemotePair, auth_server: Container
+    run_action: RunAction,
+    remote_pair: RemotePair,
+    auth_server: Container,
+    trust_auth_server: TrustServer,
 ) -> None:
     """A push to a listed remote sends GH_TOKEN for the receive-pack request."""
     work = remote_pair.work
     host_git(work, "checkout", "-q", "-b", "task/p")
     host_git(work, "remote", "set-url", "origin", LISTED_URL)
 
-    outcome = _run_with_token(run_action, "push", work, remote_pair.root, PUSH_ENV)
+    outcome = _run_against_server(
+        run_action, trust_auth_server, "push", work, remote_pair.root, PUSH_ENV
+    )
 
     assert outcome.content["exit_code"] != 0, outcome.content
     log = auth_server.logs().decode()
@@ -301,13 +332,18 @@ def test_push_hands_the_helper_the_listed_path(
 
 
 def test_pull_sends_the_token_to_a_listed_remote(
-    run_action: RunAction, remote_pair: RemotePair, auth_server: Container
+    run_action: RunAction,
+    remote_pair: RemotePair,
+    auth_server: Container,
+    trust_auth_server: TrustServer,
 ) -> None:
     """A pull from a listed remote sends GH_TOKEN for the upload-pack request."""
     work = remote_pair.work
     host_git(work, "remote", "set-url", "origin", LISTED_URL)
 
-    outcome = _run_with_token(run_action, "pull", work, remote_pair.root, LISTED)
+    outcome = _run_against_server(
+        run_action, trust_auth_server, "pull", work, remote_pair.root, LISTED
+    )
 
     assert outcome.content["exit_code"] != 0, outcome.content
     log = auth_server.logs().decode()
@@ -315,14 +351,17 @@ def test_pull_sends_the_token_to_a_listed_remote(
 
 
 def test_lfs_pull_sends_the_token_to_a_listed_remote(
-    run_action: RunAction, lfs_remote_pair: RemotePair, auth_server: Container
+    run_action: RunAction,
+    lfs_remote_pair: RemotePair,
+    auth_server: Container,
+    trust_auth_server: TrustServer,
 ) -> None:
     """An LFS pull from a listed remote sends GH_TOKEN for the batch request."""
     peer = lfs_remote_pair.peer
     _point_lfs_clone_at(peer, LISTED_URL)
 
-    outcome = _run_with_token(
-        run_action, "lfs_pull", peer, lfs_remote_pair.root, LISTED
+    outcome = _run_against_server(
+        run_action, trust_auth_server, "lfs_pull", peer, lfs_remote_pair.root, LISTED
     )
 
     assert outcome.content["exit_code"] != 0, outcome.content
@@ -335,6 +374,7 @@ def test_a_git_action_refuses_an_unlisted_remote(
     run_action: RunAction,
     remote_pair: RemotePair,
     auth_server: Container,
+    trust_auth_server: TrustServer,
     name: str,
 ) -> None:
     """An origin outside GITHUB_REPOS gets no token, and the refusal names it."""
@@ -342,7 +382,9 @@ def test_a_git_action_refuses_an_unlisted_remote(
     host_git(work, "checkout", "-q", "-b", "task/p")
     host_git(work, "remote", "set-url", "origin", UNLISTED_URL)
 
-    outcome = _run_with_token(run_action, name, work, remote_pair.root, PUSH_ENV)
+    outcome = _run_against_server(
+        run_action, trust_auth_server, name, work, remote_pair.root, PUSH_ENV
+    )
 
     _refused(outcome, UNLISTED_REFUSAL, auth_server.logs().decode())
 
@@ -352,19 +394,25 @@ def test_an_lfs_action_refuses_an_unlisted_remote(
     run_action: RunAction,
     lfs_remote_pair: RemotePair,
     auth_server: Container,
+    trust_auth_server: TrustServer,
     name: str,
 ) -> None:
     """An LFS origin outside GITHUB_REPOS gets no token, and the refusal names it."""
     peer = lfs_remote_pair.peer
     _point_lfs_clone_at(peer, UNLISTED_URL)
 
-    outcome = _run_with_token(run_action, name, peer, lfs_remote_pair.root, LISTED)
+    outcome = _run_against_server(
+        run_action, trust_auth_server, name, peer, lfs_remote_pair.root, LISTED
+    )
 
     _refused(outcome, UNLISTED_REFUSAL, auth_server.logs().decode())
 
 
 def test_push_refuses_a_pushurl_to_an_unlisted_repository(
-    run_action: RunAction, remote_pair: RemotePair, auth_server: Container
+    run_action: RunAction,
+    remote_pair: RemotePair,
+    auth_server: Container,
+    trust_auth_server: TrustServer,
 ) -> None:
     """A listed origin whose pushurl names an unlisted repository gets no token."""
     work = remote_pair.work
@@ -372,13 +420,39 @@ def test_push_refuses_a_pushurl_to_an_unlisted_repository(
     host_git(work, "remote", "set-url", "origin", LISTED_URL)
     host_git(work, "config", "remote.origin.pushurl", UNLISTED_URL)
 
-    outcome = _run_with_token(run_action, "push", work, remote_pair.root, PUSH_ENV)
+    outcome = _run_against_server(
+        run_action, trust_auth_server, "push", work, remote_pair.root, PUSH_ENV
+    )
 
     _refused(outcome, UNLISTED_REFUSAL, auth_server.logs().decode())
 
 
+def test_fetch_refuses_a_listed_path_on_another_host(
+    run_action: RunAction,
+    remote_pair: RemotePair,
+    auth_server: Container,
+    trust_auth_server: TrustServer,
+) -> None:
+    """A listed repository's path on a host that is not github.com gets no token.
+
+    The certificate names auth too, so TLS succeeds, and the server's 401
+    reaches the helper, which refuses for the host.
+    """
+    work = remote_pair.work
+    host_git(work, "remote", "set-url", "origin", OTHER_HOST_URL)
+
+    outcome = _run_against_server(
+        run_action, trust_auth_server, "fetch", work, remote_pair.root, LISTED
+    )
+
+    _refused(outcome, OTHER_HOST_REFUSAL, auth_server.logs().decode())
+
+
 def test_fetch_ignores_a_planted_insteadof(
-    run_action: RunAction, remote_pair: RemotePair, auth_server: Container
+    run_action: RunAction,
+    remote_pair: RemotePair,
+    auth_server: Container,
+    trust_auth_server: TrustServer,
 ) -> None:
     """A planted insteadOf has no effect: the fetch goes to the listed origin.
 
@@ -389,7 +463,9 @@ def test_fetch_ignores_a_planted_insteadof(
     host_git(work, "remote", "set-url", "origin", LISTED_URL)
     host_git(work, "config", f"url.{UNLISTED_URL}.insteadOf", LISTED_URL)
 
-    outcome = _run_with_token(run_action, "fetch", work, remote_pair.root, LISTED)
+    outcome = _run_against_server(
+        run_action, trust_auth_server, "fetch", work, remote_pair.root, LISTED
+    )
 
     assert outcome.content["exit_code"] != 0, outcome.content
     assert UNLISTED_REFUSAL not in str(outcome.content["stderr"]), outcome.content
@@ -399,7 +475,10 @@ def test_fetch_ignores_a_planted_insteadof(
 
 
 def test_lfs_fetch_ignores_a_planted_use_http_path(
-    run_action: RunAction, lfs_remote_pair: RemotePair, auth_server: Container
+    run_action: RunAction,
+    lfs_remote_pair: RemotePair,
+    auth_server: Container,
+    trust_auth_server: TrustServer,
 ) -> None:
     """A planted useHttpPath=false has no effect: LFS sends the path.
 
@@ -408,10 +487,10 @@ def test_lfs_fetch_ignores_a_planted_use_http_path(
     """
     peer = lfs_remote_pair.peer
     _point_lfs_clone_at(peer, LISTED_URL)
-    host_git(peer, "config", "credential.http://auth:8080.useHttpPath", "false")
+    host_git(peer, "config", "credential.https://github.com.useHttpPath", "false")
 
-    outcome = _run_with_token(
-        run_action, "lfs_fetch", peer, lfs_remote_pair.root, LISTED
+    outcome = _run_against_server(
+        run_action, trust_auth_server, "lfs_fetch", peer, lfs_remote_pair.root, LISTED
     )
 
     assert outcome.content["exit_code"] != 0, outcome.content

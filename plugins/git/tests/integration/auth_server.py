@@ -1,14 +1,18 @@
-"""An HTTP server that answers 401 until the git plugin's credential arrives.
+"""An HTTPS server that answers 401 until the git plugin's credential arrives.
 
 It runs in a container from the plugin image, on the tests' internal network.
-It prints READY once it listens. A request that carries the Basic credential
-x-access-token:dummy gets the line AUTH OK <method> <path> printed and a 404.
+Its arguments are the paths of its certificate and of its key, and it serves
+TLS on port 443 with them. It prints READY once it listens. A request that
+carries the Basic credential x-access-token:dummy gets the line
+AUTH OK <method> <path> printed and a 404.
 """
 
 import base64
+import ssl
+import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-ADDRESS = ("", 8080)
+ADDRESS = ("", 443)
 EXPECTED_AUTHORIZATION = "Basic " + base64.b64encode(b"x-access-token:dummy").decode()
 
 
@@ -38,6 +42,10 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
 
 
+certificate_path, key_path = sys.argv[1:]
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain(certificate_path, key_path)
 server = HTTPServer(ADDRESS, Handler)
+server.socket = context.wrap_socket(server.socket, server_side=True)
 print("READY")
 server.serve_forever()
