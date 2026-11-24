@@ -124,7 +124,11 @@ class CageTimeoutError(RunnerError):
 
 
 class CageFailedError(RunnerError):
-    """A cage failed after it was created, other than by timing out."""
+    """A cage failed after it was created, other than by timing out.
+
+    The start also raises it when it cannot list the cages an earlier
+    instance left.
+    """
 
 
 def validate_input(

@@ -89,7 +89,8 @@ The prune needs `--all`, because without it a tagged image survives.
   plugin runs it as its `setid_probe` action. In the directory it is given, it tries each route to a
   file that holds the setuid or the setgid bit, then the controls that must still work there, and
   prints one line for each attempt: the route, the mode, and `ok` or the errno's name.
-  `test_a_cage_cannot_make_a_setid_file_in_a_rw_root` in `test_runner.py` runs it, as
+  `test_a_cage_cannot_make_a_setid_file_in_a_rw_root` in
+  `core/agent-proxy/tests/integration/test_runner.py` runs it, as
   [The seccomp profile](docs/architecture.md#the-seccomp-profile) gives.
 - Each plugin package holds its own unit and integration tests, which its README describes.
 

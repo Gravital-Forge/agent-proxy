@@ -119,8 +119,11 @@ the start:
   instance left and the start cannot remove. [The instance](architecture.md#the-instance) gives the
   removal.
 
-A start that cannot list the left cages stops with the failure
-`the left cages could not be listed: <Docker's error>`.
+Two failures of Docker stop the start:
+
+- `the Docker daemon's info could not be read, so the cage limits cannot be checked: <Docker's error>`,
+  when the start cannot read the daemon's info.
+- `the left cages could not be listed: <Docker's error>`, when the start cannot list the left cages.
 
 ## The operator command
 
