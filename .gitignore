@@ -1,5 +1,3 @@
-.git-sidecar-token
-.git-sidecar/
 .local/
 .venv/
 __pycache__/

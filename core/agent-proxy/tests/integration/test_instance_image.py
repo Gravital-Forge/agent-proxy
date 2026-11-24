@@ -103,7 +103,7 @@ def served(
 def test_the_image_serves_on_all_interfaces_with_the_instance_environment(
     docker_client: DockerClient, instance_image: str
 ) -> None:
-    """Entrypoint agent-proxy, command serve on 0.0.0.0:8000, socket and config set."""
+    """Entrypoint agent-proxy, serve on 0.0.0.0:8000, socket, config, verifier set."""
     config = docker_client.images.get(instance_image).attrs["Config"]
     environment = dict(entry.split("=", 1) for entry in config["Env"])
 
@@ -111,10 +111,11 @@ def test_the_image_serves_on_all_interfaces_with_the_instance_environment(
     assert config["Cmd"] == ["serve", "--host", "0.0.0.0", "--port", "8000"]  # noqa: S104 - the image's own command, read back
     assert environment["DOCKER_HOST"] == "unix:///var/run/docker.sock"
     assert environment["AGENT_PROXY_CONFIG"] == "/etc/agent-proxy/config.yaml"
+    assert environment["AGENT_PROXY_VERIFIER_IMAGE"] == "agent-proxy-verifier:1"
     assert environment["PATH"].split(":")[0] == VENV_BIN
 
 
-def test_the_image_prints_the_admin_usage_when_hardened(
+def test_the_image_prints_the_operator_usage_when_hardened(
     docker_client: DockerClient, instance_image: str
 ) -> None:
     """Root, read-only, no capabilities, no new privileges: --help exits 0."""

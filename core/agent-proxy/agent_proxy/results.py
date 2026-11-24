@@ -129,6 +129,29 @@ def _create_overflow_file(path: PurePosixPath) -> int:
         ) from exc
 
 
+def check_overflow_dir(directory: str) -> None:
+    """Show a call could create a file in directory, leaving no entry in it.
+
+    The directory is walked as an overflow write walks it, and the file is
+    opened with O_TMPFILE, so it never has a name.
+
+    Raises:
+        OverflowWriteError: a component of directory is missing or a symlink,
+            or no file can be created in it.
+    """
+    try:
+        with _open_directory(directory) as directory_fd:
+            os.close(
+                os.open(
+                    ".", os.O_TMPFILE | os.O_WRONLY, _FILE_MODE, dir_fd=directory_fd
+                )
+            )
+    except OSError as exc:
+        raise OverflowWriteError(
+            f"overflow directory {directory!r} cannot take a file: {exc.strerror}"
+        ) from exc
+
+
 def _write_all(fd: int, path: PurePosixPath, chunk: bytes) -> None:
     """Write every byte of chunk to fd.
 

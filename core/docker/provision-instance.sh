@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-usage="usage: provision-instance.sh <agent> <port> <config-file>"
+usage="usage: provision-instance.sh [--release VERSION] [--tree PATH] <agent> <port> <config-file>"
+release_repository="ghcr.io/gravital-forge/agent-proxy"
 
 read_config_program='import yaml
 with open("/etc/agent-proxy/config.yaml") as handle:
@@ -12,6 +13,48 @@ print(config["overflow_dir"])'
 fail() {
     echo "provision-instance.sh: $1" >&2
     exit 1
+}
+
+refuse_usage() {
+    echo "$usage" >&2
+    exit 2
+}
+
+require_option_value() {
+    if (( $# < 2 )) || [[ -z "$2" ]]; then
+        refuse_usage
+    fi
+}
+
+parse_arguments() {
+    release_version=""
+    tree_option=""
+    while (( $# > 0 )); do
+        case "$1" in
+            --release)
+                require_option_value "$@"
+                release_version="$2"
+                shift 2
+                ;;
+            --tree)
+                require_option_value "$@"
+                tree_option="$2"
+                shift 2
+                ;;
+            --)
+                shift
+                break
+                ;;
+            -*) refuse_usage ;;
+            *) break ;;
+        esac
+    done
+    if (( $# < 3 )); then
+        refuse_usage
+    fi
+    agent="$1"
+    port="$2"
+    config_file="$3"
 }
 
 as_service_user() {
@@ -30,8 +73,22 @@ has_id_range() {
     awk -F: -v name="$service_user" '$1 == name { found = 1 } END { exit !found }' "$1" 2>/dev/null
 }
 
+find_tree_parents_in_home() {
+    local home_realpath directory
+    home_realpath="$(realpath -m -- "$agent_home")"
+    if [[ "$agent_tree" != "$home_realpath"/?* ]]; then
+        fail "the agent's tree '$agent_tree' must lie inside the agent's home '$home_realpath'"
+    fi
+    tree_parents_in_home=()
+    directory="$(dirname -- "$agent_tree")"
+    while [[ "$directory" != "$home_realpath" ]]; do
+        tree_parents_in_home+=("$directory")
+        directory="$(dirname -- "$directory")"
+    done
+}
+
 check_arguments() {
-    local agent_entry
+    local agent_entry tree_path
     if ! agent_entry="$(getent passwd "$agent")"; then
         fail "no user named '$agent'"
     fi
@@ -41,14 +98,19 @@ check_arguments() {
     if [[ ! "$port" =~ ^[1-9][0-9]{0,4}$ ]] || (( port > 65535 )); then
         fail "the port must be an integer from 1 to 65535, got '$port'"
     fi
+    if [[ -n "$release_version" && ! "$release_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        fail "the release must be <major>.<minor>.<patch>, got '$release_version'"
+    fi
     if [[ ! -f "$config_file" || ! -r "$config_file" ]]; then
         fail "the config file must be a readable regular file, got '$config_file'"
     fi
     agent_home="$(cut -d: -f6 <<<"$agent_entry")"
-    if [[ ! -d "$agent_home/Projects" ]]; then
-        fail "the agent's tree '$agent_home/Projects' is not a directory"
+    tree_path="${tree_option:-$agent_home/Projects}"
+    if [[ ! -d "$tree_path" ]]; then
+        fail "the agent's tree '$tree_path' is not a directory"
     fi
-    agent_tree="$(realpath -- "$agent_home/Projects")"
+    agent_tree="$(realpath -- "$tree_path")"
+    find_tree_parents_in_home
     agent_group="$(id -gn "$agent")"
     echo "checked the arguments: agent $agent, tree $agent_tree, port $port"
 }
@@ -107,7 +169,14 @@ setup_rootless_daemon() {
     fi
 }
 
-build_images() {
+prepare_images() {
+    if [[ -n "$release_version" ]]; then
+        local release_image="$release_repository:$release_version"
+        service_docker pull "$release_image" >/dev/null
+        service_docker tag "$release_image" agent-proxy:1
+        echo "pulled $release_image as agent-proxy:1 on the daemon of $service_user"
+        return
+    fi
     service_docker build --quiet --tag agent-proxy-verifier:1 "$script_dir/../verifier" >/dev/null
     service_docker build --quiet --tag agent-proxy:1 --file "$script_dir/Dockerfile" \
         "$script_dir/../agent-proxy" >/dev/null
@@ -185,6 +254,14 @@ grant_home_traverse() {
     echo "granted $service_user traverse on $agent_home"
 }
 
+grant_tree_traverse() {
+    local directory
+    for directory in "${tree_parents_in_home[@]}"; do
+        as_agent setfacl -m "u:$service_user:x" "$directory"
+    done
+    echo "granted $service_user traverse as $agent on each directory between $agent_home and $agent_tree, ${#tree_parents_in_home[@]} in all"
+}
+
 start_instance() {
     DOCKER_HOST="$docker_host" "$script_dir/start-instance.sh" agent-proxy:1 agent-proxy "$port" \
         "$config_dir" "$state_dir" "$agent_tree" >/dev/null
@@ -195,37 +272,38 @@ print_next_steps() {
     local exec_prefix="DOCKER_HOST=$docker_host docker exec"
     echo "next, mint a token: $exec_prefix agent-proxy agent-proxy token mint --name <name> --scope <scope>"
     echo "next, store a credential: $exec_prefix --interactive agent-proxy agent-proxy credential set <name>"
-    echo "next, follow the runbook: $(realpath -m -- "$script_dir/../../docs/runbooks/per-agent-instance.md")"
+    echo "next, follow the deployment guide: $(realpath -m -- "$script_dir/../../docs/deployment.md")"
 }
 
-if (( $# < 3 )); then
-    echo "$usage" >&2
-    exit 2
+main() {
+    parse_arguments "$@"
+
+    if (( EUID != 0 )); then
+        fail "must run as root"
+    fi
+
+    service_user="agentproxy-$agent"
+    config_dir="/etc/agent-proxy/$agent"
+    script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+    config_root_created=false
+
+    check_arguments
+    create_service_user
+    create_config_root
+    enable_user_manager
+    setup_rootless_daemon
+    prepare_images
+    install_config
+    read_config_paths
+    create_state_dir
+    create_overflow_dir
+    apply_tree_permissions
+    grant_home_traverse
+    grant_tree_traverse
+    start_instance
+    print_next_steps
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
 fi
-
-if (( EUID != 0 )); then
-    fail "must run as root"
-fi
-
-agent="$1"
-port="$2"
-config_file="$3"
-service_user="agentproxy-$agent"
-config_dir="/etc/agent-proxy/$agent"
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
-config_root_created=false
-
-check_arguments
-create_service_user
-create_config_root
-enable_user_manager
-setup_rootless_daemon
-build_images
-install_config
-read_config_paths
-create_state_dir
-create_overflow_dir
-apply_tree_permissions
-grant_home_traverse
-start_instance
-print_next_steps

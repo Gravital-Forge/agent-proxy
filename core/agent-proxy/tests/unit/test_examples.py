@@ -1,16 +1,14 @@
 from pathlib import Path
 
-import pytest
-
-from agent_proxy.config import ConfigError, load_config
+from agent_proxy.config import load_config
+from agent_proxy.credentials import unset_message, unset_warnings
 
 EXAMPLE_CONFIG = Path(__file__).parents[4] / "examples" / "instance.yaml"
-CREDENTIAL_NAMES = frozenset({"github-token", "hcp-terraform-token"})
 
 
 def test_example_config_loads_with_its_paths() -> None:
     """The example config loads, and holds the placeholder agent's tree and overflow."""
-    config = load_config(EXAMPLE_CONFIG, CREDENTIAL_NAMES)
+    config = load_config(EXAMPLE_CONFIG)
 
     assert config.agent_tree == "/home/agent-01/Projects"
     assert config.overflow_dir == "/home/agent-01/Projects/.agent-proxy-overflow"
@@ -22,7 +20,7 @@ def test_example_github_grants_name_the_hosts_their_actions_reach() -> None:
     pr_view and pr_checks name api.github.com alone. pr_create and pr_edit,
     which allow attach, add uploads.github.com.
     """
-    config = load_config(EXAMPLE_CONFIG, CREDENTIAL_NAMES)
+    config = load_config(EXAMPLE_CONFIG)
 
     github_domains = {
         key: grant.domains
@@ -40,7 +38,7 @@ def test_example_github_grants_name_the_hosts_their_actions_reach() -> None:
 
 def test_example_hcp_terraform_grants_name_its_two_hosts() -> None:
     """Each example hcp-terraform grant names the API host and the log host."""
-    config = load_config(EXAMPLE_CONFIG, CREDENTIAL_NAMES)
+    config = load_config(EXAMPLE_CONFIG)
 
     hcp_terraform_domains = {
         key: grant.domains
@@ -60,7 +58,7 @@ def test_example_hcp_terraform_grants_name_its_two_hosts() -> None:
 
 def test_example_commit_grant_sets_the_agents_identity() -> None:
     """The example's git.commit grant gives its cages the placeholder's identity."""
-    config = load_config(EXAMPLE_CONFIG, CREDENTIAL_NAMES)
+    config = load_config(EXAMPLE_CONFIG)
 
     assert config.scopes["dev-agent"].grants["git.commit"].env == {
         "GIT_AUTHOR_NAME": "Agent One",
@@ -68,9 +66,11 @@ def test_example_commit_grant_sets_the_agents_identity() -> None:
     }
 
 
-def test_example_config_needs_the_github_token_credential() -> None:
-    """With an empty credential store, the example is refused for github-token."""
-    with pytest.raises(
-        ConfigError, match="'github-token' is not in the credential store"
-    ):
-        load_config(EXAMPLE_CONFIG, frozenset())
+def test_example_config_warns_of_each_credential_an_empty_store_lacks() -> None:
+    """The example loads, and an empty store lacks github-token, then hcp-terraform."""
+    config = load_config(EXAMPLE_CONFIG)
+
+    assert unset_warnings(config.scopes.values(), frozenset()) == (
+        unset_message("github-token"),
+        unset_message("hcp-terraform-token"),
+    )

@@ -2,7 +2,7 @@
 
 import re
 from collections import Counter
-from collections.abc import Hashable, Iterator, Mapping, Sequence, Set
+from collections.abc import Hashable, Iterator, Mapping, Sequence
 from datetime import timedelta
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal, Self
@@ -16,7 +16,6 @@ from pydantic import (
     StrictInt,
     StringConstraints,
     ValidationError,
-    ValidationInfo,
     model_validator,
 )
 from pydantic_core import ErrorDetails
@@ -31,6 +30,7 @@ GRANT_KEY_PATTERN = (
 )
 DURATION_PATTERN = r"^[1-9][0-9]*[smhd]$"
 ENV_NAME_PATTERN = r"^[A-Z_][A-Z0-9_]*$"
+PINNED_IMAGE_PATTERN = r"^[^@\s]+@sha256:[0-9a-f]{64}$"
 DOMAIN_PATTERN = (
     r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$"
 )
@@ -48,6 +48,7 @@ _RESERVED_ENV_SETTERS = {
     PROXY_ENV_NAME: "the egress proxy",
     ROOTS_ENV_NAME: "the core",
 }
+_RESERVED_PLUGIN_NAME = "agent-proxy"
 
 
 class InvalidNameError(ProxyError):
@@ -170,9 +171,7 @@ _STRICT = ConfigDict(extra="forbid", frozen=True)
 Name = Annotated[str, StringConstraints(pattern=NAME_PATTERN)]
 PluginName = Annotated[str, StringConstraints(pattern=PLUGIN_NAME_PATTERN)]
 GrantKey = Annotated[str, StringConstraints(pattern=GRANT_KEY_PATTERN)]
-PinnedImage = Annotated[
-    str, StringConstraints(pattern=r"^[^@\s]+@sha256:[0-9a-f]{64}$")
-]
+PinnedImage = Annotated[str, StringConstraints(pattern=PINNED_IMAGE_PATTERN)]
 Domain = Annotated[str, StringConstraints(max_length=253, pattern=DOMAIN_PATTERN)]
 EnvName = Annotated[str, StringConstraints(pattern=ENV_NAME_PATTERN)]
 
@@ -357,14 +356,6 @@ def _grant_env_failures(
             yield f"{where}.env.{env_name} must not hold a NUL"
 
 
-def _unknown_credential_failures(
-    where: str, credentials: Mapping[str, EnvMount | FileMount], known: Set[str]
-) -> Iterator[str]:
-    for name in credentials:
-        if name not in known:
-            yield f"{where}: credential {name!r} is not in the credential store"
-
-
 class InstanceConfig(BaseModel):
     model_config = _STRICT
 
@@ -375,29 +366,33 @@ class InstanceConfig(BaseModel):
     scopes: dict[Name, Scope]
 
     @model_validator(mode="after")
-    def _check_rules(self, info: ValidationInfo) -> Self:
+    def _check_rules(self) -> Self:
         """Refuse a field-valid config that breaks a rule across its fields.
 
         Raises:
             _RuleFailuresError: one or more rules fail; it holds every failure.
         """
-        failures = tuple(self._rule_failures(info.context["credential_names"]))
+        failures = tuple(self._rule_failures())
         if failures:
             raise _RuleFailuresError(failures)
         return self
 
-    def _rule_failures(self, credential_names: Set[str]) -> Iterator[str]:
+    def _rule_failures(self) -> Iterator[str]:
         yield from _agent_tree_failures(self.agent_tree)
         yield from _overflow_dir_failures(self.overflow_dir, self.agent_tree)
+        if _RESERVED_PLUGIN_NAME in self.plugins:
+            yield (
+                f"plugins.{_RESERVED_PLUGIN_NAME}: the plugin name "
+                f"{_RESERVED_PLUGIN_NAME!r} is reserved, "
+                "because the tool 'agent-proxy_self_check' takes it"
+            )
         for scope_name, scope in self.scopes.items():
             for key, grant in scope.grants.items():
                 yield from self._grant_failures(
-                    f"scopes.{scope_name}.grants.{key}", key, grant, credential_names
+                    f"scopes.{scope_name}.grants.{key}", key, grant
                 )
 
-    def _grant_failures(
-        self, where: str, key: str, grant: Grant, credential_names: Set[str]
-    ) -> Iterator[str]:
+    def _grant_failures(self, where: str, key: str, grant: Grant) -> Iterator[str]:
         plugin = key.split(".", 1)[0]
         if plugin not in self.plugins:
             yield f"{where}: plugin {plugin!r} is not in plugins"
@@ -409,9 +404,6 @@ class InstanceConfig(BaseModel):
         yield from _mount_failures(f"{where}.credentials", grant.credentials)
         yield from _reserved_env_failures(f"{where}.credentials", grant.credentials)
         yield from _grant_env_failures(where, grant.env, grant.credentials)
-        yield from _unknown_credential_failures(
-            f"{where}.credentials", grant.credentials, credential_names
-        )
 
 
 def _error_messages(error: ErrorDetails) -> list[str]:
@@ -429,13 +421,8 @@ def _error_messages(error: ErrorDetails) -> list[str]:
     return [f"{location}: {error['msg']}, got {error['input']!r}"]
 
 
-def load_config(path: Path, credential_names: Set[str]) -> InstanceConfig:
+def load_config(path: Path) -> InstanceConfig:
     """Return the config held in the YAML file at path.
-
-    Args:
-        path: the config file.
-        credential_names: the names the credential store holds; every
-            credential a grant uses must be one of them.
 
     Raises:
         ConfigError: the file cannot be read or parsed, or its config breaks a
@@ -443,9 +430,7 @@ def load_config(path: Path, credential_names: Set[str]) -> InstanceConfig:
     """
     document = read_yaml(path)
     try:
-        return InstanceConfig.model_validate(
-            document, context={"credential_names": credential_names}
-        )
+        return InstanceConfig.model_validate(document)
     except ValidationError as exc:
         source = f"config file {str(path)!r}"
         raise ConfigError(

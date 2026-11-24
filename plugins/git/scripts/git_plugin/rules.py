@@ -1,4 +1,4 @@
-"""git-sidecar's branch rules and the repository list, from the grant's env.
+"""The branch rules and the repository list, from the grant's env.
 
 The branch prefixes come from GIT_BRANCH_PREFIXES, and the repositories from
 GITHUB_REPOS; the grant's env sets both. main and master are protected

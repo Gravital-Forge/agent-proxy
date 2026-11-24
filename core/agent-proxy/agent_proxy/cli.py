@@ -1,10 +1,10 @@
-"""The agent-proxy command: token, credential, audit, manifest check, reload, serve."""
+"""The agent-proxy command: token, credential, audit, manifest, reload, check, serve."""
 
 import argparse
 import os
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import datetime
 from pathlib import Path
 
@@ -15,11 +15,11 @@ import uvicorn
 from agent_proxy.audit import tail
 from agent_proxy.auth import TokenStore
 from agent_proxy.config import ConfigError, load_config, parse_duration
-from agent_proxy.credentials import CredentialStore
+from agent_proxy.credentials import CredentialStore, unset_warnings
 from agent_proxy.errors import ProxyError
 from agent_proxy.mcp import Instance, _Server
 from agent_proxy.plugins import ManifestError, check_image
-from agent_proxy.reload import CONTROL_SOCKET_NAME, request_reload
+from agent_proxy.reload import CONTROL_SOCKET_NAME, request_check, request_reload
 
 STATE_DIR_VARIABLE = "AGENT_PROXY_STATE_DIR"
 CONFIG_VARIABLE = "AGENT_PROXY_CONFIG"
@@ -49,13 +49,26 @@ class ReloadRefusedError(ProxyError):
         super().__init__("\n".join(errors))
 
 
+class CheckRefusedError(ProxyError):
+    """The serving process refused a check."""
+
+    def __init__(self, *errors: str) -> None:
+        """Hold one message per failure; str() prints them one per line."""
+        self.errors = errors
+        super().__init__("\n".join(errors))
+
+
+class ChecksFailedError(ProxyError):
+    """A check the serving process ran reported at least one failed entry."""
+
+
 def run() -> None:
-    """Run the admin command on the process arguments and exit with its status."""
+    """Run the operator command on the process arguments and exit with its status."""
     sys.exit(main())
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Run the admin command on argv and return its exit status.
+    """Run the operator command on argv and return its exit status.
 
     A refusal prints one stderr line per failure and returns 1. A usage error
     exits 2 inside argparse.
@@ -63,7 +76,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         args.handler(args)
-    except (ConfigError, ManifestError, ReloadRefusedError) as error:
+    except (
+        ConfigError,
+        ManifestError,
+        ReloadRefusedError,
+        CheckRefusedError,
+    ) as error:
         _report_refusal(error.errors)
         return 1
     except ProxyError as error:
@@ -77,12 +95,17 @@ def _report_refusal(messages: Sequence[str]) -> None:
         print(f"agent-proxy: {message}", file=sys.stderr)
 
 
+def _report_warnings(warnings: Iterable[str]) -> None:
+    for warning in warnings:
+        print(f"agent-proxy: warning: {warning}", file=sys.stderr)
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-proxy",
         description="Administer the tokens, credentials, and audit log of one"
-        " proxy instance, check plugin manifests, reload its config, and serve"
-        " its MCP surface.",
+        " proxy instance, check plugin manifests, reload its config, check its"
+        " wiring, and serve its MCP surface.",
     )
     nouns = parser.add_subparsers(dest="noun", required=True)
     _add_token_commands(
@@ -99,6 +122,13 @@ def _parser() -> argparse.ArgumentParser:
         "reload", help="ask the running proxy to reload its config"
     )
     reload_parser.set_defaults(handler=_reload)
+    _add_check_command(
+        nouns.add_parser(
+            "check",
+            help="check the running proxy's credentials, roots, overflow"
+            " directory, egress, and plugins",
+        )
+    )
     _add_serve_command(
         nouns.add_parser("serve", help="serve the MCP surface until SIGINT or SIGTERM")
     )
@@ -158,6 +188,15 @@ def _add_manifest_commands(parser: argparse.ArgumentParser) -> None:
     check.set_defaults(handler=_check_manifest)
 
 
+def _add_check_command(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--scope",
+        metavar="NAME",
+        help="check this scope alone; without it every scope is checked",
+    )
+    parser.set_defaults(handler=_check)
+
+
 def _add_serve_command(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--host", required=True, help="the address to listen on")
     parser.add_argument(
@@ -187,12 +226,15 @@ def _port(text: str) -> int:
 
 def _mint_token(args: argparse.Namespace) -> None:
     expires_in = None if args.expires is None else parse_duration(args.expires)
-    config = load_config(_config_path(), _credential_store().names())
+    config = load_config(_config_path())
     if args.scope not in config.scopes:
         raise UnknownScopeError(
             f"scope {args.scope!r} is not defined in the config;"
             f" defined scopes are {sorted(config.scopes)!r}"
         )
+    _report_warnings(
+        unset_warnings(config.scopes.values(), _credential_store().names())
+    )
     print(_token_store().mint(args.name, args.scope, expires_in))
 
 
@@ -242,8 +284,7 @@ def _tail_audit(args: argparse.Namespace) -> None:
 
 def _check_manifest(args: argparse.Namespace) -> None:
     manifest = check_image(_docker_client(), args.image)
-    for warning in manifest.warnings():
-        print(f"agent-proxy: warning: {warning}", file=sys.stderr)
+    _report_warnings(manifest.warnings())
     print(f"manifest ok: {args.image} declares {len(manifest.actions)} actions")
 
 
@@ -251,14 +292,32 @@ def _reload(args: argparse.Namespace) -> None:
     reply = request_reload(_state_dir() / CONTROL_SOCKET_NAME)
     if not reply.ok:
         raise ReloadRefusedError(*reply.errors)
-    for warning in reply.warnings:
-        print(f"agent-proxy: warning: {warning}", file=sys.stderr)
+    _report_warnings(reply.warnings)
     print("reloaded")
+
+
+def _check(args: argparse.Namespace) -> None:
+    reply = request_check(_state_dir() / CONTROL_SOCKET_NAME, args.scope)
+    if not reply.ok:
+        raise CheckRefusedError(*reply.errors)
+    entries = [
+        (report["scope"], entry)
+        for report in reply.reports
+        for entry in report["checks"]
+    ]
+    print(_row("SCOPE", "CHECK", "SUBJECT", "RESULT", "DETAIL"))
+    for scope, entry in entries:
+        result = "pass" if entry["ok"] else "fail"
+        print(_row(scope, entry["check"], entry["subject"], result, entry["detail"]))
+    failed = sum(1 for _, entry in entries if not entry["ok"])
+    if failed:
+        raise ChecksFailedError(f"{failed} of {len(entries)} checks failed")
 
 
 def _serve(args: argparse.Namespace) -> None:
     instance = Instance.start(_state_dir(), _config_path(), _docker_client())
     try:
+        _report_warnings(instance.warnings)
         _Server(uvicorn.Config(instance.app, host=args.host, port=args.port)).run()
     finally:
         instance.close()

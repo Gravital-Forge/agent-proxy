@@ -1,0 +1,23 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directories:
+      - "/core/docker"
+      - "/core/verifier"
+      - "/core/agent-proxy/tests/egress-probe"
+      - "/core/agent-proxy/tests/test-plugin"
+      - "/plugins/*"
+      - "/plugins/*/tests/fake-api"
+      - "/plugins/git/tests/fixture-image"
+    schedule:
+      interval: weekly
+  - package-ecosystem: uv
+    directories:
+      - "/core/agent-proxy"
+      - "/plugins/*"
+    schedule:
+      interval: weekly

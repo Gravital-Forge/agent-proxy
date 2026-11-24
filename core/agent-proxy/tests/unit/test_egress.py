@@ -32,6 +32,7 @@ from agent_proxy.egress import (
     domain_lists,
     list_key,
     network_name,
+    proxy_status,
     render_config,
     start_proxy,
 )
@@ -163,8 +164,7 @@ def _instance_config(scopes: dict[str, dict[str, list[str]]]) -> InstanceConfig:
                 }
                 for scope, grants in scopes.items()
             },
-        },
-        context={"credential_names": frozenset()},
+        }
     )
 
 
@@ -370,6 +370,36 @@ def test_domain_lists_leaves_out_the_empty_list_when_no_grant_names_it() -> None
     config = _instance_config({"dev": {"git.clone": ["a.io"]}})
 
     assert domain_lists(config) == {("a.io",)}
+
+
+def test_proxy_status_returns_the_status_of_the_list_s_proxy() -> None:
+    """The proxy is looked up by the name its list's key gives it."""
+    client = _docker(proxy=_proxy(status="exited"))
+
+    assert proxy_status(client, ["example.com"]) == "exited"
+    client.containers.get.assert_called_once_with(LISTED_NAME)
+
+
+def test_proxy_status_returns_none_for_an_absent_proxy() -> None:
+    """NotFound says the proxy is absent, which is no error."""
+    client = _docker()
+
+    assert proxy_status(client, OTHER) is None
+
+
+@pytest.mark.parametrize("error", DOCKER_ERRORS)
+def test_proxy_status_refuses_a_failed_lookup(error: Exception) -> None:
+    """Another Docker failure is an EgressError that names the proxy."""
+    client = _docker()
+    _failing_proxy_lookup(client, error)
+
+    with pytest.raises(EgressError) as excinfo:
+        proxy_status(client, LISTED)
+
+    assert str(excinfo.value) == (
+        f"proxy {LISTED_NAME!r} could not be looked up: daemon said no"
+    )
+    assert type(excinfo.value) is EgressError
 
 
 def test_render_config_renders_the_proxy_config_with_the_domains_sorted() -> None:

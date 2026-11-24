@@ -304,7 +304,7 @@ def _write_instance_config(path: Path, lists: Sequence[Sequence[str]]) -> Path:
 
 def _snapshot(path: Path) -> Snapshot:
     return Snapshot(
-        config=load_config(path, frozenset()),
+        config=load_config(path),
         manifests=MappingProxyType({}),
         warnings=(),
     )

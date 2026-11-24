@@ -12,22 +12,35 @@ from types import MappingProxyType
 from typing import Protocol, Self
 
 from agent_proxy.config import ConfigError, InstanceConfig, load_config
+from agent_proxy.credentials import unset_warnings
 from agent_proxy.egress import domain_lists
 from agent_proxy.errors import ProxyError
 from agent_proxy.plugins import Manifest
 
 CONTROL_SOCKET_NAME = "control.sock"
-# A reload may pull plugin images, so the reply can take minutes.
-RELOAD_REPLY_TIMEOUT_SECONDS = 600
+# A reload may pull plugin images, and a check runs a cage per plugin, so the
+# reply can take minutes.
+CONTROL_REPLY_TIMEOUT_SECONDS = 600
 _RELOAD_REQUEST = "reload"
-_REQUEST_LIMIT_BYTES = 64
+_CHECK_REQUEST = "check"
+_REQUESTS_EXPECTED = "'reload', 'check', or 'check <scope>'"
+_REQUEST_LIMIT_BYTES = 128
 _SOCKET_MODE = 0o600
-_REPLY_FORM = '{"ok": true, "warnings": [...]} or {"ok": false, "errors": [...]}'
+_RELOAD_REPLY_FORM = '{"ok": true, "warnings": [...]} or {"ok": false, "errors": [...]}'
+_CHECK_REPLY_FORM = (
+    '{"ok": true, "reports": [...]}, each report holding a string scope, a'
+    " boolean ok, and checks, each entry holding string check, subject, and"
+    ' detail and a boolean ok; or {"ok": false, "errors": [...]}'
+)
 
 
 @dataclass(frozen=True)
 class Snapshot:
-    """A config, the manifest of each of its plugins, and their warnings."""
+    """A config, the manifest of each of its plugins, and their warnings.
+
+    The warnings are the manifests' warnings, then one per credential a grant
+    names that the credential store lacked.
+    """
 
     config: InstanceConfig
     manifests: MappingProxyType[str, Manifest]
@@ -43,7 +56,9 @@ def build_snapshot(
 
     Args:
         path: the config file.
-        credential_names: the names the credential store holds.
+        credential_names: the names the credential store holds; each
+            credential a grant names that is not among them adds a warning,
+            after the manifest warnings.
         load_manifest: returns the manifest of the image at a pinned
             reference, making the image present first.
 
@@ -53,7 +68,7 @@ def build_snapshot(
             grant names an action its plugin's manifest does not declare. It
             holds one message per failure.
     """
-    config = load_config(path, credential_names)
+    config = load_config(path)
     manifests, failures = _load_manifests(config, load_manifest)
     failures.extend(_undeclared_action_failures(config, manifests))
     if failures:
@@ -62,7 +77,10 @@ def build_snapshot(
     return Snapshot(
         config=config,
         manifests=MappingProxyType(manifests),
-        warnings=tuple(_warnings(manifests)),
+        warnings=(
+            *_manifest_warnings(manifests),
+            *unset_warnings(config.scopes.values(), credential_names),
+        ),
     )
 
 
@@ -97,7 +115,7 @@ def _undeclared_action_failures(
                 )
 
 
-def _warnings(manifests: Mapping[str, Manifest]) -> Iterator[str]:
+def _manifest_warnings(manifests: Mapping[str, Manifest]) -> Iterator[str]:
     for plugin, manifest in manifests.items():
         for warning in manifest.warnings():
             yield f"plugins.{plugin}.{warning}"
@@ -236,16 +254,34 @@ class ReloadReply:
     errors: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class CheckReply:
+    """What the serving process replied to a check request."""
+
+    ok: bool
+    reports: tuple[dict[str, object], ...]
+    errors: tuple[str, ...]
+
+
 class ControlServer:
-    """Serves reload requests for a LiveConfig on a Unix socket."""
+    """Serves reload and check requests on a Unix socket, one at a time."""
 
     def __init__(
-        self, socket_path: Path, live: LiveConfig, build: Callable[[], Snapshot]
+        self,
+        socket_path: Path,
+        live: LiveConfig,
+        build: Callable[[], Snapshot],
+        check: Callable[[str | None], list[dict[str, object]]],
     ) -> None:
-        """Hold the socket path, the config to reload, and how to build a snapshot."""
+        """Hold the socket path, the config to reload, how to build, and how to check.
+
+        check takes a scope name, or None for every scope, and returns one
+        report per scope it checked.
+        """
         self._socket_path = socket_path
         self._live = live
         self._build = build
+        self._check = check
         self._server = socketserver.UnixStreamServer(
             str(socket_path), _request_handler(self._answer), bind_and_activate=False
         )
@@ -279,13 +315,19 @@ class ControlServer:
         self._socket_path.unlink(missing_ok=True)
 
     def _answer(self, request: str) -> dict[str, object]:
-        if request != _RELOAD_REQUEST:
-            return {
-                "ok": False,
-                "errors": [
-                    f"unknown request {request!r}; expected {_RELOAD_REQUEST!r}"
-                ],
-            }
+        if request == _RELOAD_REQUEST:
+            return self._reload()
+        if request == _CHECK_REQUEST:
+            return self._checked(None)
+        verb, _, scope_name = request.partition(" ")
+        if verb == _CHECK_REQUEST and scope_name:
+            return self._checked(scope_name)
+        return {
+            "ok": False,
+            "errors": [f"unknown request {request!r}; expected {_REQUESTS_EXPECTED}"],
+        }
+
+    def _reload(self) -> dict[str, object]:
         try:
             snapshot = self._live.reload(self._build)
         except ConfigError as error:
@@ -293,6 +335,13 @@ class ControlServer:
         except ProxyError as error:
             return {"ok": False, "errors": [str(error)]}
         return {"ok": True, "warnings": list(snapshot.warnings)}
+
+    def _checked(self, scope_name: str | None) -> dict[str, object]:
+        try:
+            reports = self._check(scope_name)
+        except ProxyError as error:
+            return {"ok": False, "errors": [str(error)]}
+        return {"ok": True, "reports": reports}
 
 
 def _request_handler(
@@ -340,20 +389,68 @@ def request_reload(socket_path: Path) -> ReloadReply:
         ControlError: nothing listens on socket_path or it cannot be reached,
             the connection closes with no reply, the reply is not the reply
             JSON line, or it does not arrive within
-            RELOAD_REPLY_TIMEOUT_SECONDS. It names socket_path.
+            CONTROL_REPLY_TIMEOUT_SECONDS. It names socket_path.
     """
     source = f"control socket {str(socket_path)!r}"
-    line = _exchange(socket_path, source)
-    return _parse_reply(line, source)
+    line = _exchange(socket_path, source, _RELOAD_REQUEST)
+    match _decode(line, source, _RELOAD_REPLY_FORM):
+        case {"ok": True, "warnings": list() as warnings} if _all_strings(warnings):
+            return ReloadReply(ok=True, warnings=tuple(warnings), errors=())
+        case {"ok": False, "errors": list() as errors} if _all_strings(errors):
+            return ReloadReply(ok=False, warnings=(), errors=tuple(errors))
+    raise ControlError(f"{source}: reply {line!r} is not {_RELOAD_REPLY_FORM}")
 
 
-def _exchange(socket_path: Path, source: str) -> bytes:
-    """Send the reload request and return the reply line."""
+def request_check(socket_path: Path, scope_name: str | None) -> CheckReply:
+    """Ask the process serving socket_path to check scope_name, or every scope.
+
+    Returns:
+        The reply: ok with one report per scope checked, or not ok with one
+        error per failure.
+
+    Raises:
+        ControlError: in every case request_reload raises it, and when a
+            report or one of its entries lacks a field of the check reply's
+            form. It names socket_path.
+    """
+    source = f"control socket {str(socket_path)!r}"
+    request = _CHECK_REQUEST if scope_name is None else f"{_CHECK_REQUEST} {scope_name}"
+    line = _exchange(socket_path, source, request)
+    match _decode(line, source, _CHECK_REPLY_FORM):
+        case {"ok": True, "reports": list() as reports} if all(
+            _is_report(report) for report in reports
+        ):
+            return CheckReply(ok=True, reports=tuple(reports), errors=())
+        case {"ok": False, "errors": list() as errors} if _all_strings(errors):
+            return CheckReply(ok=False, reports=(), errors=tuple(errors))
+    raise ControlError(f"{source}: reply {line!r} is not {_CHECK_REPLY_FORM}")
+
+
+def _is_report(report: object) -> bool:
+    match report:
+        case {"scope": str(), "ok": bool(), "checks": list() as entries}:
+            return all(_is_entry(entry) for entry in entries)
+    return False
+
+
+def _is_entry(entry: object) -> bool:
+    match entry:
+        case {"check": str(), "subject": str(), "ok": bool(), "detail": str()}:
+            return True
+    return False
+
+
+def _all_strings(values: list[object]) -> bool:
+    return all(isinstance(value, str) for value in values)
+
+
+def _exchange(socket_path: Path, source: str, request: str) -> bytes:
+    """Send request as one line and return the reply line."""
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
-        connection.settimeout(RELOAD_REPLY_TIMEOUT_SECONDS)
+        connection.settimeout(CONTROL_REPLY_TIMEOUT_SECONDS)
         try:
             connection.connect(str(socket_path))
-            connection.sendall(f"{_RELOAD_REQUEST}\n".encode())
+            connection.sendall(f"{request}\n".encode())
             with connection.makefile("rb") as replies:
                 line = replies.readline()
         except (FileNotFoundError, ConnectionRefusedError) as exc:
@@ -362,7 +459,7 @@ def _exchange(socket_path: Path, source: str) -> bytes:
             ) from exc
         except TimeoutError as exc:
             raise ControlError(
-                f"{source}: no reply within {RELOAD_REPLY_TIMEOUT_SECONDS} seconds"
+                f"{source}: no reply within {CONTROL_REPLY_TIMEOUT_SECONDS} seconds"
             ) from exc
         except (BrokenPipeError, ConnectionResetError) as exc:
             raise ControlError(
@@ -377,20 +474,15 @@ def _exchange(socket_path: Path, source: str) -> bytes:
     return line
 
 
-def _parse_reply(line: bytes, source: str) -> ReloadReply:
+def _decode(line: bytes, source: str, reply_form: str) -> object:
+    """Return the JSON value of the reply line.
+
+    Raises:
+        ControlError: the line is not UTF-8 JSON; it names reply_form.
+    """
     try:
-        reply = json.loads(line.decode("utf-8"))
+        return json.loads(line.decode("utf-8"))
     except ValueError as exc:
         raise ControlError(
-            f"{source}: reply {line!r} is not JSON; expected {_REPLY_FORM}"
+            f"{source}: reply {line!r} is not JSON; expected {reply_form}"
         ) from exc
-    match reply:
-        case {"ok": True, "warnings": list() as warnings} if all(
-            isinstance(warning, str) for warning in warnings
-        ):
-            return ReloadReply(ok=True, warnings=tuple(warnings), errors=())
-        case {"ok": False, "errors": list() as errors} if all(
-            isinstance(error, str) for error in errors
-        ):
-            return ReloadReply(ok=False, warnings=(), errors=tuple(errors))
-    raise ControlError(f"{source}: reply {line!r} is not {_REPLY_FORM}")

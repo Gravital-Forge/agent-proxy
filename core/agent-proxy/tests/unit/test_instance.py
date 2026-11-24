@@ -1,19 +1,34 @@
+import json
 import shutil
 import tempfile
 import threading
 from collections.abc import Iterator
+from datetime import timedelta
 from pathlib import Path
 from unittest import mock
 
+import docker.errors
 import pytest
 import yaml
 from egress_fakes import RecordingEgress
 
+from agent_proxy import runner
+from agent_proxy.audit import tail
 from agent_proxy.config import ConfigError
+from agent_proxy.credentials import unset_message
 from agent_proxy.mcp import Instance
-from agent_proxy.reload import CONTROL_SOCKET_NAME, ControlError, request_reload
+from agent_proxy.plugins import CommandAction, Manifest, PluginImageError
+from agent_proxy.reload import (
+    CONTROL_SOCKET_NAME,
+    ControlError,
+    request_check,
+    request_reload,
+)
+from agent_proxy.selfcheck import SELF_CHECK_TOOL
 
 SWEEPER_THREAD = "overflow-sweeper"
+GITHUB_IMAGE = "ghcr.io/example/github@sha256:" + "c" * 64
+PINNED_VERIFIER = "ghcr.io/example/agent-proxy-verifier@sha256:" + "d" * 64
 CONFIG = {
     "agent_tree": "/srv/agents/alpha",
     "overflow_dir": "/srv/agents/alpha/overflow",
@@ -66,6 +81,71 @@ def test_start_opens_the_stores_under_the_state_dir_and_serves_reloads(
     assert (state_dir / "credentials").is_dir()
     assert (state_dir / "audit").is_dir()
     assert [verb for verb, _ in egress.calls[:2]] == ["ensure", "prune"]
+
+
+def test_start_serves_checks_on_the_control_socket_and_audits_them(
+    state_dir: Path, tmp_path: Path, egress: RecordingEgress
+) -> None:
+    """A check request reaches the instance's self-check and writes one audit line."""
+    instance = Instance.start(state_dir, _config(tmp_path, CONFIG), mock.MagicMock())
+    try:
+        reply = request_check(state_dir / CONTROL_SOCKET_NAME, None)
+        lines = list(tail(state_dir / "audit", 10))
+    finally:
+        instance.close()
+
+    assert reply.ok is True
+    [report] = reply.reports
+    assert report["scope"] == "ci"
+    assert [entry["check"] for entry in report["checks"]] == ["overflow_dir"]
+    [line] = [json.loads(line) for line in lines]
+    assert line["action"] == SELF_CHECK_TOOL
+    assert line["scope"] == "ci"
+    assert line["token_name"] is None
+
+
+def test_start_from_a_config_naming_an_unstored_credential_warns_of_it(
+    state_dir: Path,
+    tmp_path: Path,
+    egress: RecordingEgress,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The instance starts and serves a reload; its warnings name the credential."""
+    manifest = Manifest(
+        actions={
+            "pr_view": CommandAction(
+                name="pr_view",
+                input_schema={"type": "object", "additionalProperties": False},
+                credentials=(),
+                timeout=timedelta(seconds=30),
+                argv=("gh", "pr", "view"),
+                parameters=(),
+                passthrough_args=False,
+            )
+        }
+    )
+    monkeypatch.setattr(
+        "agent_proxy.plugins.load_manifest", lambda client, reference: manifest
+    )
+    grant = {
+        "roots": [],
+        "domains": [],
+        "credentials": {"github-token": {"env": "GH_TOKEN"}},
+    }
+    document = CONFIG | {
+        "plugins": {"github": GITHUB_IMAGE},
+        "scopes": {"ci": {"grants": {"github.pr_view": grant}}},
+    }
+
+    instance = Instance.start(state_dir, _config(tmp_path, document), mock.MagicMock())
+    try:
+        reply = request_reload(state_dir / CONTROL_SOCKET_NAME)
+    finally:
+        instance.close()
+
+    assert instance.warnings == (unset_message("github-token"),)
+    assert reply.ok is True
+    assert reply.warnings == (unset_message("github-token"),)
 
 
 def test_close_removes_the_control_socket_and_stops_the_sweeper(
@@ -121,4 +201,24 @@ def test_a_step_that_fails_closes_the_steps_started_before_it(
     with pytest.raises(RuntimeError, match="sweeper"):
         Instance.start(state_dir, _config(tmp_path, CONFIG), mock.MagicMock())
 
+    assert not (state_dir / CONTROL_SOCKET_NAME).exists()
+
+
+def test_a_pinned_verifier_that_cannot_be_pulled_raises_and_starts_nothing(
+    state_dir: Path,
+    tmp_path: Path,
+    egress: RecordingEgress,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed pull of the verifier stops the start before the live config."""
+    monkeypatch.setattr(runner, "VERIFIER_IMAGE", PINNED_VERIFIER)
+    client = mock.MagicMock()
+    client.images.get.side_effect = docker.errors.ImageNotFound("no such image")
+    client.images.pull.side_effect = docker.errors.APIError("manifest unknown")
+
+    with pytest.raises(PluginImageError, match="manifest unknown"):
+        Instance.start(state_dir, _config(tmp_path, CONFIG), client)
+
+    client.images.pull.assert_called_once_with(PINNED_VERIFIER)
+    assert egress.calls == []
     assert not (state_dir / CONTROL_SOCKET_NAME).exists()

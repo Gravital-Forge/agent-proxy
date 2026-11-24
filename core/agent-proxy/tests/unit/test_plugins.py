@@ -110,7 +110,7 @@ def test_the_describe_limits_are_the_spec_s() -> None:
 
 
 def test_a_plugin_image_error_is_a_proxy_error() -> None:
-    """The admin command reports every image failure as a refusal."""
+    """The operator command reports every image failure as a refusal."""
     assert issubclass(PluginImageError, ProxyError)
 
 

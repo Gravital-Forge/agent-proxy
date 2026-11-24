@@ -23,15 +23,37 @@ from agent_proxy.errors import ProxyError
 from agent_proxy.mcp import snapshot_builder
 from agent_proxy.reload import (
     CONTROL_SOCKET_NAME,
+    CheckReply,
     ControlError,
     ControlServer,
     LiveConfig,
     ReloadReply,
     Snapshot,
+    request_check,
     request_reload,
 )
 
 WARNING = "plugins.git.actions.raw: declares pass-through args"
+UNKNOWN_EXPECTED = "expected 'reload', 'check', or 'check <scope>'"
+CREDENTIAL_ENTRY: dict[str, object] = {
+    "check": "credential",
+    "subject": "api-token",
+    "ok": False,
+    "detail": "credential 'api-token' is not set",
+}
+REPORT: dict[str, object] = {
+    "ok": False,
+    "scope": "ci",
+    "checks": [
+        CREDENTIAL_ENTRY,
+        {
+            "check": "overflow_dir",
+            "subject": "/srv/agents/alpha/overflow",
+            "ok": True,
+            "detail": "the instance can create a file in it",
+        },
+    ],
+}
 WAIT_SECONDS = 5
 PLUGIN_IMAGE = "ghcr.io/example/tools@sha256:" + "a" * 64
 CONFIG = {
@@ -62,6 +84,22 @@ class RecordingEgress:
         self.calls.append(("prune", {tuple(domains) for domains in lists}))
 
 
+class RecordingCheck:
+    """Records each scope name it is asked to check, then replies or refuses."""
+
+    def __init__(self, error: ProxyError | None = None) -> None:
+        """Reply [REPORT] to every check, or raise error after recording, if set."""
+        self.scope_names: list[str | None] = []
+        self._error = error
+
+    def __call__(self, scope_name: str | None) -> list[dict[str, object]]:
+        """Record scope_name, then raise error or return the one report."""
+        self.scope_names.append(scope_name)
+        if self._error is not None:
+            raise self._error
+        return [REPORT]
+
+
 @pytest.fixture
 def socket_path() -> Iterator[Path]:
     """A socket path in a short directory, since an AF_UNIX path caps at 107 bytes."""
@@ -74,7 +112,7 @@ def _snapshot(tmp_path: Path, warnings: tuple[str, ...] = ()) -> Snapshot:
     path = tmp_path / "config.yaml"
     path.write_text(yaml.safe_dump(CONFIG), encoding="utf-8")
     return Snapshot(
-        config=load_config(path, frozenset()),
+        config=load_config(path),
         manifests=MappingProxyType({}),
         warnings=warnings,
     )
@@ -82,9 +120,12 @@ def _snapshot(tmp_path: Path, warnings: tuple[str, ...] = ()) -> Snapshot:
 
 @contextlib.contextmanager
 def _serving(
-    socket_path: Path, live: LiveConfig, build: Callable[[], Snapshot]
+    socket_path: Path,
+    live: LiveConfig,
+    build: Callable[[], Snapshot],
+    check: Callable[[str | None], list[dict[str, object]]] | None = None,
 ) -> Iterator[ControlServer]:
-    server = ControlServer(socket_path, live, build)
+    server = ControlServer(socket_path, live, build, check or RecordingCheck())
     server.start()
     try:
         yield server
@@ -204,41 +245,107 @@ def test_an_egress_error_replies_its_message_and_keeps_current(
     assert live.current is old
 
 
-def test_an_unknown_request_is_refused_without_a_build(
-    tmp_path: Path, socket_path: Path
+@pytest.mark.parametrize(
+    "request_line",
+    [
+        pytest.param("status", id="another-verb"),
+        pytest.param("check ", id="check-with-an-empty-scope"),
+        pytest.param("checks", id="check-with-a-suffix"),
+        pytest.param("reload ci", id="reload-with-a-noun"),
+    ],
+)
+def test_an_unknown_request_is_refused_without_a_build_or_a_check(
+    tmp_path: Path, socket_path: Path, request_line: str
 ) -> None:
-    """A request line other than reload is refused by name, and nothing is built."""
+    """A request line of no known form is refused by name; nothing builds or checks."""
     old = _snapshot(tmp_path)
     live = LiveConfig(old, RecordingEgress())
     builds: list[None] = []
+    check = RecordingCheck()
 
     def build() -> Snapshot:
         builds.append(None)
         return old
 
-    with _serving(socket_path, live, build):
-        reply = _ask(socket_path, b"status\n")
+    with _serving(socket_path, live, build, check):
+        reply = _ask(socket_path, f"{request_line}\n".encode())
 
     assert reply == {
         "ok": False,
-        "errors": ["unknown request 'status'; expected 'reload'"],
+        "errors": [f"unknown request {request_line!r}; {UNKNOWN_EXPECTED}"],
     }
     assert builds == []
+    assert check.scope_names == []
 
 
-def test_a_request_line_is_read_up_to_64_bytes(
+def test_a_request_line_is_read_up_to_128_bytes(
     tmp_path: Path, socket_path: Path
 ) -> None:
-    """The server stops reading at 64 bytes, so a line with no newline still ends."""
+    """The server stops reading at 128 bytes, so a line with no newline still ends."""
     live = LiveConfig(_snapshot(tmp_path), RecordingEgress())
 
     with _serving(socket_path, live, _refuse_twice):
-        reply = _ask(socket_path, b"x" * 64)
+        reply = _ask(socket_path, b"x" * 128)
 
     assert reply == {
         "ok": False,
-        "errors": [f"unknown request {'x' * 64!r}; expected 'reload'"],
+        "errors": [f"unknown request {'x' * 128!r}; {UNKNOWN_EXPECTED}"],
     }
+
+
+def test_a_check_request_checks_every_scope_and_replies_the_reports(
+    tmp_path: Path, socket_path: Path
+) -> None:
+    """The bare check request hands None to check and replies its reports."""
+    live = LiveConfig(_snapshot(tmp_path), RecordingEgress())
+    check = RecordingCheck()
+
+    with _serving(socket_path, live, _refuse_twice, check):
+        reply = _ask(socket_path, b"check\n")
+
+    assert reply == {"ok": True, "reports": [REPORT]}
+    assert check.scope_names == [None]
+
+
+def test_a_check_request_naming_a_scope_checks_that_scope(
+    tmp_path: Path, socket_path: Path
+) -> None:
+    """A check request naming a scope hands the scope name to check."""
+    live = LiveConfig(_snapshot(tmp_path), RecordingEgress())
+    check = RecordingCheck()
+
+    with _serving(socket_path, live, _refuse_twice, check):
+        reply = _ask(socket_path, b"check ci\n")
+
+    assert reply == {"ok": True, "reports": [REPORT]}
+    assert check.scope_names == ["ci"]
+
+
+def test_a_check_request_fits_the_longest_scope_name(
+    tmp_path: Path, socket_path: Path
+) -> None:
+    """A 64-character scope name reaches check whole, within the request limit."""
+    live = LiveConfig(_snapshot(tmp_path), RecordingEgress())
+    check = RecordingCheck()
+    longest = "s" * 64
+
+    with _serving(socket_path, live, _refuse_twice, check):
+        _ask(socket_path, f"check {longest}\n".encode())
+
+    assert check.scope_names == [longest]
+
+
+def test_a_refused_check_replies_its_message_as_the_one_error(
+    tmp_path: Path, socket_path: Path
+) -> None:
+    """A ProxyError from check replies ok false with its text."""
+    live = LiveConfig(_snapshot(tmp_path), RecordingEgress())
+    check = RecordingCheck(ProxyError("scope 'nope' is not defined"))
+
+    with _serving(socket_path, live, _refuse_twice, check):
+        reply = _ask(socket_path, b"check nope\n")
+
+    assert reply == {"ok": False, "errors": ["scope 'nope' is not defined"]}
 
 
 def test_the_socket_is_owner_only(tmp_path: Path, socket_path: Path) -> None:
@@ -271,7 +378,10 @@ def test_a_path_that_is_not_a_socket_is_refused_and_kept(
     """Start refuses to replace a regular file, naming its path."""
     socket_path.write_text("keep", encoding="utf-8")
     server = ControlServer(
-        socket_path, LiveConfig(_snapshot(tmp_path), RecordingEgress()), _refuse_twice
+        socket_path,
+        LiveConfig(_snapshot(tmp_path), RecordingEgress()),
+        _refuse_twice,
+        RecordingCheck(),
     )
 
     with _refusal_naming(socket_path):
@@ -286,7 +396,10 @@ def test_a_socket_that_cannot_be_bound_is_refused(
     """Start refuses a path in a directory that does not exist, naming the path."""
     absent = socket_path.parent / "absent" / CONTROL_SOCKET_NAME
     server = ControlServer(
-        absent, LiveConfig(_snapshot(tmp_path), RecordingEgress()), _refuse_twice
+        absent,
+        LiveConfig(_snapshot(tmp_path), RecordingEgress()),
+        _refuse_twice,
+        RecordingCheck(),
     )
 
     with _refusal_naming(absent):
@@ -401,7 +514,7 @@ def test_request_reload_refuses_a_reply_that_does_not_arrive_in_time(
     socket_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A server that holds the connection past the timeout is a ControlError."""
-    monkeypatch.setattr("agent_proxy.reload.RELOAD_REPLY_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr("agent_proxy.reload.CONTROL_REPLY_TIMEOUT_SECONDS", 0.1)
     released = threading.Event()
 
     def hold(connection: socket.socket) -> None:
@@ -412,6 +525,138 @@ def test_request_reload_refuses_a_reply_that_does_not_arrive_in_time(
         with _refusal_naming(socket_path):
             request_reload(socket_path)
         released.set()
+
+
+@pytest.mark.parametrize(
+    ("scope_name", "request_line"),
+    [
+        pytest.param(None, b"check\n", id="every-scope"),
+        pytest.param("ci", b"check ci\n", id="one-scope"),
+    ],
+)
+def test_request_check_sends_its_request_line(
+    socket_path: Path, scope_name: str | None, request_line: bytes
+) -> None:
+    """The client sends check, or check and the scope name, as one line."""
+    received: list[bytes] = []
+
+    def record(connection: socket.socket) -> None:
+        with connection.makefile("rb") as requests_in:
+            received.append(requests_in.readline())
+        connection.sendall(json.dumps({"ok": True, "reports": []}).encode() + b"\n")
+
+    with _stub_server(socket_path, record):
+        request_check(socket_path, scope_name)
+
+    assert received == [request_line]
+
+
+def test_request_check_returns_the_reports_of_a_served_check(
+    tmp_path: Path, socket_path: Path
+) -> None:
+    """A served check becomes a CheckReply holding its reports."""
+    live = LiveConfig(_snapshot(tmp_path), RecordingEgress())
+    check = RecordingCheck()
+
+    with _serving(socket_path, live, _refuse_twice, check):
+        reply = request_check(socket_path, "ci")
+
+    assert reply == CheckReply(ok=True, reports=(REPORT,), errors=())
+    assert check.scope_names == ["ci"]
+
+
+def test_request_check_returns_the_errors_of_a_refused_check(
+    tmp_path: Path, socket_path: Path
+) -> None:
+    """A refused check becomes a CheckReply holding its errors."""
+    live = LiveConfig(_snapshot(tmp_path), RecordingEgress())
+    check = RecordingCheck(ProxyError("scope 'nope' is not defined"))
+
+    with _serving(socket_path, live, _refuse_twice, check):
+        reply = request_check(socket_path, "nope")
+
+    assert reply == CheckReply(
+        ok=False, reports=(), errors=("scope 'nope' is not defined",)
+    )
+
+
+def test_request_check_refuses_a_path_with_nothing_on_it(socket_path: Path) -> None:
+    """No socket file is a ControlError naming the path."""
+    with _refusal_naming(socket_path):
+        request_check(socket_path, None)
+
+
+def test_request_check_refuses_a_reply_that_does_not_arrive_in_time(
+    socket_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A server that holds the connection past the timeout is a ControlError."""
+    monkeypatch.setattr("agent_proxy.reload.CONTROL_REPLY_TIMEOUT_SECONDS", 0.1)
+    released = threading.Event()
+
+    def hold(connection: socket.socket) -> None:
+        connection.recv(64)
+        released.wait(WAIT_SECONDS)
+
+    with _stub_server(socket_path, hold):
+        with _refusal_naming(socket_path):
+            request_check(socket_path, None)
+        released.set()
+
+
+def _report_with(**fields: object) -> dict[str, object]:
+    """Return REPORT with fields replaced, and each field set to ... removed."""
+    report = REPORT | fields
+    return {key: value for key, value in report.items() if value is not ...}
+
+
+def _entry_with(**fields: object) -> dict[str, object]:
+    """Return CREDENTIAL_ENTRY with fields replaced, and ... removed."""
+    entry = CREDENTIAL_ENTRY | fields
+    return {key: value for key, value in entry.items() if value is not ...}
+
+
+def _served(*reports: object) -> bytes:
+    return json.dumps({"ok": True, "reports": list(reports)}).encode() + b"\n"
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        pytest.param(b"not json\n", id="not-json"),
+        pytest.param(b'{"ok": true, "warnings": []}\n', id="a-reload-reply"),
+        pytest.param(b'{"ok": true}\n', id="ok-without-reports"),
+        pytest.param(b'{"ok": true, "reports": {}}\n', id="reports-not-a-list"),
+        pytest.param(b'{"ok": false, "errors": [1]}\n', id="error-not-a-string"),
+        pytest.param(_served(1), id="report-not-an-object"),
+        pytest.param(_served(_report_with(scope=...)), id="report-without-scope"),
+        pytest.param(_served(_report_with(scope=1)), id="scope-not-a-string"),
+        pytest.param(_served(_report_with(ok=1)), id="report-ok-not-a-boolean"),
+        pytest.param(_served(_report_with(checks={})), id="checks-not-a-list"),
+        pytest.param(_served(_report_with(checks=["x"])), id="entry-not-an-object"),
+        pytest.param(
+            _served(_report_with(checks=[_entry_with(detail=...)])),
+            id="entry-without-detail",
+        ),
+        pytest.param(
+            _served(_report_with(checks=[_entry_with(subject=...)])),
+            id="entry-without-subject",
+        ),
+        pytest.param(
+            _served(_report_with(checks=[_entry_with(check=1)])),
+            id="entry-check-not-a-string",
+        ),
+        pytest.param(
+            _served(_report_with(checks=[_entry_with(ok="no")])),
+            id="entry-ok-not-a-boolean",
+        ),
+    ],
+)
+def test_request_check_refuses_a_reply_it_cannot_read(
+    socket_path: Path, reply: bytes
+) -> None:
+    """A reply not of the check reply's form is a ControlError naming the path."""
+    with _stub_server(socket_path, _replying(reply)), _refusal_naming(socket_path):
+        request_check(socket_path, None)
 
 
 def _pull_refused(client: mock.MagicMock) -> None:

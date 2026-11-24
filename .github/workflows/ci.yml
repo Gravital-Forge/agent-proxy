@@ -9,8 +9,10 @@ jobs:
   lint-md:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           python-version: "3.12"
       - name: Lint markdown
@@ -21,7 +23,9 @@ jobs:
       packages: ${{ steps.list.outputs.packages }}
       plugins: ${{ steps.list.outputs.plugins }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - id: list
         run: |
           {
@@ -57,8 +61,10 @@ jobs:
       matrix:
         package: ${{ fromJSON(needs.discover.outputs.packages) }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           python-version: "3.12"
       # uv installs the tool outside the job's PATH, and GITHUB_PATH takes
@@ -84,12 +90,39 @@ jobs:
       matrix:
         plugin: ${{ fromJSON(needs.discover.outputs.plugins) }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: astral-sh/setup-uv@v8.2.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d # v10.4.0
         with:
           python-version: "3.12"
       - name: Build the plugin image
-        run: docker build -t apx-plugin:ci ${{ matrix.plugin }}
+        env:
+          PLUGIN: ${{ matrix.plugin }}
+        run: docker build -t apx-plugin:ci "$PLUGIN"
       - name: Check the manifest
         working-directory: core/agent-proxy
         run: uv run agent-proxy manifest check apx-plugin:ci
+  images:
+    runs-on: ubuntu-latest
+    services:
+      registry:
+        image: registry:3@sha256:ddf754342cfc8acc51a56d5d0ab6af06826461864460636d8bd5c546dab2a7b8
+        ports:
+          - 5000:5000
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the images and push them to the job's registry
+        run: >-
+          core/docker/build-images.sh 0.0.0 localhost:5000/gravital-forge
+          "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" > "$RUNNER_TEMP/references"
+      - name: Check that the instance image carries the verifier's digest reference
+        run: |
+          verifier="$(head -n 1 "$RUNNER_TEMP/references")"
+          environment="$(docker image inspect --format '{{range .Config.Env}}{{println .}}{{end}}' localhost:5000/gravital-forge/agent-proxy:0.0.0)"
+          if ! grep --quiet --line-regexp --fixed-strings "AGENT_PROXY_VERIFIER_IMAGE=$verifier" <<< "$environment"; then
+            echo "the instance image does not hold AGENT_PROXY_VERIFIER_IMAGE=$verifier" >&2
+            exit 1
+          fi

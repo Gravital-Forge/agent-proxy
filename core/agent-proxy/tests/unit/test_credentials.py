@@ -6,12 +6,14 @@ from unittest import mock
 
 import pytest
 
-from agent_proxy.config import InvalidNameError
+from agent_proxy.config import InvalidNameError, Scope
 from agent_proxy.credentials import (
     CredentialEntry,
     CredentialStore,
     EmptyCredentialError,
     UnknownCredentialError,
+    unset_message,
+    unset_warnings,
 )
 from agent_proxy.errors import ProxyError
 
@@ -229,5 +231,66 @@ def test_remove_never_reaches_outside_the_store(
     "error", [InvalidNameError, EmptyCredentialError, UnknownCredentialError]
 )
 def test_errors_are_proxy_errors(error: type[Exception]) -> None:
-    """The admin command catches every credential error as a ProxyError."""
+    """The operator command catches every credential error as a ProxyError."""
     assert issubclass(error, ProxyError)
+
+
+def _scope(*grants: tuple[str, dict[str, object]]) -> Scope:
+    """Return a scope whose grants each give the credential mounts listed."""
+    return Scope.model_validate(
+        {
+            "grants": {
+                key: {"roots": [], "domains": [], "credentials": credentials}
+                for key, credentials in grants
+            }
+        }
+    )
+
+
+def test_unset_message_names_the_credential_and_the_command() -> None:
+    """The text says the credential is unset and how the operator stores it."""
+    assert unset_message("github-token") == (
+        "credential 'github-token' is not set; the operator stores it with"
+        " 'agent-proxy credential set github-token'"
+    )
+
+
+def test_unset_warnings_name_each_unset_credential_once_in_first_named_order() -> None:
+    """Two scopes naming one credential yield one warning, in first-named order."""
+    first = _scope(
+        ("git.push", {"ssh-key": {"file": "/run/credentials/ssh-key"}}),
+        ("github.pr_view", {"github-token": {"env": "GH_TOKEN"}}),
+    )
+    second = _scope(
+        (
+            "github.pr_edit",
+            {"github-token": {"env": "GH_TOKEN"}, "npm-token": {"env": "NPM"}},
+        )
+    )
+
+    assert unset_warnings([first, second], frozenset()) == (
+        unset_message("ssh-key"),
+        unset_message("github-token"),
+        unset_message("npm-token"),
+    )
+
+
+def test_unset_warnings_skip_a_stored_credential() -> None:
+    """A stored credential gets no warning; an unstored one beside it does."""
+    scope = _scope(
+        (
+            "github.pr_view",
+            {"github-token": {"env": "GH_TOKEN"}, "npm-token": {"env": "NPM"}},
+        )
+    )
+
+    assert unset_warnings([scope], frozenset({"github-token"})) == (
+        unset_message("npm-token"),
+    )
+
+
+def test_unset_warnings_are_empty_when_every_credential_is_stored() -> None:
+    """A store holding every granted credential yields no warning."""
+    scope = _scope(("github.pr_view", {"github-token": {"env": "GH_TOKEN"}}))
+
+    assert unset_warnings([scope], frozenset({"github-token"})) == ()

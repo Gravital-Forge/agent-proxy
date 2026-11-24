@@ -1,22 +1,29 @@
 # Writing a plugin
 
 A plugin is an OCI image that declares actions in a manifest. The proxy runs each action in a cage
-built from that image. `docs/design.md` gives the plugin model under "Plugins and actions" and the
-cage under "The cage". This document tells a plugin author what the image holds, how to write its
-manifest, how an action runs, and how to check the manifest.
+built from that image. The architecture defines each term under
+[Concepts](architecture.md#concepts), and gives the cage under [The cage](architecture.md#the-cage).
+This document tells a plugin author what the image holds, how to write its manifest, how an action
+runs, and how to check the manifest.
 
 ## The image
 
 The image holds an executable named `describe` on its `PATH`. `describe` prints the manifest as
 UTF-8 JSON on stdout and exits 0.
 
-The proxy runs `describe` with the image's entrypoint set to `["describe"]` and no command, in the
-container that `docs/architecture.md` gives under `plugins.py`. So `describe` reads only what the
-image holds, writes nothing but its output, and keeps within that section's time and output limits.
-A non-zero exit shows the start of stderr, so write a diagnostic there.
+The proxy runs `describe` with the image's entrypoint set to `["describe"]` and no command, in a
+container with no network, a read-only root filesystem, no capabilities, and `no-new-privileges`,
+which it removes whatever happens. So `describe` reads only what the image holds and writes nothing
+but its output. It must exit within 30 seconds, and its stdout must stay within 1 MiB. A non-zero
+exit shows the first 1,024 bytes of stderr, so write a diagnostic there.
 
-The simplest `describe` prints a manifest file that the image holds. `docs/design.md` gives where a
-plugin's source lives under "Plugins and actions" and "Repository layout".
+The self-check also runs `describe`, in a cage that the instance builds as
+[How an action runs](#how-an-action-runs) gives for an action. The cage starts behind the root
+verifier, as user `0:0`, on the Docker network `none`, with no roots, no credentials, and no grant
+`env`. So `describe` must also exit 0 there. [The self-check](architecture.md#the-self-check) gives
+the check.
+
+The simplest `describe` prints a manifest file that the image holds.
 
 ## The manifest
 
@@ -36,7 +43,8 @@ converting text to an integer.
 The manifest has one member, `actions`. It is an object with at least one member. Each key is an
 action name, which matches `ACTION_NAME_PATTERN` in `config.py`. Each value is an action. An
 operator grants an action to a scope under the key `<plugin>.<action>`, where `<plugin>` is the name
-the config pins the image under. `docs/design.md` gives the config under "Config".
+the config pins the image under. The reference gives the config under
+[The config file](reference.md#the-config-file).
 
 ### Every action
 
@@ -47,11 +55,12 @@ Every action states each of these members. None has a default.
   meta-schema check.
 - `credentials` is an array, possibly empty, of the credentials the action expects. Each item is
   `{"env": NAME}`, with `NAME` matching `ENV_NAME_PATTERN` in `config.py`, or `{"file": PATH}`, with
-  `PATH` an absolute path beneath `/run/credentials/` with no `..` segment. `docs/design.md` gives
-  how a grant supplies a credential in these forms under "Credentials".
+  `PATH` an absolute path beneath `/run/credentials/` with no `..` segment. The reference gives how
+  a grant supplies a credential in these forms under
+  [A scope's grants](reference.md#a-scopes-grants).
 - `timeout` is the action's default timeout, a duration string matching `DURATION_PATTERN` in
-  `config.py`, such as `30s` or `5m`, whose count fits a Python `timedelta`. `docs/design.md` gives
-  how a grant overrides it under "The cage".
+  `config.py`, such as `30s` or `5m`, whose count fits a Python `timedelta`. A grant's `timeout`
+  overrides it, as [A scope's grants](reference.md#a-scopes-grants) gives.
 
 ### A command action
 
@@ -87,7 +96,8 @@ A script action runs an executable in the image. It states these members, and do
 - `output_schema` is a JSON Schema whose `type` is `"object"`, and it passes the draft 2020-12
   meta-schema check.
 
-"How an action runs" gives how a script receives its input and returns its output.
+[How an action runs](#how-an-action-runs) gives how a script receives its input and returns its
+output.
 
 ## How argv is formed
 
@@ -107,12 +117,13 @@ exempt, and go into argv as the input gives them.
 ## How an action runs
 
 An agent sees each action that its token's scope grants as an MCP tool, with the manifest's
-`input_schema` as the tool's input schema. `docs/design.md` gives the surface, and the tool's name,
-under "Surface".
+`input_schema` as the tool's input schema. [A scope's grants](reference.md#a-scopes-grants) gives
+the tool's name, and [The call path](architecture.md#the-call-path) gives how a call reaches its
+cage.
 
-The proxy runs each call in a new cage built from the plugin's image. `docs/architecture.md` gives
-the cage under `runner.py`, and `docs/design.md` gives it under "The cage". The cage's entrypoint
-replaces the image's entrypoint and command:
+The proxy runs each call in a new cage built from the plugin's image, as
+[The cage](architecture.md#the-cage) gives. The cage's entrypoint replaces the image's entrypoint
+and command:
 
 - A command action's entrypoint is the argv above.
 - A script action's entrypoint is its `executable`, with no arguments. The script reads its input on
@@ -121,33 +132,30 @@ replaces the image's entrypoint and command:
 The proxy's root verifier runs first in every cage, and then replaces itself with that entrypoint.
 So the action still runs as PID 1, with its argv, stdin, and environment unchanged. A bare
 executable name is found on the image's `PATH`. The proxy owns `/.agent-proxy` in the cage, so an
-image must not rely on that path. `docs/architecture.md` gives the verifier under "The root
-verifier".
+image must not rely on that path. [The root verifier](architecture.md#the-root-verifier) gives the
+verifier.
 
 Inside the cage:
 
 - The root filesystem is read-only. Write scratch files under `/tmp`, a small tmpfs.
 - The environment holds `AGENT_PROXY_ROOTS`: the grant's root paths, in grant order, as a compact
-  JSON array of strings, `[]` for a grant with no roots. Neither a credential nor a grant's `env`
-  can take that environment name. The config refuses a grant that gives one.
+  JSON array of strings, `[]` for a grant with no roots. The config reserves that name, as
+  [A scope's grants](reference.md#a-scopes-grants) gives.
 - The environment also holds each variable that the grant's `env` sets.
 
-A script succeeds when it exits 0 and prints on stdout one JSON object that its `output_schema`
-validates. That stdout must decode as the manifest must, by the rules under "The manifest". The call
-then returns that object. Otherwise the script has failed. The call then returns a normal result
-that holds what a command action returns: the exit code, stdout, and stderr. A stdout over the
-output cap goes to an overflow file, so a script whose output passes the cap fails. `docs/design.md`
-gives the cap and the result forms under "Results".
+A script's stdout must decode as the manifest must, by the rules under
+[The manifest](#the-manifest). The reference gives when a script succeeds and what its call returns
+under [A script action's result](reference.md#a-script-actions-result), and what an output over the
+cap does to a script under [Output past the cap](reference.md#output-past-the-cap).
 
-The cage's network follows the grant's `domains`. `docs/design.md` gives the egress model under "The
-cage", and `docs/architecture.md` gives the network and its proxy under `egress.py`.
+The cage's network follows the grant's `domains`, as [Egress](architecture.md#egress) gives.
 
 - The cage reaches the web only through the proxy that `HTTPS_PROXY` names, so use a tool that
   honours that variable. The proxy passes each host the grant names and refuses a host the grant
   does not name.
 - The cage gets no proxy variable for plain HTTP.
-- Neither a credential nor a grant's `env` can take the environment name `HTTPS_PROXY`. The config
-  refuses a grant that gives one.
+- The config reserves the name `HTTPS_PROXY`, as [A scope's grants](reference.md#a-scopes-grants)
+  gives.
 
 ## Checking a manifest
 
@@ -157,9 +165,9 @@ Build the image, then check it from `core/agent-proxy/`:
 uv run agent-proxy manifest check IMAGE
 ```
 
-`IMAGE` is any local image reference; build or pull it first. `docs/architecture.md` gives how the
-command reaches Docker under "Where state lives", and what it prints and how it exits under "The
-admin command".
+`IMAGE` is any local image reference; build or pull it first. The reference gives how the command
+reaches Docker, what it prints, and how it exits under
+[The operator command](reference.md#the-operator-command).
 
 ## A working example
 
@@ -170,7 +178,8 @@ script action whose executable the image also holds. `COPY` keeps each file's mo
 must already be executable in the build context.
 
 `plugins/git/` is a full plugin: a uv package with its own tests, whose actions run git in the cage.
-Its `README.md` gives what it offers and how it is built. `plugins/github/` is also a full plugin,
-whose actions run gh in a cage, and its `README.md` gives what it offers. `plugins/hcp-terraform/`
-is a full plugin whose script actions call HCP Terraform's API with Python's standard library, and
-its `README.md` gives what it offers.
+Its [README](../plugins/git/README.md) gives what it offers and how it is built. `plugins/github/`
+is also a full plugin, whose actions run gh in a cage, and its [README](../plugins/github/README.md)
+gives what it offers. `plugins/hcp-terraform/` is a full plugin whose script actions call HCP
+Terraform's API with Python's standard library, and its [README](../plugins/hcp-terraform/README.md)
+gives what it offers.

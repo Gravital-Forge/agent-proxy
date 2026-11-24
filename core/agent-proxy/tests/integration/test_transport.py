@@ -28,6 +28,7 @@ from agent_proxy import audit, cli, egress, plugins
 from agent_proxy.auth import TokenStore
 from agent_proxy.mcp import Instance
 from agent_proxy.plugins import Manifest
+from agent_proxy.selfcheck import SELF_CHECK_TOOL
 
 PREFIX = "agent-proxy refused: "
 UNKNOWN_TOKEN = "apx_" + "x" * 43
@@ -38,7 +39,7 @@ FULL: Mapping[str, Sequence[str]] = MappingProxyType(
 )
 NARROW: Mapping[str, Sequence[str]] = MappingProxyType({"echo": ()})
 NO_PLUGINS: Mapping[str, str] = MappingProxyType({})
-FULL_TOOLS = ["test_count", "test_echo", "test_fail", "test_sleep"]
+FULL_TOOLS = [SELF_CHECK_TOOL, "test_count", "test_echo", "test_fail", "test_sleep"]
 SLEPT = {"exit_code": 0, "stdout": "", "stderr": ""}
 MAX_CAGES = 2
 OVERFLOW_BYTES = 300000
@@ -255,9 +256,9 @@ def _wait_for_removal(client: DockerClient, name: str) -> None:
 
 
 def test_each_scope_lists_its_granted_tools(instance: _Instance) -> None:
-    """The full token lists four tools, and the narrow token lists test_echo."""
+    """Full lists its four tools and narrow test_echo, each beside the self-check."""
     assert _list(instance.url, instance.full_token) == FULL_TOOLS
-    assert _list(instance.url, instance.narrow_token) == ["test_echo"]
+    assert _list(instance.url, instance.narrow_token) == [SELF_CHECK_TOOL, "test_echo"]
 
 
 def test_a_granted_call_returns_the_cages_result(instance: _Instance) -> None:
@@ -441,7 +442,11 @@ def test_a_reload_swaps_in_a_changed_config(
 
     assert cli.main(["reload"]) == 0
     assert "reloaded" in capsys.readouterr().out.splitlines()
-    assert _list(instance.url, instance.narrow_token) == ["test_count", "test_echo"]
+    assert _list(instance.url, instance.narrow_token) == [
+        SELF_CHECK_TOOL,
+        "test_count",
+        "test_echo",
+    ]
 
 
 def test_a_reload_that_hits_a_docker_error_keeps_the_config_in_force(

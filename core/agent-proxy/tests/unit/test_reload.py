@@ -12,6 +12,7 @@ import yaml
 from egress_fakes import RecordingEgress
 
 from agent_proxy.config import ConfigError, Grant, load_config
+from agent_proxy.credentials import unset_message
 from agent_proxy.egress import EgressError
 from agent_proxy.plugins import (
     CommandAction,
@@ -119,7 +120,7 @@ def test_build_snapshot_holds_the_config_and_each_plugin_manifest(
 
     snapshot = build_snapshot(path, CREDENTIAL_NAMES, LOAD_BOTH)
 
-    assert snapshot.config == load_config(path, CREDENTIAL_NAMES)
+    assert snapshot.config == load_config(path)
     assert dict(snapshot.manifests) == {"git": GIT_MANIFEST, "fs": FS_MANIFEST}
     assert snapshot.warnings == ()
 
@@ -223,7 +224,7 @@ def test_a_load_config_error_propagates_with_no_plugin_loaded(tmp_path: Path) ->
         tmp_path, _config({"git.clone": _grant()}) | {"agent_tree": "relative"}
     )
     with pytest.raises(ConfigError) as expected:
-        load_config(path, CREDENTIAL_NAMES)
+        load_config(path)
     references: list[str] = []
 
     def load_manifest(reference: str) -> Manifest:
@@ -248,6 +249,28 @@ def test_a_manifest_with_passthrough_args_yields_its_warning(tmp_path: Path) -> 
     snapshot = build_snapshot(path, CREDENTIAL_NAMES, load_manifest)
 
     assert snapshot.warnings == ("plugins.git.actions.run: declares pass-through args",)
+
+
+def test_an_unstored_credential_warns_after_the_manifest_warnings(
+    tmp_path: Path,
+) -> None:
+    """A grant's unstored credential is a warning, after each manifest warning."""
+    grant = _grant() | {"credentials": {"npm-token": {"env": "NPM_TOKEN"}}}
+    path = _write(tmp_path, _config({"git.clone": grant}))
+    git_manifest = Manifest(
+        actions={
+            "clone": _action("clone"),
+            "run": _action("run", passthrough_args=True),
+        }
+    )
+    load_manifest = _loader({GIT_IMAGE: git_manifest, FS_IMAGE: FS_MANIFEST})
+
+    snapshot = build_snapshot(path, CREDENTIAL_NAMES, load_manifest)
+
+    assert snapshot.warnings == (
+        "plugins.git.actions.run: declares pass-through args",
+        unset_message("npm-token"),
+    )
 
 
 def test_current_is_the_snapshot_live_config_was_given(tmp_path: Path) -> None:
