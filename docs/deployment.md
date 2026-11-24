@@ -47,12 +47,13 @@ instance, or another agent could reach too far.
   every container on it. The agent cannot reach that daemon's socket, so it cannot start a container
   that skips its grants, and the daemon maps container root to the service user. With the host's
   root daemon in its place, a compromised instance or cage holds root on the host.
-- **The ACLs on the agent's tree.** The agent's home stays mode `700`. The service user gains
-  traverse on the home and an ACL entry on the tree, the agent gains a default entry, and setgid
-  groups each new file to the agent. So the instance reads and writes the tree, the agent can read
-  and write each file a cage creates, and another agent reaches neither. Without them, a cage cannot
-  open its roots, or the agent cannot write a file that a cage rewrote, such as a repository's
-  `.git/index`; and a mode or group wide enough to fix that opens the tree to other users.
+- **The ACLs on the agent's tree.** Only the agent and the service user may traverse the agent's
+  home, and provisioning warns when anyone else can. The service user gains traverse on the home and
+  an ACL entry on the tree, the agent gains a default entry, and setgid groups each new file to the
+  agent. So the instance reads and writes the tree, the agent can read and write each file a cage
+  creates, and another agent reaches neither. Without them, a cage cannot open its roots, or the
+  agent cannot write a file that a cage rewrote, such as a repository's `.git/index`; and a mode or
+  group wide enough to fix that opens the tree to other users.
 
 [The isolation model](architecture.md#the-isolation-model) gives how each part works.
 
@@ -177,13 +178,35 @@ These phrases stand for the way the script reaches the service user and the agen
     already has the group, setgid, and default ACL entries from the setgid directory it is made in.
     Fix any other skipped entry by hand, as its owner.
 12. `grant_home_traverse` gives the service user traverse on the agent's home with
-    `setfacl -m u:agentproxy-agent-01:x <home>`. After it, `ls -l` shows the home as `drwx--x---+`,
-    because the group bits show the ACL mask. The home's group still has no access:
-    `getfacl -p <home>` shows `group::---`.
-13. `grant_tree_traverse` gives the service user traverse, as the agent, on each directory strictly
+    `setfacl -m u:agentproxy-agent-01:x <home>`. On a home of mode `700`, `ls -l` then shows the
+    home as `drwx--x---+`, because the group bits show the ACL mask. The home's group still has no
+    access: `getfacl -p <home>` shows `group::---`.
+13. `warn_open_home` reads the home's ACL with `getfacl -pc <home>`, and warns about each entry that
+    lets anyone but the agent and the service user traverse the home, as
+    [The agent's tree](architecture.md#the-agents-tree) gives. It changes nothing on the host. Each
+    warning is one line on stderr, which names the entry and the command that closes it:
+
+    ```text
+    provision-instance.sh: warning: <who> can traverse <home>; only agent-01 and agentproxy-agent-01 may; close it with '<command>'
+    ```
+
+    The entries, each with its `<who>` and its `<command>`:
+    - `other`: `any other user`, closed with `chmod o-x <home>`.
+    - A named user: `user <name>`, closed with `setfacl -x u:<name> <home>`.
+    - A named group: `group <name>`, closed with `setfacl -x g:<name> <home>`.
+    - The owning group, when it has a member other than the agent: `owning group <group>`, closed
+      with `setfacl -m g::<permissions> <home>`, where `<permissions>` is the group's entry with `x`
+      cleared, such as `r--`. On a home with an ACL, `chmod g-x` would clear `x` from the mask
+      instead, and take the service user's traverse with it.
+
+    With no warning, the step prints
+    `checked that only agent-01 and agentproxy-agent-01 can traverse <home>`. Either way the script
+    goes on to the next step. Close each entry by hand, then run the script again to see the check
+    pass.
+14. `grant_tree_traverse` gives the service user traverse, as the agent, on each directory strictly
     between the home and the tree, with `setfacl -m u:agentproxy-agent-01:x <directory>`. Its line
     gives the number of directories. With the tree `<home>/Projects`, there are none.
-14. `start_instance` starts the instance container, named `agent-proxy`, on the service user's
+15. `start_instance` starts the instance container, named `agent-proxy`, on the service user's
     daemon, with `DOCKER_HOST` set as above:
 
     ```sh
@@ -193,18 +216,20 @@ These phrases stand for the way the script reaches the service user and the agen
     To put a changed port or a new image in force, remove the container first with
     `docker rm --force agent-proxy`; [The instance](architecture.md#the-instance) gives why.
     Removing the container ends any call that runs at that moment, so do it when no call runs. Such
-    a call's cage stays behind, and [Known limits](architecture.md#known-limits) gives how to find
-    and remove it before the next start. The port this step prints is the port that the operator
-    gave, not always the one bound; `docker port agent-proxy` shows the bound one.
-15. `print_next_steps` prints the commands that mint a token and store a credential, and the path of
+    a call's cage stays behind until the next start removes it, as
+    [Known limits](architecture.md#known-limits) gives. The port this step prints is the port that
+    the operator gave, not always the one bound; `docker port agent-proxy` shows the bound one.
+16. `print_next_steps` prints the commands that mint a token and store a credential, and the path of
     this guide.
 
 ## The first start
 
 Provision with the full config. The instance starts even though its credential store is still empty.
 It logs one warning for each credential that a grant names and the store lacks, and each warning
-gives the command that the operator stores the credential with. `docker logs agent-proxy` shows the
-warnings. Then:
+gives the command that the operator stores the credential with. It also warns when the service
+user's daemon cannot enforce a cage's memory or process limit, as
+[Failures and warnings](reference.md#failures-and-warnings) gives. `docker logs agent-proxy` shows
+the warnings. Then:
 
 1. Store each credential the config names. The command reads the value from stdin:
 
@@ -320,9 +345,9 @@ credentials, and the audit log stay.
 3. Remove the instance container with `docker rm --force agent-proxy`, because a new image takes
    effect only in a new container, as [The instance](architecture.md#the-instance) gives. Removing
    the container ends any call that runs at that moment, so upgrade when no call runs. Such a call's
-   cage stays behind, and [Known limits](architecture.md#known-limits) gives how to find and remove
-   it before the next start. The state directory is a host path, so removing the container leaves it
-   in place.
+   cage stays behind until the new container's start removes it, as
+   [Known limits](architecture.md#known-limits) gives. The state directory is a host path, so
+   removing the container leaves it in place.
 4. Provision again with `--release <new version>`, the same `--tree`, the same port, and the updated
    config. Provisioning pulls the new instance image, tags it `agent-proxy:1`, installs the config,
    and starts a new container, which pulls its verifier and the new plugin images.

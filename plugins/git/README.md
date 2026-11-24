@@ -66,8 +66,9 @@ gives the reason. The wrapper refuses as its own exit; a script refuses through 
   holds an entry that is neither `owner/name` nor `owner/*`.
 - `GIT_SIGNING_KEY` is set, but is not an absolute path or names no readable regular file.
 - The credential helper is asked for a repository that `GITHUB_REPOS` does not name.
-- The credential helper gets a request whose path does not name `owner/name`, or runs while
-  `GH_TOKEN` is unset or empty.
+- The credential helper gets a request for a protocol other than `https` or a host other than
+  `github.com`, or whose path does not name `owner/name`, or runs while `GH_TOKEN` is unset or
+  empty.
 - `diff`'s `output` does not resolve strictly beneath the repository's `.agent-proxy` directory.
 - `worktree` with `add` names a `path` inside the repository it comes from.
 - `commit` runs while `GIT_AUTHOR_NAME` or `GIT_AUTHOR_EMAIL` is unset or empty, or finds nothing
@@ -182,13 +183,23 @@ plugin's own helper, `/plugin/bin/git-credential-agent-proxy`, and sets
 the repository's config names, because git builds the URL it connects to after `pushurl` rewrites
 it. So a rewritten remote cannot carry the token to a repository the list does not name.
 
-On git's `get`, the helper reads the path's first two segments as `owner/name`, with one trailing
-`.git` dropped from the name, and checks that repository against `GITHUB_REPOS`, as
+On git's `get`, the helper first checks the request's protocol and host. It answers only a request
+that holds `protocol=https` and `host=github.com`. It compares each exactly, so `GitHub.com` and
+`github.com:443` are other hosts. A remote can name any host that the grant's `domains` name, over
+`http` as well as `https`, so this check keeps the token to GitHub, over TLS. No setting names
+another host. git LFS asks the helper for the batch API on `github.com`, and each object transfer
+then carries the signed URL and the headers that the batch answer gave it, so LFS needs no other
+host's credential.
+
+The helper then reads the path's first two segments as `owner/name`, with one trailing `.git`
+dropped from the name, and checks that repository against `GITHUB_REPOS`, as
 [The repository list](#the-repository-list) gives. When the list names it, the helper answers with
 `x-access-token` and the value of `GH_TOKEN`. Otherwise the helper refuses: it writes the reason to
 stderr and answers `quit=1`, so git stops and fails. The helper refuses the same way when `GH_TOKEN`
-is unset or empty, or when the path does not name `owner/name`:
+is unset or empty, or when the request or its path fails a check:
 
+- The request has no `protocol` or `host` line, or names a protocol other than `https` or a host
+  other than `github.com`. The reason names the protocol and the host.
 - The request has no path, or a path of fewer than two segments.
 - A segment anywhere in the path is `.` or `..`.
 - The first segment is not an owner, or the second, its `.git` dropped, is not a name, by the
@@ -198,8 +209,7 @@ git decodes percent escapes in the path it hands the helper, but sends the reque
 `%2F..` in a URL therefore reaches the helper as a `..` segment that the request never resolves, so
 the helper refuses every `.` and `..` segment.
 
-The helper answers `store` and `erase` with nothing. It reads the path and never the host, because
-the grant's `domains` bound the host.
+The helper answers `store` and `erase` with nothing.
 
 GitHub serves a public repository without a credential, so git fetches an unlisted public repository
 without asking the helper. The list bounds where the token goes. Every push to GitHub asks the
@@ -514,8 +524,11 @@ Under a root of mode `ro`, the action fails with a read-only file system error.
 - `tests/integration/` builds the plugin image and the core's verifier image, and runs each action
   in a real cage through the core's `CageRunner`. `conftest.py` there builds the fixture
   repositories, one of them owned by uid 1000 from the image in `tests/fixture-image/`, and serves
-  the remotes that cages reach over `git://` from a git daemon in that image. `auth_server.py` there
-  serves the credential helper's tests.
+  the remotes that cages reach over `git://` from a git daemon in that image. That image also holds
+  `openssl`, which makes a self-signed certificate for the names `github.com` and `auth`.
+  `auth_server.py` there serves the credential helper's tests. It serves TLS on port 443 with that
+  certificate, on the tests' network under both names. A cage trusts the certificate through
+  `GIT_SSL_CAINFO` in its grant's `env`, which git and git LFS both read.
 
 ## Build and test
 
