@@ -29,7 +29,7 @@ as for `pr_list`, `run_view`, and `run_list`. [The repository list](#the-reposit
   reads it as an option.
 
 A value that a script places alone in argv cannot begin with `-` either: `pr_view`'s `pr` must not,
-and each number is an integer from 1 up.
+as [The `pr` input](#the-pr-input) gives, and each number is an integer from 1 up.
 
 No action takes pass-through `args`. Its items would be exempt from the core's refusal of a value
 that begins with `-`.
@@ -49,6 +49,20 @@ builds each `gh api` path from `repo`, so the path stays under `repos/<owner>/<n
 `pr_create` takes a required `head`, the branch the pull request comes from. gh cannot read that
 branch from a checkout, because it runs outside any checkout: neither the core nor the image sets a
 working directory.
+
+### The `pr` input
+
+`pr_view` takes `pr` in the forms gh takes for a pull request in the `--repo` repository: a number,
+`#12`, a branch name, or `owner:branch`. gh reads another repository from `pr` only when `pr` parses
+as a URL whose scheme is `http` or `https`, and such a URL could name a repository that
+`GITHUB_REPOS` does not list. So the input schema refuses each of these:
+
+- an empty `pr`;
+- a `pr` that begins with `-`;
+- a `pr` that begins with `http:` or `https:`, in any letter case;
+- a `pr` that holds `://` anywhere.
+
+[Layout](#layout) gives the test that pins this on the pinned gh.
 
 ### The repository list
 
@@ -145,7 +159,8 @@ refuses as its own exit. The plugin refuses these:
 
 - A `pr_fetch` call exits 0 but prints what is not JSON. The reason names the call's path.
 - The image's executable runs under a name that is neither `gh-cage` nor a script action's.
-- `job_log_url` runs, or `pr_checks` finds a failed job, while `GH_TOKEN` is unset or empty.
+- `job_log_url` runs, or `pr_checks` finds a failed job, while `GH_TOKEN` is unset or empty, or
+  holds a character that is not visible ASCII, as [`GH_TOKEN`](#gh_token) gives.
 - `GITHUB_REPOS` is unset, names no entry, or holds an entry that is neither `owner/name` nor
   `owner/*`.
 - `repo` names a repository that `GITHUB_REPOS` does not list.
@@ -157,7 +172,8 @@ The core refuses a call before a cage starts when the input fails the action's i
 calls fail it:
 
 - `repo` is not in the form [The `repo` input](#the-repo-input) gives.
-- `pr_view`'s `pr` begins with `-`, or a number is below 1.
+- `pr_view`'s `pr` is in a form that [The `pr` input](#the-pr-input) refuses, or a number is below
+  1.
 - `pr_edit` has none of `title`, `body`, `base`, and `attach`.
 - `pr_create` has an empty `base`, `head`, or `title`, or `pr_list` has an empty `head`.
 - `attach` is not in the form [The `attach` input](#the-attach-input) gives: it is empty or holds
@@ -335,6 +351,12 @@ themselves. Each action declares `{"env": "GH_TOKEN"}` in its `credentials` in `
 core does not compare a grant's credentials with that declaration. Give each grant a credential as
 `GH_TOKEN`.
 
+`pr_checks` and `job_log_url` read `GH_TOKEN` through one function in `scripts.py`, which strips the
+whitespace around the value. They refuse a value that is then empty, or that holds a character
+outside visible ASCII, and the refusal never quotes the value. A line break inside a request header
+makes Python's HTTP client raise an error that quotes the whole header, token included, so a token
+that held one would reach the agent in the result.
+
 ### `XDG_CACHE_HOME`
 
 The image sets `XDG_CACHE_HOME=/tmp/cache`, on the cage's tmpfs. `gh run view --log-failed` writes
@@ -432,24 +454,26 @@ The `pr_create` grant allows `attach`: its root holds the files to upload, and i
   internal network under both names, with a certificate for both. It answers a known job's log
   request with a redirect to a host the network cannot resolve, so a client that follows the
   redirect fails. It also answers gh's pull-request lookup, project-items query, and update, and
-  each upload, which it refuses for a file named `upload-fails.png`. It logs each upload, each
-  upload's bytes, and each update's body as JSON lines, which a test reads back. It holds its answer
-  to a lookup of pull request 2 until the test releases it. `test_actions.py` runs every action in
-  an image whose gh is the stub, in place of the real one, built from `tests/stub/Dockerfile`. Its
-  `pr_checks` test joins the fake's network and gets the fake's log URLs. `test_actions.py` also
-  shows `attach` refused in a real cage, with the setting `off` and with a path outside the roots.
+  each upload, which it refuses for a file named `upload-fails.png`. It logs each request, with its
+  method, its path, and a GraphQL request's variables, and each upload, each upload's bytes, and
+  each update's body, as JSON lines, which a test reads back. It holds its answer to a lookup of
+  pull request 2 until the test releases it. `test_actions.py` runs every action in an image whose
+  gh is the stub, in place of the real one, built from `tests/stub/Dockerfile`. Its `pr_checks` test
+  joins the fake's network and gets the fake's log URLs. `test_actions.py` also shows `attach`
+  refused in a real cage, with the setting `off` and with a path outside the roots.
   `test_pinned_gh.py` runs the plugin image against the fake, and checks claims this plugin rests
   on. `pr_create` with `head` and no checkout gets past the steps that need the current branch and
   git, and fails at the fake's answer to its next request. `run_view` with `log_failed` writes its
   log cache under the image's `XDG_CACHE_HOME` while the root filesystem is read-only. `job_log_url`
   returns the fake's `Location` without following it, and the fake's 404 for a job the fake does not
-  know. `pr_edit` gets past gh's pull-request lookup, which does not ask for the classic-Projects
-  field GitHub refuses, and applies the edit. `pr_edit` with `attach` uploads each file to
-  `uploads.github.com` with the token, and rewrites the body's references in place, and a body that
-  nests images in a numbered list inside a `<details>` block keeps its structure and indents. When
-  an upload fails, gh uploads no later file, still applies the edit, and the result holds `pr_url`
-  and `pr_number`. A file swapped for a symlink to `/proc/self/environ` during gh's lookup still
-  uploads the bytes the script checked.
+  know. `pr_view` with a `pr` that the schema takes, such as a URL with no scheme or a scheme after
+  a leading space, names no repository but the `--repo` one in any request. `pr_edit` gets past gh's
+  pull-request lookup, which does not ask for the classic-Projects field GitHub refuses, and applies
+  the edit. `pr_edit` with `attach` uploads each file to `uploads.github.com` with the token, and
+  rewrites the body's references in place, and a body that nests images in a numbered list inside a
+  `<details>` block keeps its structure and indents. When an upload fails, gh uploads no later file,
+  still applies the edit, and the result holds `pr_url` and `pr_number`. A file swapped for a
+  symlink to `/proc/self/environ` during gh's lookup still uploads the bytes the script checked.
 
 ## Build and test
 

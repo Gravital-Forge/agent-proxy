@@ -13,9 +13,9 @@ refused, and so is a merge key (`<<`), because an explicit key overrides a merge
 trace. The top level is a mapping, and every mapping the format defines refuses a field it does not
 name.
 
-No field has a default except a grant's `timeout` and `env`. There are no scope-level defaults and
-no layering between files. Each grant states its own fields, so a grant reads correctly on its own,
-and repetition across grants and across instances is accepted.
+No field has a default except a grant's `timeout`, `memory`, and `env`. There are no scope-level
+defaults and no layering between files. Each grant states its own fields, so a grant reads correctly
+on its own, and repetition across grants and across instances is accepted.
 
 ### Top-level fields
 
@@ -58,6 +58,10 @@ A grant has these fields:
   its grant's credentials.
 - `timeout` is optional. It overrides the action's default timeout. It is a duration: a positive
   count with no leading zero, then a unit of `s`, `m`, `h`, or `d`, such as `120s`.
+- `memory` is optional. It sets the memory limit of every cage under the grant, which is 4 GiB
+  without it. It is a string: a positive count with no leading zero, then `m` for MiB or `g` for
+  GiB, such as `8g`. It is at least `64m`, the size of the cage's `/tmp`, whose pages count against
+  the limit. [The cage](architecture.md#the-cage) gives the cage's limits.
 - `env` is optional, and defaults to an empty map. It maps each name to a string that every cage
   under the grant receives as an environment variable. A name begins with an upper-case letter or
   `_`, and holds only upper-case letters, digits, and `_`. It is neither `HTTPS_PROXY`,
@@ -103,6 +107,16 @@ effect, and `token mint` mints.
   `reload`, and at `token mint`. Its text is the text of the refusal that a call under that grant
   gets, as [Refusals](#refusals) gives. So the operator can start the instance and mint tokens
   before storing the credentials.
+
+The start also gives warnings of its own, which `serve` prints with the config's. None of them stops
+the start:
+
+- `the Docker daemon cannot enforce a cage's memory limit, so each cage runs without one`, when the
+  daemon's info does not report that it enforces a memory limit.
+- `the Docker daemon cannot enforce a cage's process limit, so each cage runs without one`, when the
+  daemon's info does not report that it enforces a process limit.
+- One warning for each cage that a killed instance left and the start cannot remove. It names the
+  container. [The instance](architecture.md#the-instance) gives the removal.
 
 ## The operator command
 
@@ -278,5 +292,14 @@ The proxy refuses a call when:
 - the cage fails after it starts;
 - an overflow file cannot be created or written;
 - the audit log cannot record the call, and the result is withheld.
+
+When the audit log cannot record a call whose cage started, the refusal also says that the action
+ran, because the action may have changed something before the cage ended:
+
+```text
+agent-proxy refused: the action ran and may have taken effect, but the audit log could not record call <call-id>, so its result is withheld; check what it changed before a retry
+```
+
+[Audit](architecture.md#audit) gives which calls get this refusal.
 
 The detail of any other error is masked.

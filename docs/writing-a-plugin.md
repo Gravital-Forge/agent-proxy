@@ -36,6 +36,12 @@ The manifest is a JSON object. No key repeats in one object, and every number is
 object that the manifest format defines refuses a member it does not name. `input_schema` and
 `output_schema` are JSON Schemas, so they take any member that JSON Schema allows.
 
+Each schema holds every schema it refers to, because the proxy fetches nothing. Each `$ref` and
+`$dynamicRef` in `input_schema` or `output_schema` must resolve inside that same schema, such as
+`#/$defs/item`. The parser refuses a reference to anything else, a remote URL and the meta-schema's
+URL included. A reference must also not point at an object or an array inside the value of `const`,
+`enum`, `default`, or `examples`, because the parser does not check the references there.
+
 The parser refuses what it cannot check. The manifest and each schema it embeds must nest shallowly
 enough for Python's recursion limit, and each integer must stay within Python's digit limit for
 converting text to an integer.
@@ -142,6 +148,16 @@ Inside the cage:
   JSON array of strings, `[]` for a grant with no roots. The config reserves that name, as
   [A scope's grants](reference.md#a-scopes-grants) gives.
 - The environment also holds each variable that the grant's `env` sets.
+- The action cannot set the setuid or setgid bit, as
+  [The seccomp profile](architecture.md#the-seccomp-profile) gives. A `chmod`, a `mknod`, or a file
+  create whose mode holds either bit fails with `EPERM`. That holds on a directory too, and every
+  directory of the agent's tree is setgid. So a `chmod` that keeps a directory's setgid bit fails,
+  such as GNU `chmod 755 <dir>`, which keeps the bit, or a copy that keeps each mode. A directory
+  the action creates still takes setgid from its parent, with no `chmod`. `openat2` fails with
+  `ENOSYS`, so an action that calls it must fall back to `openat`.
+- The action runs under a process limit of 1024 and a memory limit of 4 GiB, or the grant's
+  `memory`, with no swap. Files under `/tmp` count against the memory limit.
+  [The cage](architecture.md#the-cage) gives the limits.
 
 A script's stdout must decode as the manifest must, by the rules under
 [The manifest](#the-manifest). The reference gives when a script succeeds and what its call returns

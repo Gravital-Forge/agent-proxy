@@ -13,9 +13,10 @@ You need these tools on the host:
 - shellcheck, which the core package's lint runs on the scripts in `core/docker/`.
 - Docker with a rootless daemon, for the integration tests.
 
-The verifier's Go code is format-checked, vetted, tested, and built inside its Dockerfile, so you
-need no Go toolchain to check it. Each plugin's README gives, under "Build and test", what that
-plugin's unit tests need on the host.
+The verifier's Go code is format-checked, vetted, tested, and built inside its Dockerfile, and the
+test plugin's setid probe is format-checked, vetted, and built inside the test plugin's Dockerfile.
+So you need no Go toolchain to check either. Each plugin's README gives, under "Build and test",
+what that plugin's unit tests need on the host.
 
 ## The packages
 
@@ -83,6 +84,13 @@ The prune needs `--all`, because without it a tagged image survives.
 - `core/agent-proxy/tests/test-plugin/` holds the source of the test plugin, and
   `core/agent-proxy/tests/egress-probe/` holds the source of the egress probe: the pinned Alpine
   base with curl added.
+- `core/agent-proxy/tests/test-plugin/setid-probe/` holds the setid probe, a Go program on the
+  standard library alone, which a build stage of the test plugin's Dockerfile builds. The test
+  plugin runs it as its `setid_probe` action. In the directory it is given, it tries each route to a
+  file that holds the setuid or the setgid bit, then the controls that must still work there, and
+  prints one line for each attempt: the route, the mode, and `ok` or the errno's name.
+  `test_a_cage_cannot_make_a_setid_file_in_a_rw_root` in `test_runner.py` runs it, as
+  [The seccomp profile](docs/architecture.md#the-seccomp-profile) gives.
 - Each plugin package holds its own unit and integration tests, which its README describes.
 
 ## Writing tests
@@ -114,6 +122,15 @@ each package's `uv.lock`.
 Every other pin is updated by hand. That is a version or digest written in Python source or a test;
 in a workflow's `run` script, step input, or service container; in a Dockerfile `RUN` line or `ARG`;
 or in a language version file, such as `.python-version` or the `go` line of `go.mod`.
+
+The seccomp profile in `core/agent-proxy/agent_proxy/seccomp/default.json` is a pin updated by hand
+too. It is Docker's default profile, byte for byte: `github.com/moby/profiles/seccomp` v0.2.4, the
+version that Docker 29.9.2 builds in. moby's source vendors it as
+`vendor/github.com/moby/profiles/seccomp/default.json` at the tag `docker-v<version>`. Never edit
+the file. To update it, copy the file at a new daemon version's tag, and change the SHA-256 that
+`test_the_vendored_profile_is_docker_s_default_byte_for_byte` in
+`core/agent-proxy/tests/unit/test_cage_seccomp.py` checks, and the version in
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
 
 ## Repository layout
 
