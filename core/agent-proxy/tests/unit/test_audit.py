@@ -1,3 +1,4 @@
+import dataclasses
 import errno
 import json
 import os
@@ -10,8 +11,11 @@ import pytest
 from audit_faults import fail_next_write_after_half
 
 from agent_proxy.audit import (
+    ACTION_CAP_CHARACTERS,
+    ARGUMENTS_CAP_CHARACTERS,
     AUDIT_BACKUP_COUNT,
     AUDIT_MAX_BYTES,
+    REFUSAL_CAP_CHARACTERS,
     AuditError,
     AuditRecord,
     AuditWriter,
@@ -25,6 +29,7 @@ FIELD_NAMES = [
     "scope",
     "action",
     "arguments",
+    "arguments_cut",
     "exit_code",
     "duration_ms",
     "stdout_bytes",
@@ -79,7 +84,7 @@ def _call_ids(lines: list[str]) -> list[str]:
     return [json.loads(line)["call_id"] for line in lines]
 
 
-def test_each_line_is_json_with_exactly_the_twelve_keys(directory: Path) -> None:
+def test_each_line_is_json_with_exactly_the_thirteen_keys(directory: Path) -> None:
     """Every line parses as one JSON object keyed by the record's fields, in order."""
     _write(directory, [_record("call-0001"), _record("call-0002")])
 
@@ -101,6 +106,7 @@ def test_a_line_holds_the_record_values(directory: Path) -> None:
         "scope": "ci",
         "action": "git_status",
         "arguments": {"repo": "agent-proxy"},
+        "arguments_cut": None,
         "exit_code": 0,
         "duration_ms": 42,
         "stdout_bytes": 128,
@@ -108,6 +114,108 @@ def test_a_line_holds_the_record_values(directory: Path) -> None:
         "truncated": False,
         "refusal": None,
     }
+
+
+def _line_of(directory: Path, record: AuditRecord) -> dict[str, object]:
+    _write(directory, [record])
+    [line] = _log_lines(directory)
+    return json.loads(line)
+
+
+def _arguments_of_json_length(length: int) -> dict[str, object]:
+    """Return arguments whose compact JSON holds exactly length characters."""
+    overhead = len(json.dumps({"text": ""}, separators=(",", ":")))
+    return {"text": "a" * (length - overhead)}
+
+
+def test_arguments_at_the_cap_are_kept_whole(directory: Path) -> None:
+    """Arguments whose compact JSON holds exactly the cap stay an object, not cut."""
+    arguments = _arguments_of_json_length(ARGUMENTS_CAP_CHARACTERS)
+
+    line = _line_of(directory, dataclasses.replace(_record(), arguments=arguments))
+
+    assert line["arguments"] == arguments
+    assert line["arguments_cut"] is None
+
+
+def test_arguments_past_the_cap_are_cut_to_their_head_and_size(
+    directory: Path,
+) -> None:
+    """One character past the cap: no object, the JSON's head and its full size."""
+    arguments = _arguments_of_json_length(ARGUMENTS_CAP_CHARACTERS + 1)
+    text = json.dumps(arguments, separators=(",", ":"))
+
+    line = _line_of(directory, dataclasses.replace(_record(), arguments=arguments))
+
+    assert line["arguments"] is None
+    assert line["arguments_cut"] == {
+        "bytes": ARGUMENTS_CAP_CHARACTERS + 1,
+        "head": text[:ARGUMENTS_CAP_CHARACTERS],
+    }
+
+
+def test_cut_arguments_count_the_bytes_of_the_whole_json(directory: Path) -> None:
+    """The size counts the whole compact JSON, escapes included, not just its head."""
+    arguments = {"text": "é" * 20_000, "more": list(range(1000))}
+    text = json.dumps(arguments, separators=(",", ":"))
+
+    line = _line_of(directory, dataclasses.replace(_record(), arguments=arguments))
+
+    assert line["arguments_cut"] == {
+        "bytes": len(text.encode()),
+        "head": text[:ARGUMENTS_CAP_CHARACTERS],
+    }
+
+
+def test_no_arguments_leave_both_argument_fields_null(directory: Path) -> None:
+    """A record with no arguments has neither an object nor a cut."""
+    line = _line_of(directory, dataclasses.replace(_record(), arguments=None))
+
+    assert line["arguments"] is None
+    assert line["arguments_cut"] is None
+
+
+def test_an_action_at_its_cap_is_kept_whole(directory: Path) -> None:
+    """An action of exactly the cap carries no marker."""
+    action = "a" * ACTION_CAP_CHARACTERS
+
+    line = _line_of(directory, dataclasses.replace(_record(), action=action))
+
+    assert line["action"] == action
+
+
+def test_an_action_past_its_cap_is_cut_with_a_marker(directory: Path) -> None:
+    """A longer action keeps its first characters, then " [cut]"."""
+    action = "b" * (ACTION_CAP_CHARACTERS + 1)
+
+    line = _line_of(directory, dataclasses.replace(_record(), action=action))
+
+    assert line["action"] == "b" * ACTION_CAP_CHARACTERS + " [cut]"
+
+
+def test_a_refusal_at_its_cap_is_kept_whole(directory: Path) -> None:
+    """A refusal of exactly the cap carries no marker."""
+    refusal = "r" * REFUSAL_CAP_CHARACTERS
+
+    line = _line_of(directory, dataclasses.replace(_record(), refusal=refusal))
+
+    assert line["refusal"] == refusal
+
+
+def test_a_refusal_past_its_cap_is_cut_with_a_marker(directory: Path) -> None:
+    """A longer refusal keeps its first characters, then " [cut]"."""
+    refusal = "s" * (REFUSAL_CAP_CHARACTERS + 1)
+
+    line = _line_of(directory, dataclasses.replace(_record(), refusal=refusal))
+
+    assert line["refusal"] == "s" * REFUSAL_CAP_CHARACTERS + " [cut]"
+
+
+def test_the_caps_are_fixed() -> None:
+    """The caps are the figures the operator approved."""
+    assert ARGUMENTS_CAP_CHARACTERS == 16_384
+    assert ACTION_CAP_CHARACTERS == 256
+    assert REFUSAL_CAP_CHARACTERS == 4_096
 
 
 def test_a_line_is_compact_json(directory: Path) -> None:
