@@ -111,9 +111,11 @@ inside the instance's process (`core/agent-proxy/agent_proxy/runner.py`).
 - **Timeout:** the grant's `timeout`, or else the action's. It runs from the cage's start and covers
   a script's input and the wait for the exit. On timeout the cage is killed.
 
-The instance removes each cage by force whatever happens, and the cage holds its place under the cap
-until it is removed. Files the agent owns belong to a uid that the cage's user namespace does not
-map, so the cage writes them through the ACL but cannot change their mode or owner.
+The instance removes each cage by force whatever the call's outcome, and the cage holds its place
+under the cap until it is removed. A forced removal of the instance container while calls run leaves
+their cages, as [Known limits](#known-limits) gives. Files the agent owns belong to a uid that the
+cage's user namespace does not map, so the cage writes them through the ACL but cannot change their
+mode or owner.
 
 Before it creates a cage, the instance opens each root's directory one path component at a time from
 `/`, and follows no symbolic link anywhere in the path. A root that is a symbolic link, is not a
@@ -456,13 +458,14 @@ tree it is given.
 - When the operator removes the instance container by force while calls run, the instance never
   removes those calls' cages. Each cage runs until its command ends, with no timeout, because the
   instance holds the timeout. It then stays on the service user's daemon as a stopped container. Its
-  config still holds the value of every credential that its grant passes as an environment variable,
-  and `docker inspect` shows it. A file credential leaves only its mount. The next start removes
-  none of these cages. The operator finds them with the first command below, which matches the mount
-  of [the root verifier](#the-root-verifier) that every cage carries and no other container does.
-  The operator removes them with the second, while the instance container is removed: the filter
-  also matches a running instance's cages, and removing one ends its call. Both commands run on the
-  service user's daemon, as every `docker` command in [the deployment guide](deployment.md) does.
+  container config still holds the value of every credential that its grant passes as an environment
+  variable, and `docker inspect` shows it. A file credential leaves only its mount. The next start
+  removes none of these cages. The operator finds them with the first command below, which matches
+  the mount of [the root verifier](#the-root-verifier) that every cage carries and no other
+  container does. The operator removes them with the second, after the instance container is removed
+  and before the next start: the filter also matches a running instance's cages, and removing one
+  ends its call. Both commands run on the service user's daemon, as every `docker` command in
+  [the deployment guide](deployment.md) does.
 
   ```sh
   docker ps -a --filter volume=/.agent-proxy
