@@ -10,6 +10,7 @@ from datetime import timedelta
 from importlib.resources import files
 from pathlib import PurePosixPath
 from typing import Literal, NoReturn, NotRequired, TypedDict, cast
+from urllib.parse import urljoin
 
 import docker.errors
 import requests
@@ -17,6 +18,8 @@ from docker import DockerClient
 from docker.models.containers import Container
 from jsonschema import Draft202012Validator
 from jsonschema.exceptions import SchemaError
+from referencing.exceptions import Unresolvable
+from referencing.jsonschema import DRAFT202012, EMPTY_REGISTRY, SchemaRegistry
 
 from agent_proxy.config import (
     _CREDENTIALS_DIR,
@@ -51,7 +54,26 @@ WAIT_TIMEOUTS = (
     requests.exceptions.ReadTimeout,
 )
 
-_VALIDATOR = Draft202012Validator(
+_REFERENCE_KEYWORDS = frozenset({"$ref", "$dynamicRef"})
+_VALUE_KEYWORDS = frozenset({"const", "enum", "default", "examples"})
+_NAMED_SCHEMAS_KEYWORDS = frozenset(
+    {"properties", "patternProperties", "$defs", "dependentSchemas"}
+)
+# A JSON pointer step into a list or a scalar fails with the builtin error of
+# that step, not with Unresolvable.
+_LOOKUP_FAILURES = (Unresolvable, LookupError, ValueError, TypeError)
+
+
+def schema_validator(schema: Mapping[str, object]) -> Draft202012Validator:
+    """Return a draft 2020-12 validator that resolves no reference outside schema.
+
+    A reference that does not resolve inside schema raises
+    referencing.exceptions.Unresolvable when validation meets it.
+    """
+    return Draft202012Validator(schema, registry=EMPTY_REGISTRY)
+
+
+_VALIDATOR = schema_validator(
     json.loads(
         files("agent_proxy.schemas")
         .joinpath("manifest.schema.json")
@@ -303,6 +325,80 @@ def _embedded_schema_failures(
     # accepted can still nest deeper than the interpreter's recursion limit.
     except RecursionError as exc:
         yield f"{where}: schema must nest shallowly enough to check: {exc}"
+    else:
+        yield from _unresolved_reference_failures(where, schema)
+
+
+def _unresolved_reference_failures(
+    where: str, schema: Mapping[str, object]
+) -> Iterator[str]:
+    """Yield one message per reference that does not resolve inside schema.
+
+    The walk visits every object and array in document order, and is a loop
+    rather than a recursion because the checker never descends into an
+    unknown keyword's value, which can nest as deep as the decoder allows.
+    """
+    resource = DRAFT202012.create_resource(schema)
+    root_uri = resource.id() or ""
+    registry = EMPTY_REGISTRY.with_resource(root_uri, resource).crawl()
+    pending = [_WalkEntry(where, schema, root_uri, "schema")]
+    while pending:
+        entry = pending.pop()
+        if entry.kind == "reference":
+            reference = cast(str, entry.node)
+            if not _resolves(registry, entry.base_uri, reference):
+                yield (
+                    f"{entry.at}: reference must resolve inside the schema, "
+                    f"got {reference!r}"
+                )
+            continue
+        pending.extend(reversed(list(_walk_children(entry))))
+
+
+@dataclass(frozen=True)
+class _WalkEntry:
+    """One value the reference walk has yet to visit.
+
+    A "named" value is the object of a keyword such as properties, whose keys
+    are names, not keywords; a "reference" value is the string of a $ref or
+    $dynamicRef. base_uri is the URI its references resolve against.
+    """
+
+    at: str
+    node: object
+    base_uri: str
+    kind: Literal["schema", "named", "reference"]
+
+
+def _walk_children(entry: _WalkEntry) -> Iterator[_WalkEntry]:
+    at, node, base_uri = entry.at, entry.node, entry.base_uri
+    if isinstance(node, list):
+        for index, item in enumerate(node):
+            yield _WalkEntry(f"{at}[{index}]", item, base_uri, "schema")
+    elif isinstance(node, dict) and entry.kind == "named":
+        for name, value in node.items():
+            yield _WalkEntry(f"{at}.{name}", value, base_uri, "schema")
+    elif isinstance(node, dict):
+        identifier = node.get("$id")
+        # A $id moves the base URI of the object's references, as it does
+        # when the validator descends into the object.
+        if isinstance(identifier, str):
+            base_uri = urljoin(base_uri, identifier)
+        for key, value in node.items():
+            if key in _REFERENCE_KEYWORDS and isinstance(value, str):
+                yield _WalkEntry(f"{at}.{key}", value, base_uri, "reference")
+            elif key in _NAMED_SCHEMAS_KEYWORDS:
+                yield _WalkEntry(f"{at}.{key}", value, base_uri, "named")
+            elif key not in _VALUE_KEYWORDS:
+                yield _WalkEntry(f"{at}.{key}", value, base_uri, "schema")
+
+
+def _resolves(registry: SchemaRegistry, base_uri: str, reference: str) -> bool:
+    try:
+        registry.resolver(base_uri).lookup(reference)
+    except _LOOKUP_FAILURES:
+        return False
+    return True
 
 
 def _command_failures(where: str, action: _CommandDoc) -> Iterator[str]:
