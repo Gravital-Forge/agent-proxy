@@ -254,6 +254,81 @@ grant_home_traverse() {
     echo "granted $service_user traverse on $agent_home"
 }
 
+can_traverse() {
+    local permissions="$1" mask="${2-}"
+    [[ "$permissions" == *x* && "${mask:-x}" == *x* ]]
+}
+
+group_has_member_besides_agent() {
+    local group_entry gid member
+    local -a members
+    if ! group_entry="$(getent group "$1")"; then
+        return 0
+    fi
+    gid="$(cut -d: -f3 <<<"$group_entry")"
+    IFS=, read -ra members <<<"$(cut -d: -f4 <<<"$group_entry")"
+    for member in "${members[@]}"; do
+        if [[ "$member" != "$agent" ]]; then
+            return 0
+        fi
+    done
+    getent passwd | awk -F: -v gid="$gid" -v agent="$agent" \
+        '$4 == gid && $1 != agent { found = 1 } END { exit !found }'
+}
+
+warn_traverse() {
+    echo "provision-instance.sh: warning: $1 can traverse $agent_home; only $agent and $service_user may; close it with '$2'" >&2
+    home_is_open=true
+}
+
+warn_open_home() {
+    local acl line tag qualifier permissions mask="" owning_group home_is_open=false
+    local -a entries
+    acl="$(getfacl -pc "$agent_home")"
+    mapfile -t entries <<<"$acl"
+    for line in "${entries[@]}"; do
+        IFS=: read -r tag qualifier permissions <<<"${line%%$'\t'*}"
+        if [[ "$tag" == mask ]]; then
+            mask="$permissions"
+        fi
+    done
+    for line in "${entries[@]}"; do
+        if [[ "$line" == default:* ]]; then
+            continue
+        fi
+        IFS=: read -r tag qualifier permissions <<<"${line%%$'\t'*}"
+        case "$tag" in
+            other)
+                if can_traverse "$permissions"; then
+                    warn_traverse "any other user" "chmod o-x $agent_home"
+                fi
+                ;;
+            user)
+                if [[ -n "$qualifier" && "$qualifier" != "$agent" && "$qualifier" != "$service_user" ]] \
+                    && can_traverse "$permissions" "$mask"; then
+                    warn_traverse "user $qualifier" "setfacl -x u:$qualifier $agent_home"
+                fi
+                ;;
+            group)
+                if [[ -n "$qualifier" ]]; then
+                    if can_traverse "$permissions" "$mask"; then
+                        warn_traverse "group $qualifier" "setfacl -x g:$qualifier $agent_home"
+                    fi
+                elif can_traverse "$permissions" "$mask"; then
+                    owning_group="$(stat -c %G "$agent_home")"
+                    if group_has_member_besides_agent "$owning_group"; then
+                        warn_traverse "owning group $owning_group" \
+                            "setfacl -m g::${permissions//x/-} $agent_home"
+                    fi
+                fi
+                ;;
+        esac
+    done
+    if [[ "$home_is_open" == false ]]; then
+        echo "checked that only $agent and $service_user can traverse $agent_home"
+    fi
+}
+
 grant_tree_traverse() {
     local directory
     for directory in "${tree_parents_in_home[@]}"; do
@@ -299,6 +374,7 @@ main() {
     create_overflow_dir
     apply_tree_permissions
     grant_home_traverse
+    warn_open_home
     grant_tree_traverse
     start_instance
     print_next_steps
