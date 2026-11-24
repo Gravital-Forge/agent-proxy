@@ -155,9 +155,8 @@ Inside the cage:
   such as GNU `chmod 755 <dir>`, which keeps the bit, or a copy that keeps each mode. A directory
   the action creates still takes setgid from its parent, with no `chmod`. `openat2` fails with
   `ENOSYS`, so an action that calls it must fall back to `openat`.
-- The action runs under a process limit of 1024 and a memory limit of 4 GiB, or the grant's
-  `memory`, with no swap. Files under `/tmp` count against the memory limit.
-  [The cage](architecture.md#the-cage) gives the limits.
+- The action runs under a process limit and a memory limit, and files under `/tmp` count against the
+  memory limit. [The cage](architecture.md#the-cage) gives the limits.
 
 A script's stdout must decode as the manifest must, by the rules under
 [The manifest](#the-manifest). The reference gives when a script succeeds and what its call returns

@@ -318,11 +318,11 @@ cuts a log that ends in a fragment back to its last whole line.
 
 A call whose audit line cannot be written is refused, and its result is withheld. So every result an
 agent receives has its line. Once a call's cage has started, its action may already have changed
-something, such as a pushed branch or an edited pull request. So when the line of a call whose cage
-started cannot be written, the refusal says that the action ran and may have taken effect, and that
-the caller must check what it changed before a retry. That holds whether the cage exited, timed out,
-or failed, and when its output passed the cap and the overflow file could not be written.
-[Refusals](reference.md#refusals) gives the text.
+something, such as a pushed branch or an edited pull request. So when the line of an action's call
+whose cage started cannot be written, the refusal says that the action ran and may have taken
+effect, and that the caller must check what it changed before a retry. That holds whether the cage
+exited, timed out, or failed, and when its output passed the cap and the overflow file could not be
+written. [Refusals](reference.md#refusals) gives the text.
 
 Each self-check writes one line, with `agent-proxy_self_check` as its action, and with no exit code
 and no output sizes, because no single cage's output is the result. The line of a tool call names

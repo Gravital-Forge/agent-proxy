@@ -293,8 +293,8 @@ The proxy refuses a call when:
 - an overflow file cannot be created or written;
 - the audit log cannot record the call, and the result is withheld.
 
-When the audit log cannot record a call whose cage started, the refusal also says that the action
-ran, because the action may have changed something before the cage ended:
+When the audit log cannot record an action's call whose cage started, the refusal also says that the
+action ran, because the action may have changed something before the cage ended:
 
 ```text
 agent-proxy refused: the action ran and may have taken effect, but the audit log could not record call <call-id>, so its result is withheld; check what it changed before a retry

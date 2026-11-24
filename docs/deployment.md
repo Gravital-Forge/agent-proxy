@@ -47,12 +47,13 @@ instance, or another agent could reach too far.
   every container on it. The agent cannot reach that daemon's socket, so it cannot start a container
   that skips its grants, and the daemon maps container root to the service user. With the host's
   root daemon in its place, a compromised instance or cage holds root on the host.
-- **The ACLs on the agent's tree.** The agent's home stays mode `700`. The service user gains
-  traverse on the home and an ACL entry on the tree, the agent gains a default entry, and setgid
-  groups each new file to the agent. So the instance reads and writes the tree, the agent can read
-  and write each file a cage creates, and another agent reaches neither. Without them, a cage cannot
-  open its roots, or the agent cannot write a file that a cage rewrote, such as a repository's
-  `.git/index`; and a mode or group wide enough to fix that opens the tree to other users.
+- **The ACLs on the agent's tree.** Only the agent and the service user may traverse the agent's
+  home, and provisioning warns when anyone else can. The service user gains traverse on the home and
+  an ACL entry on the tree, the agent gains a default entry, and setgid groups each new file to the
+  agent. So the instance reads and writes the tree, the agent can read and write each file a cage
+  creates, and another agent reaches neither. Without them, a cage cannot open its roots, or the
+  agent cannot write a file that a cage rewrote, such as a repository's `.git/index`; and a mode or
+  group wide enough to fix that opens the tree to other users.
 
 [The isolation model](architecture.md#the-isolation-model) gives how each part works.
 
