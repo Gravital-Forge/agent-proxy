@@ -367,8 +367,8 @@ stage made. The image's process is `agent-proxy serve` on container port 8000. T
 `/etc/agent-proxy/config.yaml`, and `AGENT_PROXY_VERIFIER_IMAGE` to the build argument
 `VERIFIER_IMAGE`, which defaults to `agent-proxy-verifier:1`.
 
-At start the instance opens its stores and its audit log, removes the cages that a killed instance
-left, makes the verifier present, reads which cage limits its daemon enforces, loads the config and
+At start the instance opens its stores and its audit log, makes the verifier present, reads which
+cage limits its daemon enforces, removes the cages that a killed instance left, loads the config and
 starts its egress, then serves the control socket and starts the daily sweep of old overflow files.
 A step that fails stops the start, and the steps before it are undone, except that the egress
 proxies stay for the next start to keep or remove. On SIGINT or SIGTERM the instance stops, and its
@@ -376,13 +376,15 @@ egress proxies stay too.
 
 One instance owns its daemon, so every cage on the daemon at start is one that a killed instance
 left. The start removes by force each container that carries the cage label, running or stopped,
-before the instance serves. A removal that fails gives a warning that names the container, and the
-start goes on. A listing that fails stops the start.
+before the instance serves (`remove_left_cages` in `runner.py`). A removal that fails gives a
+warning that names the container, and the start goes on. A container that is already gone when the
+start removes it counts as removed, and gives no warning. A listing that fails stops the start.
 
 The start reads the daemon's info, and gives a warning for each cage limit that the daemon cannot
 enforce, as [Failures and warnings](reference.md#failures-and-warnings) gives. A daemon that does
 not report a limit counts as one that cannot enforce it. An info call that fails stops the start.
-`serve` prints the start's warnings, as the `serve` verb under [Verbs](reference.md#verbs) gives.
+`serve` prints the start's warnings, as the `serve` verb under [Verbs](reference.md#verbs) gives:
+first the limit warnings, then the removal warnings, then the config's own.
 
 `core/docker/start-instance.sh` holds the run line. It takes the image, the container name, the host
 port, the config directory, the state directory, and the agent tree, and passes any further

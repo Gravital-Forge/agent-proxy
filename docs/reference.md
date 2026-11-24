@@ -115,8 +115,12 @@ the start:
   daemon's info does not report that it enforces a memory limit.
 - `the Docker daemon cannot enforce a cage's process limit, so each cage runs without one`, when the
   daemon's info does not report that it enforces a process limit.
-- One warning for each cage that a killed instance left and the start cannot remove. It names the
-  container. [The instance](architecture.md#the-instance) gives the removal.
+- `the left cage '<name>' could not be removed: <Docker's error>`, for each cage that a killed
+  instance left and the start cannot remove. [The instance](architecture.md#the-instance) gives the
+  removal.
+
+A start that cannot list the left cages stops with the failure
+`the left cages could not be listed: <Docker's error>`.
 
 ## The operator command
 
