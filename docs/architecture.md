@@ -453,7 +453,26 @@ tree it is given.
 - The github plugin's `run_view` with `log_failed` works only under a grant that names each storage
   host, as [Egress](../plugins/github/README.md#egress) in the plugin's README gives.
 - Credentials are not encrypted at rest: each is a plain file protected by the service user's uid.
+- When the operator removes the instance container by force while calls run, the instance never
+  removes those calls' cages. Each cage runs until its command ends, with no timeout, because the
+  instance holds the timeout. It then stays on the service user's daemon as a stopped container. Its
+  config still holds the value of every credential that its grant passes as an environment variable,
+  and `docker inspect` shows it. A file credential leaves only its mount. The next start removes
+  none of these cages. The operator finds them with the first command below, which matches the mount
+  of [the root verifier](#the-root-verifier) that every cage carries and no other container does.
+  The operator removes them with the second, while the instance container is removed: the filter
+  also matches a running instance's cages, and removing one ends its call. Both commands run on the
+  service user's daemon, as every `docker` command in [the deployment guide](deployment.md) does.
+
+  ```sh
+  docker ps -a --filter volume=/.agent-proxy
+  docker ps -aq --filter volume=/.agent-proxy | xargs -r docker rm --force
+  ```
+
 - The egress proxy neither masks credentials nor intercepts TLS. It allows or refuses a host by
   name, so a cage can send its credential to any host its grant names.
 - A call's output returns when the call ends, never as it streams.
 - Each instance has one config file. Configs do not layer, and instances share no config.
+- Teardown takes the agent's tree from its `--tree` option, not from the installed config.
+  [Teardown](deployment.md#teardown) gives what it leaves when the operator gives it a tree other
+  than the one provisioning took.

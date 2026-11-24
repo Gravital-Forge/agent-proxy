@@ -192,9 +192,10 @@ These phrases stand for the way the script reaches the service user and the agen
 
     To put a changed port or a new image in force, remove the container first with
     `docker rm --force agent-proxy`; [The instance](architecture.md#the-instance) gives why.
-    Removing the container ends any call that runs at that moment, so do it when no call runs. The
-    port this step prints is the port that the operator gave, not always the one bound;
-    `docker port agent-proxy` shows the bound one.
+    Removing the container ends any call that runs at that moment, so do it when no call runs. Such
+    a call's cage stays behind, and [Known limits](architecture.md#known-limits) gives how to find
+    and remove it before the next start. The port this step prints is the port that the operator
+    gave, not always the one bound; `docker port agent-proxy` shows the bound one.
 15. `print_next_steps` prints the commands that mint a token and store a credential, and the path of
     this guide.
 
@@ -318,8 +319,10 @@ credentials, and the audit log stay.
 2. In the config, give each plugin the new digest reference from the release notes' `## Images`.
 3. Remove the instance container with `docker rm --force agent-proxy`, because a new image takes
    effect only in a new container, as [The instance](architecture.md#the-instance) gives. Removing
-   the container ends any call that runs at that moment, so upgrade when no call runs. The state
-   directory is a host path, so removing the container leaves it in place.
+   the container ends any call that runs at that moment, so upgrade when no call runs. Such a call's
+   cage stays behind, and [Known limits](architecture.md#known-limits) gives how to find and remove
+   it before the next start. The state directory is a host path, so removing the container leaves it
+   in place.
 4. Provision again with `--release <new version>`, the same `--tree`, the same port, and the updated
    config. Provisioning pulls the new instance image, tags it `agent-proxy:1`, installs the config,
    and starts a new container, which pulls its verifier and the new plugin images.

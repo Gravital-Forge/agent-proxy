@@ -2,7 +2,7 @@
 
 This file holds one entry per release, newest first.
 
-## 0.1.0 (unreleased)
+## 0.1.0
 
 - A per-agent instance: an MCP server that runs each tool call in a cage built from the call's
   grant, as [the architecture](docs/architecture.md) gives. The operator manages its tokens,
