@@ -53,7 +53,14 @@ SETID_ROUTES = (
     "openat2",
 )
 SETID_MODES = ("4755", "2755")
-SETID_CONTROLS = ("create 0755 ok", "chmod 0755 ok", "mkdir 0755 ok", "read - ok")
+SETID_CONTROLS = (
+    "create 0755 ok",
+    "chmod 0755 ok",
+    "mkdir 0755 ok",
+    "read - ok",
+    # A read with either bit in its unread mode passes on its flags alone.
+    "openat-read 4755 ok",
+)
 SETID_BITS = 0o6000
 DEFAULT_MAX_CAGES = 4
 # Probes whether the root filesystem and /tmp take a write, and reads the

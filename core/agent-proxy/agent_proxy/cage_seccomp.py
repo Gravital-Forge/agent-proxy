@@ -53,7 +53,9 @@ def derive_cage_profile(default: Mapping[str, object]) -> dict[str, object]:
     """Return default with the setid bits refused to every call that sets a mode.
 
     Each call that takes a mode leaves every allow rule that has no argument
-    check, and comes back under a rule that checks its mode.
+    check. Each comes back under one rule that checks its mode, and open and
+    openat under a second rule that checks their flags. openat2 comes back
+    refused with ENOSYS.
     """
     rules = cast(list[Rule], default["syscalls"])
     return {

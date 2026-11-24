@@ -90,6 +90,7 @@ func main() {
 	report("mkdir", 0o755, os.Mkdir(filepath.Join(dir, "control-dir"), 0o755))
 	_, err := os.ReadFile(target)
 	fmt.Println("read", "-", outcome(err))
+	report("openat-read", syscall.S_ISUID|0o755, openatRead(target, syscall.S_ISUID|0o755))
 }
 
 func report(route string, mode uint32, err error) {
@@ -207,6 +208,13 @@ func openat(path string, flags int, mode uint32) (uintptr, syscall.Errno) {
 
 func openatCreate(path string, mode uint32) error {
 	fd, errno := openat(path, createFlags, mode)
+	return closed(fd, 0, errno)
+}
+
+// openatRead opens the path for reading with a mode the kernel ignores, as a
+// C caller's stray mode register would pass it.
+func openatRead(path string, mode uint32) error {
+	fd, errno := openat(path, syscall.O_RDONLY, mode)
 	return closed(fd, 0, errno)
 }
 
