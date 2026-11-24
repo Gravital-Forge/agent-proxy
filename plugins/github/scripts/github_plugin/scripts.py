@@ -18,6 +18,8 @@ REFUSAL_PREFIX = "github plugin refused: "
 DEFAULT_VIEW_FIELDS = "number,title,url,headRefName,state,statusCheckRollup"
 API_URL = "https://api.github.com"
 USER_AGENT = "agent-proxy-github-plugin"
+CREDENTIAL_ENV_NAME = "GH_TOKEN"
+VISIBLE_ASCII = re.compile(r"[\x21-\x7e]+")
 LOG_URL_TIMEOUT_SECONDS = 30
 REASON_BODY_CHARACTERS = 200
 FAILED_JOB_ID = re.compile(r"/actions/runs/\d+/job/(\d+)")
@@ -257,7 +259,8 @@ def pr_checks(arguments: NumberInput) -> ScriptResult:
     result keeps the checks call's exit code and stderr.
 
     Raises:
-        RefusalError: a job failed and GH_TOKEN is unset or empty.
+        RefusalError: a job failed and GH_TOKEN is unset or empty, or holds
+            a character that is not visible ASCII.
     """
     repo = arguments["repo"]
     number = _decimal(arguments["pr_number"])
@@ -329,13 +332,12 @@ def job_log_location(repo: str, job_id: float) -> str:
     context, which reads SSL_CERT_FILE.
 
     Raises:
-        RefusalError: GH_TOKEN is unset or empty.
+        RefusalError: GH_TOKEN is unset or empty, or holds a character that
+            is not visible ASCII.
         LogUrlError: the answer is not a redirect with a Location, or the
             request failed.
     """
-    token = os.environ.get("GH_TOKEN")
-    if not token:
-        raise RefusalError("GH_TOKEN is not set")
+    token = _token()
     path = f"/repos/{repo}/actions/jobs/{_decimal(job_id)}/logs"
     request = urllib.request.Request(  # noqa: S310 - the URL is built from the API_URL constant
         f"{API_URL}{path}",
@@ -351,6 +353,26 @@ def job_log_location(repo: str, job_id: float) -> str:
         return _unfollowed_location(opener, request, path)
     except (OSError, http.client.HTTPException) as error:
         raise LogUrlError(f"GET {path} failed: {error}") from error
+
+
+def _token() -> str:
+    """Return GH_TOKEN without the whitespace around it.
+
+    A CR or an LF in a header makes http.client raise an error that quotes
+    the whole header, token included.
+
+    Raises:
+        RefusalError: GH_TOKEN is unset or empty, or holds a character that
+            is not visible ASCII. The reason never quotes the token.
+    """
+    token = os.environ.get(CREDENTIAL_ENV_NAME, "").strip()
+    if not token:
+        raise RefusalError(f"{CREDENTIAL_ENV_NAME} is not set")
+    if not VISIBLE_ASCII.fullmatch(token):
+        raise RefusalError(
+            f"{CREDENTIAL_ENV_NAME} holds a character that is not visible ASCII"
+        )
+    return token
 
 
 def _unfollowed_location(

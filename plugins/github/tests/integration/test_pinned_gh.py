@@ -1,3 +1,4 @@
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -37,6 +38,7 @@ The page shows the new button. Recorded at `abc1234`, 1280x720 viewport.
 PLANTED_TEXT = "32 bytes the agent planted here\n"
 RELEASE_LOOKUP_COMMAND = ["touch", "/tmp/release-lookup"]  # noqa: S108 - a path in the fake's container
 LOOKUP_HELD_SECONDS = 30
+REST_REPOSITORY = re.compile(r"^[A-Z]+ /repos/(?P<owner>[^/]+)/(?P<name>[^/]+)")
 
 type EditWithAttachments = Callable[[str, Sequence[str]], Mapping[str, object]]
 
@@ -99,6 +101,27 @@ def logged_update_body(fake_api_log: FakeApiLog) -> str:
     ]
     assert isinstance(body, str)
     return body
+
+
+def requested_repositories(fake_api_log: FakeApiLog) -> set[tuple[str, str]]:
+    """Return each owner and name a request the fake logged names.
+
+    A REST request names them in a path under /repos/, and a GraphQL request
+    in its owner variable and its repo or name variable.
+    """
+    named: set[tuple[str, str]] = set()
+    for entry in fake_api_log():
+        request = entry.get("request")
+        variables = entry.get("variables")
+        if not isinstance(request, str):
+            continue
+        rest = REST_REPOSITORY.match(request)
+        if rest is not None:
+            named.add((rest["owner"], rest["name"]))
+        if isinstance(variables, dict) and "owner" in variables:
+            name = variables.get("repo", variables.get("name"))
+            named.add((str(variables["owner"]), str(name)))
+    return named
 
 
 def wait_for_held_lookup(fake_api_log: FakeApiLog) -> None:
@@ -246,6 +269,42 @@ def test_job_log_url_names_the_404_for_a_job_the_api_does_not_know(
         "stderr": "GET /repos/o/n/actions/jobs/2/logs answered 404: "
         '{"message": "Not Found"}\n',
     }
+
+
+@pytest.mark.parametrize(
+    "pr",
+    ["github.com/other/repo/pull/1", " https:x"],
+    ids=["url-without-scheme", "leading-space"],
+)
+def test_pr_view_looks_up_a_pr_the_pattern_accepts_in_the_listed_repository(
+    run_action: RunAction,
+    plugin_image: str,
+    fake_api_network: str,
+    fake_api_ca: Path,
+    fake_api_log: FakeApiLog,
+    pr: str,
+) -> None:
+    """The pinned gh takes a pr with no http: or https: scheme as a branch of --repo.
+
+    gh takes another repository from pr only when pr parses as an http or
+    https URL, which the pattern refuses. A URL without its scheme, and a
+    scheme after a leading space, which the pattern accepts, make gh send
+    requests that name o/n alone.
+    """
+    network = CageNetwork(
+        name=fake_api_network, environment={"SSL_CERT_FILE": str(fake_api_ca)}
+    )
+
+    run_action(
+        "pr_view",
+        {"repo": "o/n", "pr": pr},
+        image=plugin_image,
+        roots=[Root(path=str(fake_api_ca.parent), mode="ro")],
+        network=network,
+        env=LISTED,
+    )
+
+    assert requested_repositories(fake_api_log) == {("o", "n")}
 
 
 def test_pr_edit_gets_past_the_lookup_and_applies_the_edit(

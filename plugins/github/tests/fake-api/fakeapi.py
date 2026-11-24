@@ -21,10 +21,12 @@ A POST to /user-attachments/assets uploads the file its name query parameter
 names: upload-fails.png answers 422, and any other name answers 201 with the
 asset URL https://github.com/user-attachments/assets/fake-<name>.
 
-It prints one JSON line for each upload, with the file's name and the
-request's Host and Authorization headers, one with the upload's bytes as text
-under upload_bytes, and one for each update, with the body it sets. It answers
-any other request with 404.
+It prints one JSON line for each request: its method and its path before any
+query under request, and the variables of a GraphQL request, or null for any
+other request, under variables. It prints one JSON line for each upload, with
+the file's name and the request's Host and Authorization headers, one with the
+upload's bytes as text under upload_bytes, and one for each update, with the
+body it sets. It answers any other request with 404.
 
 It holds the answer to a pull-request lookup whose GraphQL variable pr_number
 is 2: it prints {"lookup_held": true}, then waits for the file
@@ -192,6 +194,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         """Answer a GET by its path before any query."""
         path = self.path.split("?", 1)[0]
+        log_event({"request": f"GET {path}", "variables": None})
         if path == LOGS_PATH:
             self._send(200, "application/zip", logs_archive())
         elif path in JOB_LOG_REDIRECTS:
@@ -205,6 +208,8 @@ class Handler(BaseHTTPRequestHandler):
         """Answer uploads, gh's GraphQL requests, and any other POST with 404."""
         body = self._read_body()
         path, _, query = self.path.partition("?")
+        variables = json.loads(body).get("variables") if path == GRAPHQL_PATH else None
+        log_event({"request": f"POST {path}", "variables": variables})
         if path == UPLOAD_PATH:
             self._answer_upload(parse_qs(query).get("name", [""])[0], body)
         elif path == GRAPHQL_PATH:
