@@ -337,22 +337,30 @@ def _unresolved_reference_failures(
     The walk visits every object and array in document order, and is a loop
     rather than a recursion because the checker never descends into an
     unknown keyword's value, which can nest as deep as the decoder allows.
+    A reference resolves only to an object or array the walk visited: a
+    pointer into a const, enum, default, or examples value reaches a value
+    whose references the walk never checked.
     """
     resource = DRAFT202012.create_resource(schema)
     root_uri = resource.id() or ""
     registry = EMPTY_REGISTRY.with_resource(root_uri, resource).crawl()
+    walked: set[int] = set()
+    references: list[_WalkEntry] = []
     pending = [_WalkEntry(where, schema, root_uri, "schema")]
     while pending:
         entry = pending.pop()
         if entry.kind == "reference":
-            reference = cast(str, entry.node)
-            if not _resolves(registry, entry.base_uri, reference):
-                yield (
-                    f"{entry.at}: reference must resolve inside the schema, "
-                    f"got {reference!r}"
-                )
+            references.append(entry)
             continue
+        walked.add(id(entry.node))
         pending.extend(reversed(list(_walk_children(entry))))
+    for entry in references:
+        reference = cast(str, entry.node)
+        if not _resolves(registry, entry.base_uri, reference, walked):
+            yield (
+                f"{entry.at}: reference must resolve inside the schema, "
+                f"got {reference!r}"
+            )
 
 
 @dataclass(frozen=True)
@@ -393,12 +401,19 @@ def _walk_children(entry: _WalkEntry) -> Iterator[_WalkEntry]:
                 yield _WalkEntry(f"{at}.{key}", value, base_uri, "schema")
 
 
-def _resolves(registry: SchemaRegistry, base_uri: str, reference: str) -> bool:
+def _resolves(
+    registry: SchemaRegistry, base_uri: str, reference: str, walked: set[int]
+) -> bool:
+    """Return whether reference resolves to a value the walk visited.
+
+    walked holds the id() of each value visited; a scalar target holds no
+    reference, so it resolves wherever it lies.
+    """
     try:
-        registry.resolver(base_uri).lookup(reference)
+        target = registry.resolver(base_uri).lookup(reference).contents
     except _LOOKUP_FAILURES:
         return False
-    return True
+    return not isinstance(target, dict | list) or id(target) in walked
 
 
 def _command_failures(where: str, action: _CommandDoc) -> Iterator[str]:

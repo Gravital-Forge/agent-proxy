@@ -990,6 +990,26 @@ UNRESOLVED_REFERENCE_CASES = [
         _unresolved(f"{REPORT}.input_schema.$defs.sub.$ref", "#/$defs/sibling"),
         id="pointer-against-a-nested-id",
     ),
+    pytest.param(
+        _report_input({"$ref": "#/default", "default": {"$ref": REMOTE_REF}}),
+        _unresolved(f"{REPORT}.input_schema.$ref", "#/default"),
+        id="pointer-to-a-default-value",
+    ),
+    pytest.param(
+        _report_input({"$ref": "#/const/a", "const": {"a": {"$ref": "#/nowhere"}}}),
+        _unresolved(f"{REPORT}.input_schema.$ref", "#/const/a"),
+        id="pointer-into-a-const-value",
+    ),
+    pytest.param(
+        _report_input({"$ref": "#/enum/0", "enum": [{"$ref": REMOTE_REF}]}),
+        _unresolved(f"{REPORT}.input_schema.$ref", "#/enum/0"),
+        id="pointer-into-an-enum-value",
+    ),
+    pytest.param(
+        _report_input({"$ref": "#/examples", "examples": [{}]}),
+        _unresolved(f"{REPORT}.input_schema.$ref", "#/examples"),
+        id="pointer-to-an-examples-value",
+    ),
 ]
 
 
