@@ -14,10 +14,8 @@ from datetime import datetime, timedelta
 from pathlib import PurePosixPath
 from typing import Literal
 
-from jsonschema import Draft202012Validator
-
 from agent_proxy.errors import ProxyError
-from agent_proxy.plugins import ManifestError, decode_json_object
+from agent_proxy.plugins import ManifestError, decode_json_object, schema_validator
 
 OUTPUT_CAP_BYTES = 262144
 OVERFLOW_MAX_AGE = timedelta(days=7)
@@ -318,6 +316,6 @@ def _script_output(
         output = decode_json_object(stdout.inline)
     except ManifestError:
         return None
-    if not Draft202012Validator(output_schema).is_valid(output):
+    if not schema_validator(output_schema).is_valid(output):
         return None
     return output

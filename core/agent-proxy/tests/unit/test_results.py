@@ -13,6 +13,8 @@ from pathlib import Path
 from unittest import mock
 
 import pytest
+from referencing.exceptions import Unresolvable
+from schema_server import serving_schema
 
 from agent_proxy.errors import ProxyError
 from agent_proxy.results import (
@@ -566,6 +568,17 @@ def test_script_content_validates_against_draft_2020_12() -> None:
     result = script_content(schema, 0, _inline(b'{"tags": ["a"]}'), _inline(b""))
 
     assert result == {"tags": ["a"]}
+
+
+def test_script_content_fetches_no_remote_reference() -> None:
+    """A remote $ref the manifest check would refuse is unresolvable, not fetched."""
+    with serving_schema() as server:
+        schema = {"type": "object", "$ref": f"{server.url}/output.json"}
+
+        with pytest.raises(Unresolvable):
+            script_content(schema, 0, _inline(b'{"sha": "abc"}'), _inline(b""))
+
+    assert server.requested_paths == []
 
 
 FAILED_SCRIPTS = [

@@ -19,7 +19,6 @@ from typing import cast
 import docker.types
 from docker import DockerClient
 from docker.models.containers import Container
-from jsonschema import Draft202012Validator
 
 from agent_proxy.config import (
     PINNED_IMAGE_PATTERN,
@@ -42,6 +41,7 @@ from agent_proxy.plugins import (
     CommandAction,
     ScriptAction,
     ensure_image,
+    schema_validator,
 )
 from agent_proxy.results import (
     CALL_ID_PATTERN,
@@ -124,7 +124,7 @@ def validate_input(
     Raises:
         InputError: arguments break the schema; one message per violation.
     """
-    validator = Draft202012Validator(action.input_schema)
+    validator = schema_validator(action.input_schema)
     # The schema's object check accepts only a dict, not any Mapping.
     violations = [
         f"{error.json_path}: {error.message}"

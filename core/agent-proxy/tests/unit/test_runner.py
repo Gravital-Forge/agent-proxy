@@ -13,6 +13,8 @@ import docker.errors
 import docker.types
 import pytest
 import requests
+from referencing.exceptions import Unresolvable
+from schema_server import serving_schema
 
 from agent_proxy import runner
 from agent_proxy.config import EnvMount, FileMount, Grant, Root
@@ -299,6 +301,21 @@ def test_validate_input_checks_a_script_action_against_its_schema() -> None:
     """A script action's input is checked against its own input schema."""
     with pytest.raises(InputError, match="'path' is a required property"):
         validate_input(_SCRIPT, {})
+
+
+def test_validate_input_fetches_no_remote_reference() -> None:
+    """A remote $ref the manifest check would refuse is unresolvable, not fetched."""
+    with serving_schema() as server:
+        action = _command_action(
+            ("echo",),
+            {"text": {"$ref": f"{server.url}/text.json"}},
+            (Parameter("text", "positional", None),),
+        )
+
+        with pytest.raises(Unresolvable):
+            validate_input(action, {"text": "hi"})
+
+    assert server.requested_paths == []
 
 
 def test_form_argv_adds_a_true_boolean_flag_before_the_positional() -> None:
