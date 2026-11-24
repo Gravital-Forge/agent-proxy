@@ -17,6 +17,7 @@ from referencing.exceptions import Unresolvable
 from schema_server import serving_schema
 
 from agent_proxy import runner
+from agent_proxy.cage_seccomp import cage_profile_json
 from agent_proxy.config import EnvMount, FileMount, Grant, Root
 from agent_proxy.credentials import CredentialStore, unset_message
 from agent_proxy.egress import CageNetwork
@@ -54,6 +55,7 @@ from agent_proxy.runner import (
 )
 
 _PINNED_VERIFIER = "ghcr.io/example/agent-proxy-verifier@sha256:" + "a" * 64
+_SECURITY_OPT = ["no-new-privileges", f"seccomp={cage_profile_json()}"]
 _MANIFEST = parse_manifest(
     (Path(__file__).parents[1] / "test-plugin" / "manifest.json").read_bytes()
 )
@@ -694,7 +696,7 @@ def test_run_creates_a_hardened_command_cage_whose_verifier_runs_its_argv(
         user=CONTAINER_USER,
         read_only=True,
         cap_drop=["ALL"],
-        security_opt=["no-new-privileges"],
+        security_opt=_SECURITY_OPT,
         tmpfs={TMPFS_PATH: TMPFS_OPTIONS},
         mounts=[
             docker.types.Mount(
@@ -730,7 +732,7 @@ def test_run_creates_a_script_cage_that_takes_its_input_on_stdin(
         user=CONTAINER_USER,
         read_only=True,
         cap_drop=["ALL"],
-        security_opt=["no-new-privileges"],
+        security_opt=_SECURITY_OPT,
         tmpfs={TMPFS_PATH: TMPFS_OPTIONS},
         mounts=[_verifier_mount()],
         environment={"AGENT_PROXY_ROOTS": "[]"},

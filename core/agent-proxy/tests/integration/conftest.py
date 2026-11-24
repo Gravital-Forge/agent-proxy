@@ -20,6 +20,7 @@ REGISTRY_IMAGE = (
 PLUGIN_DIR = Path(__file__).parent.parent / "test-plugin"
 PLUGIN_NAME = "apx-test-plugin"
 PLUGIN_TAG = "it"
+PLUGIN_BUILD_TAG = f"{PLUGIN_NAME}-build:it"
 PUSH_ATTEMPTS = 30
 PUSH_RETRY_SECONDS = 0.5
 RUNNER_IMAGE_TAG = f"{PLUGIN_NAME}:runner"
@@ -117,7 +118,28 @@ def labelled_containers(
 
 
 @pytest.fixture(scope="session")
-def runner_image(docker_client: DockerClient) -> Iterator[str]:
+def plugin_build_stage(docker_client: DockerClient) -> Iterator[None]:
+    """Hold the test plugin's build stage under a tag until the session ends."""
+    # As with the verifier, the classic builder leaves the build stage's images
+    # untagged and unlabelled; every later build of the plugin reuses them.
+    build_stage, _ = docker_client.images.build(
+        path=str(PLUGIN_DIR),
+        target="build",
+        tag=PLUGIN_BUILD_TAG,
+        labels=TEST_LABELS,
+        rm=True,
+        forcerm=True,
+    )
+    try:
+        yield
+    finally:
+        docker_client.images.remove(build_stage.id, force=True)
+
+
+@pytest.fixture(scope="session")
+def runner_image(
+    docker_client: DockerClient, plugin_build_stage: None
+) -> Iterator[str]:
     """The tag of the test plugin image, built locally for the cage tests."""
     image, _ = docker_client.images.build(
         path=str(PLUGIN_DIR),
@@ -241,7 +263,9 @@ def cage_network(docker_client: DockerClient) -> Iterator[str]:
 
 
 @pytest.fixture
-def pinned_plugin(docker_client: DockerClient, registry: str) -> Iterator[str]:
+def pinned_plugin(
+    docker_client: DockerClient, registry: str, plugin_build_stage: None
+) -> Iterator[str]:
     """The pinned reference of the test plugin, pushed and absent from the daemon."""
     repository = f"{registry}/{PLUGIN_NAME}"
     image, _ = docker_client.images.build(

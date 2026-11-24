@@ -20,6 +20,7 @@ import docker.types
 from docker import DockerClient
 from docker.models.containers import Container
 
+from agent_proxy.cage_seccomp import cage_profile_json
 from agent_proxy.config import (
     PINNED_IMAGE_PATTERN,
     ROOTS_ENV_NAME,
@@ -563,7 +564,7 @@ def _create(client: DockerClient, call: CageCall, setup: _CageSetup) -> Containe
             user=CONTAINER_USER,
             read_only=True,
             cap_drop=["ALL"],
-            security_opt=["no-new-privileges"],
+            security_opt=["no-new-privileges", f"seccomp={cage_profile_json()}"],
             tmpfs={TMPFS_PATH: TMPFS_OPTIONS},
             mounts=[
                 *setup.mounts,

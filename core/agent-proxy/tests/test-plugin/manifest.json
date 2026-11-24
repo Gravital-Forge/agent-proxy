@@ -58,6 +58,22 @@
       "executable": "/plugin/fail",
       "output_schema": {"type": "object"}
     },
+    "setid_probe": {
+      "kind": "command",
+      "input_schema": {
+        "type": "object",
+        "properties": {"dir": {"type": "string"}},
+        "required": ["dir"],
+        "additionalProperties": false
+      },
+      "credentials": [],
+      "timeout": "10s",
+      "argv": ["/plugin/setid-probe"],
+      "parameters": [
+        {"name": "dir", "as": "positional"}
+      ],
+      "passthrough_args": false
+    },
     "read_credential": {
       "kind": "command",
       "input_schema": {"type": "object", "additionalProperties": false},
