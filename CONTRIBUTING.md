@@ -125,13 +125,16 @@ in a workflow's `run` script, step input, or service container; in a Dockerfile 
 or in a language version file, such as `.python-version` or the `go` line of `go.mod`.
 
 The seccomp profile in `core/agent-proxy/agent_proxy/seccomp/default.json` is a pin updated by hand
-too. It is Docker's default profile, byte for byte: `github.com/moby/profiles/seccomp` v0.2.4, the
-version that Docker 29.9.2 builds in. moby's source vendors it as
-`vendor/github.com/moby/profiles/seccomp/default.json` at the tag `docker-v<version>`. Never edit
-the file. To update it, copy the file at a new daemon version's tag, and change the SHA-256 that
-`test_the_vendored_profile_is_docker_s_default_byte_for_byte` in
-`core/agent-proxy/tests/unit/test_cage_seccomp.py` checks, and the version in
-[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+too. It is Docker's default profile, byte for byte, at the profile version and the Docker version
+that [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) gives under the instance image. moby's
+source vendors it as `vendor/github.com/moby/profiles/seccomp/default.json` at the tag
+`docker-v<version>`. Never edit the file. To update it, copy the file at a new Docker version's tag.
+Then change the pin in each of these places:
+
+- the SHA-256 `DEFAULT_PROFILE_SHA256` in `core/agent-proxy/tests/unit/test_cage_seccomp.py`, which
+  `test_the_vendored_profile_is_docker_s_default_byte_for_byte` checks;
+- the profile version in that test's docstring;
+- the profile version and the Docker version in `THIRD-PARTY-NOTICES.md`.
 
 ## Repository layout
 

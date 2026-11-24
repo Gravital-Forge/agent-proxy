@@ -229,11 +229,14 @@ script receives.
 
 ### Output past the cap
 
-The output cap is 256 KiB (262,144 bytes) for each stream. A stream over the cap goes, in full, to a
-new file in `overflow_dir`, named for the call: `<call-id>.stdout` or `<call-id>.stderr`, where the
-call ID is 32 lower-case hex digits. The result holds the file's path and the stream's size in place
-of the stream, and `truncated: true`. It holds no part of the stream, so the agent decides how to
-read the file. For example:
+The output cap is 256 KiB (262,144 bytes) for each stream. A stream over the cap goes to a new file
+in `overflow_dir`, named for the call: `<call-id>.stdout` or `<call-id>.stderr`, where the call ID
+is 32 lower-case hex digits. The instance reads each stream back from the cage's log, and that log
+has a size cap of its own. So the file holds the stream as the log kept it, and a call whose output
+passes the log's cap loses the start of it, as [Known limits](architecture.md#known-limits) gives.
+The result holds the file's path and the stream's size in place of the stream, and
+`truncated: true`. It holds no part of the stream, so the agent decides how to read the file. For
+example:
 
 ```json
 {"exit_code": 0, "stdout_file": "/home/agent-01/Projects/.agent-proxy-overflow/0123456789abcdef0123456789abcdef.stdout", "stdout_bytes": 4194304, "stderr": "", "truncated": true}

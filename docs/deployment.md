@@ -23,6 +23,12 @@ The host needs these packages:
 - `acl`, which gives `setfacl` and `getfacl`.
 - systemd, which keeps the service user's daemon running under linger.
 
+A cage's memory limit and process limit hold only where the service user's daemon can enforce them.
+A rootless daemon can enforce them on a host with cgroup v2 that delegates the `memory` and `pids`
+controllers to the service user. Where the daemon cannot enforce a limit, the instance warns at
+start and runs each cage without that limit, as
+[Failures and warnings](reference.md#failures-and-warnings) gives.
+
 Root must be able to read a checkout of this repository. The scripts run from it, and without
 `--release` the provisioning script builds the verifier and instance images from it. With
 `--release`, the checkout must be at the release's tag, so that the scripts match the release's

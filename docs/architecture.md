@@ -27,7 +27,7 @@ These terms carry one meaning each through the code and the documents.
   list of grants a token holding it may use.
 - **Token** — a bearer secret that names exactly one scope. It carries no policy of its own.
 - **Grant** — one entry in a scope: an action, plus that action's roots, domains, and credentials,
-  an optional timeout override, and an optional `env`.
+  an optional timeout override, an optional memory limit, and an optional `env`.
 - **Action** — one operation a plugin offers, of one of two kinds:
   - a **command** action runs a fixed argv prefix at subcommand granularity (`gh pr create`, never
     bare `gh`), extended by typed parameters;
@@ -113,7 +113,11 @@ inside the instance's process (`core/agent-proxy/agent_proxy/runner.py`).
   [The instance](#the-instance) gives, because Docker then drops the limit and still runs the cage.
 - **Log:** the cage's output reaches the instance through the cage's log, which keeps at most two
   files of 512 MiB each, `LOG_OPTIONS` in `runner.py`. So one call cannot fill the service user's
-  disk. [Known limits](#known-limits) gives what a call past that size returns.
+  disk. The cap bounds the log's encoded size, not the output's. Docker's `json-file` log driver
+  writes each line of output as a JSON object that also holds the line's stream and time, with the
+  line's text escaped, and the one log holds stdout and stderr together. So a call can pass the cap
+  with well under 1 GiB of output, and soonest when its output comes in short lines.
+  [Known limits](#known-limits) gives what a call past the cap returns.
 - **Label:** every cage carries the label `agent-proxy.cage=1`, and no other container does. The
   start finds the cages a killed instance left by that label, as [The instance](#the-instance)
   gives.
@@ -284,10 +288,11 @@ never consults the store: a credential that a grant names and the store lacks is
 ## Audit
 
 The instance writes one JSON line per call to `audit/audit.log` in the state directory
-(`core/agent-proxy/agent_proxy/audit.py`). A line holds `timestamp`, `call_id`, `token_name`,
-`scope`, `action`, `arguments`, `arguments_cut`, `exit_code`, `duration_ms`, `stdout_bytes`,
-`stderr_bytes`, `truncated`, and, for a refused call, the `refusal` without its MCP prefix. A line
-never holds a credential's value or any output's content.
+(`core/agent-proxy/agent_proxy/audit.py`), except for the calls with no verified token that the
+60-second rule below holds back. A line holds `timestamp`, `call_id`, `token_name`, `scope`,
+`action`, `arguments`, `arguments_cut`, `exit_code`, `duration_ms`, `stdout_bytes`, `stderr_bytes`,
+`truncated`, and, for a refused call, the `refusal` without its MCP prefix. A line never holds a
+credential's value or any output's content.
 
 The caller chooses the arguments, the tool name, and any input that a refusal quotes, so the line
 caps each of them where it is rendered:
@@ -571,8 +576,10 @@ from the tree it is given.
 
 - A token holder can push old lines out of the audit log by making many calls. Each of those calls
   writes a line under its token's name, and the caps of [Audit](#audit) bound each line.
-- A cage's log keeps two files of 512 MiB each, as [The cage](#the-cage) gives. A call whose output
-  passes that size returns only the last part of it, with nothing to mark the loss.
+- A cage's log keeps two files of 512 MiB each. A call whose log passes that size returns only the
+  last part of its output, with nothing to mark the loss. The cap bounds the log's encoded size, so
+  the loss can begin well under 1 GiB of output, most of all for output in short lines, as
+  [The cage](#the-cage) gives.
 - A cage has no CPU limit, so one call can take every CPU the service user's daemon reaches. A
   rootless daemon enforces a CPU limit only after the host delegates the `cpu` cgroup controller to
   the service user, which provisioning does not do.
