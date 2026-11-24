@@ -1,6 +1,7 @@
 """The instance, started on the agent's own daemon, serves both plugins."""
 
 import asyncio
+import contextlib
 import json
 import os
 import secrets
@@ -13,7 +14,9 @@ from pathlib import Path
 import docker.errors
 import pytest
 import yaml
+from conftest import TEST_LABELS
 from docker import DockerClient
+from docker.models.containers import Container
 from fastmcp import Client
 from fastmcp.client.client import CallToolResult
 from fastmcp.client.transports import StreamableHttpTransport
@@ -64,6 +67,8 @@ CHECK_DOMAIN = "api.github.com"
 ABSENT_ROOT = "absent"
 CHECK_HEADER = "SCOPE\tCHECK\tSUBJECT\tRESULT\tDETAIL"
 PULL_SCOPE = "pull"
+LEFT_CAGE_LABELS = {"agent-proxy.cage": "1", **TEST_LABELS}
+LEFT_CAGE_SECONDS = "300"
 
 
 @dataclass(frozen=True)
@@ -486,3 +491,71 @@ def test_an_instance_pulls_its_verifier_by_digest_at_start(
         assert echoed["exit_code"] == 0
         assert echoed["stdout"] == "pulled\n"
         docker_client.images.get(pinned_verifier)
+
+
+def _gone(client: DockerClient, container: Container) -> bool:
+    try:
+        client.containers.get(container.id)
+    except docker.errors.NotFound:
+        return True
+    return False
+
+
+def test_an_instance_removes_the_cages_left_on_its_daemon_before_it_serves(
+    docker_client: DockerClient,
+    labelled_instance_image: str,
+    runner_image: str,
+    tmp_path: Path,
+) -> None:
+    """A running and a stopped cage are gone once it serves; an unlabelled one stays.
+
+    The bystander carries the test label but no cage label, so only the cage
+    label sets the left cages apart from it.
+    """
+    tree = _make_tree(tmp_path)
+    config = {
+        "agent_tree": str(tree.agent_tree),
+        "overflow_dir": str(tree.agent_tree / ".agent-proxy-overflow"),
+        "max_cages": 1,
+        "plugins": {},
+        "scopes": {"empty": {"grants": {}}},
+    }
+    _write_yaml(tree.config_dir / "config.yaml", config)
+    name = f"apx-it-sweep-{secrets.token_hex(4)}"
+    port = free_port()
+    sleep = ["sleep", LEFT_CAGE_SECONDS]
+    running = docker_client.containers.run(
+        runner_image, sleep, detach=True, labels=LEFT_CAGE_LABELS
+    )
+    stopped = docker_client.containers.run(
+        runner_image, ["true"], detach=True, labels=LEFT_CAGE_LABELS
+    )
+    bystander = docker_client.containers.run(
+        runner_image, sleep, detach=True, labels=TEST_LABELS
+    )
+
+    try:
+        assert stopped.wait()["StatusCode"] == 0
+        running.reload()
+        assert running.status == "running"
+        with removed_on_exit(docker_client, name):
+            started = run_start_script(
+                (
+                    labelled_instance_image,
+                    name,
+                    str(port),
+                    str(tree.config_dir),
+                    str(tree.state_dir),
+                    str(tree.agent_tree),
+                )
+            )
+            assert started.returncode == 0, started.stderr
+            wait_for_mcp(docker_client, name, port)
+
+            assert _gone(docker_client, running)
+            assert _gone(docker_client, stopped)
+            assert not _gone(docker_client, bystander)
+    finally:
+        for container in (running, stopped, bystander):
+            with contextlib.suppress(docker.errors.NotFound):
+                container.remove(force=True)

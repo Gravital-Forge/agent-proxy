@@ -16,6 +16,7 @@ from datetime import timedelta
 from pathlib import PurePosixPath
 from typing import cast
 
+import docker.errors
 import docker.types
 from docker import DockerClient
 from docker.models.containers import Container
@@ -54,6 +55,7 @@ from agent_proxy.results import (
 )
 
 CONTAINER_LABELS: Mapping[str, str] = types.MappingProxyType({})
+CAGE_LABEL = "agent-proxy.cage"
 TMPFS_PATH = "/tmp"  # noqa: S108 - the path is inside the cage, on its own tmpfs
 TMPFS_OPTIONS = "rw,size=64m"
 CONTAINER_USER = "0:0"
@@ -404,6 +406,52 @@ def limit_warnings(client: DockerClient) -> tuple[str, ...]:
     )
 
 
+def remove_left_cages(client: DockerClient) -> tuple[str, ...]:
+    """Force-remove every cage on the daemon, and return one warning per failure.
+
+    One instance owns its daemon, so a cage there at start is one an earlier
+    instance left behind, and it may still hold credentials.
+
+    Raises:
+        CageFailedError: the cages cannot be listed.
+    """
+    try:
+        cages = client.containers.list(
+            all=True, filters=_cage_filters(), ignore_removed=True
+        )
+    except DOCKER_FAILURES as exc:
+        raise CageFailedError(f"the left cages could not be listed: {exc}") from exc
+    warnings = []
+    for cage in cages:
+        warning = _remove_left_cage(cage)
+        if warning is not None:
+            warnings.append(warning)
+    return tuple(warnings)
+
+
+def _cage_filters() -> dict[str, list[str]]:
+    """Return the label filter that finds cages.
+
+    Docker matches a container only when it carries every label in the list.
+    """
+    return {
+        "label": [
+            CAGE_LABEL,
+            *(f"{name}={value}" for name, value in CONTAINER_LABELS.items()),
+        ]
+    }
+
+
+def _remove_left_cage(cage: Container) -> str | None:
+    try:
+        cage.remove(force=True)
+    except docker.errors.NotFound:
+        return None
+    except DOCKER_FAILURES as exc:
+        return f"the left cage {cage.name!r} could not be removed: {exc}"
+    return None
+
+
 @dataclass(frozen=True)
 class CageCall:
     """One action call, and what the instance's config gives it."""
@@ -610,7 +658,7 @@ def _create(client: DockerClient, call: CageCall, setup: _CageSetup) -> Containe
             ],
             environment={**call.network.environment, **setup.environment},
             network=call.network.name,
-            labels=dict(CONTAINER_LABELS),
+            labels={CAGE_LABEL: "1", **CONTAINER_LABELS},
             pids_limit=CAGE_PIDS_LIMIT,
             mem_limit=memory_bytes,
             # A swap limit equal to the memory limit gives the cage no swap.

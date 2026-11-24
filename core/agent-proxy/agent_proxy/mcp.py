@@ -46,6 +46,7 @@ from agent_proxy.runner import (
     Outcome,
     ensure_verifier,
     limit_warnings,
+    remove_left_cages,
 )
 from agent_proxy.selfcheck import (
     SELF_CHECK_INPUT_SCHEMA,
@@ -589,17 +590,21 @@ class Instance:
     def start(cls, state_dir: Path, config_path: Path, client: DockerClient) -> Self:
         """Open the stores under state_dir, then start the config and its servers.
 
-        The order is the stores, the verifier, the daemon's limits, the live
-        config, the control socket, and the overflow sweeper. The verifier step
-        pulls a verifier pinned by digest when the daemon lacks it. The control
-        socket serves reloads of the live config and the gateway's checks. A
-        step that fails closes what the steps before it started, then its error
-        propagates. The instance's warnings are one for each cage limit the
-        daemon cannot enforce, then those of the first snapshot.
+        The order is the stores, the verifier, the daemon's limits, the left
+        cages, the live config, the control socket, and the overflow sweeper.
+        The verifier step pulls a verifier pinned by digest when the daemon
+        lacks it. The left-cages step force-removes every cage an earlier
+        instance left on the daemon. The control socket serves reloads of the
+        live config and the gateway's checks. A step that fails closes what
+        the steps before it started, then its error propagates. The instance's
+        warnings are one for each cage limit the daemon cannot enforce, then
+        one for each left cage that could not be removed, then those of the
+        first snapshot.
 
         Raises:
             PluginImageError: a verifier pinned by digest cannot be looked up
                 or pulled.
+            CageFailedError: the left cages cannot be listed.
             RunnerError: the daemon's info cannot be read.
             ProxyError: the audit log cannot be prepared, the config cannot be
                 built, its egress cannot be made ready, or the control socket
@@ -613,6 +618,7 @@ class Instance:
             started.callback(audit.close)
             ensure_verifier(client)
             daemon_warnings = limit_warnings(client)
+            removal_warnings = remove_left_cages(client)
             live = LiveConfig.start(build, EgressProxies(client, state_dir / "egress"))
             runner = CageRunner(client, credentials, CageLimiter())
             gateway = CallGateway(
@@ -638,7 +644,7 @@ class Instance:
                 control,
                 sweeper,
                 audit,
-                (*daemon_warnings, *live.current.warnings),
+                (*daemon_warnings, *removal_warnings, *live.current.warnings),
             )
             started.pop_all()
         return instance

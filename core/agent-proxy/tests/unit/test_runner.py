@@ -25,6 +25,7 @@ from agent_proxy.errors import ProxyError
 from agent_proxy.plugins import CommandAction, Parameter, ScriptAction, parse_manifest
 from agent_proxy.results import OUTPUT_CAP_BYTES
 from agent_proxy.runner import (
+    CAGE_LABEL,
     CAGE_MEMORY_BYTES,
     CAGE_PIDS_LIMIT,
     CONTAINER_LABELS,
@@ -655,6 +656,7 @@ def test_the_cage_constants_are_the_spec_s() -> None:
     """No product labels, a 64 MiB /tmp, root, capped logs, the limits, the verifier."""
     assert isinstance(CONTAINER_LABELS, types.MappingProxyType)
     assert dict(CONTAINER_LABELS) == {}
+    assert CAGE_LABEL == "agent-proxy.cage"
     assert TMPFS_PATH == "/tmp"  # noqa: S108 - the path is inside the cage
     assert TMPFS_OPTIONS == "rw,size=64m"
     assert CONTAINER_USER == "0:0"
@@ -719,7 +721,7 @@ def test_run_creates_a_hardened_command_cage_whose_verifier_runs_its_argv(
         ],
         environment={"API_TOKEN": "s3cret", "AGENT_PROXY_ROOTS": f'["{work}"]'},
         network=NETWORK.name,
-        labels={},
+        labels={"agent-proxy.cage": "1"},
         pids_limit=CAGE_PIDS_LIMIT,
         mem_limit=CAGE_MEMORY_BYTES,
         memswap_limit=CAGE_MEMORY_BYTES,
@@ -747,7 +749,7 @@ def test_run_creates_a_script_cage_that_takes_its_input_on_stdin(
         mounts=[_verifier_mount()],
         environment={"AGENT_PROXY_ROOTS": "[]"},
         network=NETWORK.name,
-        labels={},
+        labels={"agent-proxy.cage": "1"},
         pids_limit=CAGE_PIDS_LIMIT,
         mem_limit=CAGE_MEMORY_BYTES,
         memswap_limit=CAGE_MEMORY_BYTES,
@@ -1322,6 +1324,112 @@ def test_limit_warnings_fail_as_a_runner_error_when_the_info_call_fails(
 
     with pytest.raises(RunnerError, match=re.escape(str(error))):
         runner.limit_warnings(client)
+
+
+_TEST_LABELS = types.MappingProxyType({"agent-proxy.test": "1"})
+
+
+def _left_cage(name: str) -> MagicMock:
+    cage = MagicMock()
+    cage.name = name
+    return cage
+
+
+def test_run_labels_the_cage_beside_the_container_labels(
+    store: CredentialStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cage carries the cage label and every label of CONTAINER_LABELS."""
+    monkeypatch.setattr(runner, "CONTAINER_LABELS", _TEST_LABELS)
+    client = _client()
+
+    _run(client, store, _cage_call(_echo(), {"text": "hi"}))
+
+    labels = client.containers.create.call_args.kwargs["labels"]
+    assert labels == {"agent-proxy.cage": "1", "agent-proxy.test": "1"}
+
+
+@pytest.mark.parametrize(
+    ("container_labels", "label_filter"),
+    [
+        pytest.param({}, ["agent-proxy.cage"], id="product"),
+        pytest.param(
+            _TEST_LABELS, ["agent-proxy.cage", "agent-proxy.test=1"], id="test-image"
+        ),
+    ],
+)
+def test_remove_left_cages_lists_every_cage_with_the_container_labels(
+    container_labels: Mapping[str, str],
+    label_filter: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The listing takes stopped containers too, and needs every label to match."""
+    monkeypatch.setattr(
+        runner, "CONTAINER_LABELS", types.MappingProxyType(container_labels)
+    )
+    client = MagicMock()
+    client.containers.list.return_value = []
+
+    runner.remove_left_cages(client)
+
+    client.containers.list.assert_called_once_with(
+        all=True, filters={"label": label_filter}, ignore_removed=True
+    )
+
+
+def test_remove_left_cages_force_removes_each_listed_cage() -> None:
+    """Each cage is removed by force, running or not, and no warning comes back."""
+    running, stopped = _left_cage("running"), _left_cage("stopped")
+    client = MagicMock()
+    client.containers.list.return_value = [running, stopped]
+
+    warnings = runner.remove_left_cages(client)
+
+    assert warnings == ()
+    running.remove.assert_called_once_with(force=True)
+    stopped.remove.assert_called_once_with(force=True)
+
+
+def test_remove_left_cages_warns_of_a_cage_it_cannot_remove_and_goes_on() -> None:
+    """A failed removal gives one warning naming the cage; the next cage is removed."""
+    stuck, next_cage = _left_cage("apx-stuck"), _left_cage("apx-next")
+    stuck.remove.side_effect = docker.errors.APIError("removal refused")
+    client = MagicMock()
+    client.containers.list.return_value = [stuck, next_cage]
+
+    warnings = runner.remove_left_cages(client)
+
+    [warning] = warnings
+    assert "'apx-stuck'" in warning
+    assert "removal refused" in warning
+    next_cage.remove.assert_called_once_with(force=True)
+
+
+def test_remove_left_cages_gives_no_warning_for_a_cage_already_gone() -> None:
+    """A cage removed between the listing and its removal is no failure."""
+    gone = _left_cage("apx-gone")
+    gone.remove.side_effect = docker.errors.NotFound("no such container")
+    client = MagicMock()
+    client.containers.list.return_value = [gone]
+
+    assert runner.remove_left_cages(client) == ()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        docker.errors.APIError("listing refused"),
+        requests.exceptions.ConnectionError("connection refused"),
+    ],
+)
+def test_remove_left_cages_fails_as_cage_failed_when_the_listing_fails(
+    error: Exception,
+) -> None:
+    """A failed listing raises CageFailedError, naming Docker's error."""
+    client = MagicMock()
+    client.containers.list.side_effect = error
+
+    with pytest.raises(CageFailedError, match=re.escape(str(error))):
+        runner.remove_left_cages(client)
 
 
 def test_run_holds_each_root_open_until_the_cage_is_removed(
