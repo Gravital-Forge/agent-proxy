@@ -38,6 +38,8 @@ REPO_PROPERTY = {
     "type": "string",
     "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*$",
 }
+# No leading '-', no http: or https: scheme in any case, no '://', not empty.
+PR_PATTERN = r"^(?!-)(?![Hh][Tt][Tt][Pp][Ss]?:)(?![\s\S]*://)[\s\S]"
 NUMBER_PROPERTY = {"type": "integer", "minimum": 1}
 TEXT_PROPERTY = {"type": "string"}
 NON_EMPTY_PROPERTY = {"type": "string", "minLength": 1}
@@ -136,7 +138,7 @@ INPUTS: dict[str, tuple[dict[str, dict[str, object]], set[str]]] = {
     "pr_view": (
         {
             "repo": REPO_PROPERTY,
-            "pr": {"type": "string", "pattern": "^[^-]"},
+            "pr": {"type": "string", "pattern": PR_PATTERN},
             "fields": TEXT_PROPERTY,
         },
         {"repo", "pr"},
@@ -350,6 +352,49 @@ def test_repo_pattern_refuses_a_value_that_is_not_owner_and_name(
 def test_repo_pattern_accepts_an_owner_and_name(manifest: Manifest, repo: str) -> None:
     """The repo pattern every action shares accepts dashes, dots, and underscores."""
     validate_input(manifest.actions["run_list"], {"repo": repo})
+
+
+@pytest.mark.parametrize(
+    "pr",
+    [
+        "https://github.com/other/repo/pull/1",
+        "http://github.com/other/repo/pull/1",
+        "HTTPS://github.com/other/repo/pull/1",
+        "hTtP:github.com/other/repo/pull/1",
+        "https:x",
+        "Http:",
+        "ssh://github.com/other/repo/pull/1",
+        "task/x://y",
+        "-x",
+        "--repo=other/repo",
+        "",
+    ],
+)
+def test_pr_view_refuses_a_url_an_option_or_nothing_as_pr(
+    manifest: Manifest, pr: str
+) -> None:
+    """An http: or https: scheme in any case, a '://', a leading '-', or '' fails."""
+    with pytest.raises(InputError):
+        validate_input(manifest.actions["pr_view"], {"repo": "o/n", "pr": pr})
+
+
+@pytest.mark.parametrize(
+    "pr",
+    [
+        "12",
+        "#12",
+        "task/x",
+        "owner:task/x",
+        "httpx",
+        "github.com/other/repo/pull/1",
+        " https:x",
+    ],
+)
+def test_pr_view_accepts_a_number_or_a_branch_as_pr(
+    manifest: Manifest, pr: str
+) -> None:
+    """A number, #12, a branch, owner:branch, and a value with no scheme pass."""
+    validate_input(manifest.actions["pr_view"], {"repo": "o/n", "pr": pr})
 
 
 @pytest.mark.parametrize(
