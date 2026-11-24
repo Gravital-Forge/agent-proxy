@@ -36,6 +36,33 @@ CONFIG = {
     "plugins": {},
     "scopes": {"ci": {"grants": {}}},
 }
+PR_VIEW = Manifest(
+    actions={
+        "pr_view": CommandAction(
+            name="pr_view",
+            input_schema={"type": "object", "additionalProperties": False},
+            credentials=(),
+            timeout=timedelta(seconds=30),
+            argv=("gh", "pr", "view"),
+            parameters=(),
+            passthrough_args=False,
+        )
+    }
+)
+UNSTORED_TOKEN_CONFIG = CONFIG | {
+    "plugins": {"github": GITHUB_IMAGE},
+    "scopes": {
+        "ci": {
+            "grants": {
+                "github.pr_view": {
+                    "roots": [],
+                    "domains": [],
+                    "credentials": {"github-token": {"env": "GH_TOKEN"}},
+                }
+            }
+        }
+    },
+}
 
 
 @pytest.fixture
@@ -111,33 +138,13 @@ def test_start_from_a_config_naming_an_unstored_credential_warns_of_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The instance starts and serves a reload; its warnings name the credential."""
-    manifest = Manifest(
-        actions={
-            "pr_view": CommandAction(
-                name="pr_view",
-                input_schema={"type": "object", "additionalProperties": False},
-                credentials=(),
-                timeout=timedelta(seconds=30),
-                argv=("gh", "pr", "view"),
-                parameters=(),
-                passthrough_args=False,
-            )
-        }
-    )
     monkeypatch.setattr(
-        "agent_proxy.plugins.load_manifest", lambda client, reference: manifest
+        "agent_proxy.plugins.load_manifest", lambda client, reference: PR_VIEW
     )
-    grant = {
-        "roots": [],
-        "domains": [],
-        "credentials": {"github-token": {"env": "GH_TOKEN"}},
-    }
-    document = CONFIG | {
-        "plugins": {"github": GITHUB_IMAGE},
-        "scopes": {"ci": {"grants": {"github.pr_view": grant}}},
-    }
 
-    instance = Instance.start(state_dir, _config(tmp_path, document), mock.MagicMock())
+    instance = Instance.start(
+        state_dir, _config(tmp_path, UNSTORED_TOKEN_CONFIG), mock.MagicMock()
+    )
     try:
         reply = request_reload(state_dir / CONTROL_SOCKET_NAME)
     finally:
@@ -220,5 +227,44 @@ def test_a_pinned_verifier_that_cannot_be_pulled_raises_and_starts_nothing(
         Instance.start(state_dir, _config(tmp_path, CONFIG), client)
 
     client.images.pull.assert_called_once_with(PINNED_VERIFIER)
+    assert egress.calls == []
+    assert not (state_dir / CONTROL_SOCKET_NAME).exists()
+
+
+def test_start_on_a_daemon_without_a_memory_limit_warns_before_the_config(
+    state_dir: Path,
+    tmp_path: Path,
+    egress: RecordingEgress,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The daemon's limit warning comes first, then the config's own warnings."""
+    monkeypatch.setattr(
+        "agent_proxy.plugins.load_manifest", lambda client, reference: PR_VIEW
+    )
+    client = mock.MagicMock()
+    client.info.return_value = {"MemoryLimit": False, "PidsLimit": True}
+
+    instance = Instance.start(
+        state_dir, _config(tmp_path, UNSTORED_TOKEN_CONFIG), client
+    )
+    instance.close()
+
+    assert instance.warnings == (
+        "the Docker daemon cannot enforce a cage's memory limit, "
+        "so each cage runs without one",
+        unset_message("github-token"),
+    )
+
+
+def test_a_daemon_info_that_cannot_be_read_raises_and_starts_nothing(
+    state_dir: Path, tmp_path: Path, egress: RecordingEgress
+) -> None:
+    """A failed info call stops the start as a RunnerError before the live config."""
+    client = mock.MagicMock()
+    client.info.side_effect = docker.errors.APIError("info refused")
+
+    with pytest.raises(runner.RunnerError, match="info refused"):
+        Instance.start(state_dir, _config(tmp_path, CONFIG), client)
+
     assert egress.calls == []
     assert not (state_dir / CONTROL_SOCKET_NAME).exists()

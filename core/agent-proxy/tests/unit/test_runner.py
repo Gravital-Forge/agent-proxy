@@ -25,9 +25,12 @@ from agent_proxy.errors import ProxyError
 from agent_proxy.plugins import CommandAction, Parameter, ScriptAction, parse_manifest
 from agent_proxy.results import OUTPUT_CAP_BYTES
 from agent_proxy.runner import (
+    CAGE_MEMORY_BYTES,
+    CAGE_PIDS_LIMIT,
     CONTAINER_LABELS,
     CONTAINER_USER,
     LOG_DRIVER,
+    LOG_OPTIONS,
     TMPFS_OPTIONS,
     TMPFS_PATH,
     VERIFIER_IMAGE,
@@ -56,6 +59,7 @@ from agent_proxy.runner import (
 
 _PINNED_VERIFIER = "ghcr.io/example/agent-proxy-verifier@sha256:" + "a" * 64
 _SECURITY_OPT = ["no-new-privileges", f"seccomp={cage_profile_json()}"]
+_LOG_OPTIONS = {"max-size": "512m", "max-file": "2"}
 _MANIFEST = parse_manifest(
     (Path(__file__).parents[1] / "test-plugin" / "manifest.json").read_bytes()
 )
@@ -648,7 +652,7 @@ def test_cage_mounts_refuses_an_unknown_file_credential(
 
 
 def test_the_cage_constants_are_the_spec_s() -> None:
-    """No product labels, a 64 MiB /tmp, root, json-file logs, and the verifier."""
+    """No product labels, a 64 MiB /tmp, root, capped logs, the limits, the verifier."""
     assert isinstance(CONTAINER_LABELS, types.MappingProxyType)
     assert dict(CONTAINER_LABELS) == {}
     assert TMPFS_PATH == "/tmp"  # noqa: S108 - the path is inside the cage
@@ -660,6 +664,9 @@ def test_the_cage_constants_are_the_spec_s() -> None:
     assert VERIFIER_MOUNT == "/.agent-proxy"
     assert VERIFIER_PATH == "/.agent-proxy/verify"
     assert VERIFIER_REFUSED_EXIT == 125
+    assert CAGE_PIDS_LIMIT == 1024
+    assert CAGE_MEMORY_BYTES == 4 * 2**30
+    assert dict(LOG_OPTIONS) == {"max-size": "512m", "max-file": "2"}
 
 
 def test_run_creates_a_hardened_command_cage_whose_verifier_runs_its_argv(
@@ -713,7 +720,10 @@ def test_run_creates_a_hardened_command_cage_whose_verifier_runs_its_argv(
         environment={"API_TOKEN": "s3cret", "AGENT_PROXY_ROOTS": f'["{work}"]'},
         network=NETWORK.name,
         labels={},
-        log_config=docker.types.LogConfig(type=LOG_DRIVER, config={}),
+        pids_limit=CAGE_PIDS_LIMIT,
+        mem_limit=CAGE_MEMORY_BYTES,
+        memswap_limit=CAGE_MEMORY_BYTES,
+        log_config=docker.types.LogConfig(type=LOG_DRIVER, config=_LOG_OPTIONS),
     )
 
 
@@ -738,8 +748,28 @@ def test_run_creates_a_script_cage_that_takes_its_input_on_stdin(
         environment={"AGENT_PROXY_ROOTS": "[]"},
         network=NETWORK.name,
         labels={},
-        log_config=docker.types.LogConfig(type=LOG_DRIVER, config={}),
+        pids_limit=CAGE_PIDS_LIMIT,
+        mem_limit=CAGE_MEMORY_BYTES,
+        memswap_limit=CAGE_MEMORY_BYTES,
+        log_config=docker.types.LogConfig(type=LOG_DRIVER, config=_LOG_OPTIONS),
     )
+
+
+def test_run_gives_the_cage_its_grant_s_memory_with_no_extra_swap(
+    store: CredentialStore,
+) -> None:
+    """A grant's memory replaces the default for the memory and the swap limit."""
+    grant = Grant.model_validate(
+        {"roots": [], "domains": [], "credentials": {}, "memory": "8g"}
+    )
+    client = _client()
+
+    _run(client, store, _cage_call(_echo(), {"text": "hi"}, grant=grant))
+
+    kwargs = client.containers.create.call_args.kwargs
+    assert kwargs["mem_limit"] == 8 * 2**30
+    assert kwargs["memswap_limit"] == 8 * 2**30
+    assert kwargs["pids_limit"] == CAGE_PIDS_LIMIT
 
 
 def test_run_gives_the_cage_its_network_s_environment_beside_its_credentials(
@@ -1245,6 +1275,53 @@ def test_a_verifier_named_by_tag_is_neither_looked_up_nor_pulled(
 
     client.images.get.assert_not_called()
     client.images.pull.assert_not_called()
+
+
+_MEMORY_WARNING = (
+    "the Docker daemon cannot enforce a cage's memory limit, "
+    "so each cage runs without one"
+)
+_PIDS_WARNING = (
+    "the Docker daemon cannot enforce a cage's process limit, "
+    "so each cage runs without one"
+)
+
+
+@pytest.mark.parametrize(
+    ("memory_limit", "pids_limit", "expected"),
+    [
+        pytest.param(True, True, (), id="both-enforced"),
+        pytest.param(False, True, (_MEMORY_WARNING,), id="no-memory-limit"),
+        pytest.param(True, False, (_PIDS_WARNING,), id="no-process-limit"),
+        pytest.param(False, False, (_MEMORY_WARNING, _PIDS_WARNING), id="neither"),
+    ],
+)
+def test_limit_warnings_name_each_limit_the_daemon_cannot_enforce(
+    memory_limit: bool, pids_limit: bool, expected: tuple[str, ...]
+) -> None:
+    """Each limit the daemon's info reports false gives one warning, memory first."""
+    client = MagicMock()
+    client.info.return_value = {"MemoryLimit": memory_limit, "PidsLimit": pids_limit}
+
+    assert runner.limit_warnings(client) == expected
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        docker.errors.APIError("info refused"),
+        requests.exceptions.ConnectionError("connection refused"),
+    ],
+)
+def test_limit_warnings_fail_as_a_runner_error_when_the_info_call_fails(
+    error: Exception,
+) -> None:
+    """A failed info call raises RunnerError, naming Docker's error."""
+    client = MagicMock()
+    client.info.side_effect = error
+
+    with pytest.raises(RunnerError, match=re.escape(str(error))):
+        runner.limit_warnings(client)
 
 
 def test_run_holds_each_root_open_until_the_cage_is_removed(

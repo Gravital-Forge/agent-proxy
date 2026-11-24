@@ -58,6 +58,14 @@ TMPFS_PATH = "/tmp"  # noqa: S108 - the path is inside the cage, on its own tmpf
 TMPFS_OPTIONS = "rw,size=64m"
 CONTAINER_USER = "0:0"
 LOG_DRIVER = "json-file"
+LOG_OPTIONS: Mapping[str, str] = types.MappingProxyType(
+    {"max-size": "512m", "max-file": "2"}
+)
+CAGE_PIDS_LIMIT = 1024
+CAGE_MEMORY_BYTES = 4 * 2**30
+_DAEMON_LIMITS: Mapping[str, str] = types.MappingProxyType(
+    {"MemoryLimit": "memory limit", "PidsLimit": "process limit"}
+)
 VERIFIER_IMAGE_VARIABLE = "AGENT_PROXY_VERIFIER_IMAGE"
 SOURCE_VERIFIER_IMAGE = "agent-proxy-verifier:1"
 
@@ -373,6 +381,29 @@ def ensure_verifier(client: DockerClient) -> None:
         ensure_image(client, VERIFIER_IMAGE)
 
 
+def limit_warnings(client: DockerClient) -> tuple[str, ...]:
+    """Return one warning for each cage limit the daemon cannot enforce.
+
+    Docker drops a limit its daemon cannot enforce and still runs the cage.
+
+    Raises:
+        RunnerError: the daemon's info cannot be read.
+    """
+    try:
+        info = client.info()
+    except DOCKER_FAILURES as exc:
+        raise RunnerError(
+            f"the Docker daemon's info could not be read, so the cage limits "
+            f"cannot be checked: {exc}"
+        ) from exc
+    return tuple(
+        f"the Docker daemon cannot enforce a cage's {limit}, "
+        "so each cage runs without one"
+        for field, limit in _DAEMON_LIMITS.items()
+        if not info.get(field)
+    )
+
+
 @dataclass(frozen=True)
 class CageCall:
     """One action call, and what the instance's config gives it."""
@@ -556,6 +587,7 @@ def _create(client: DockerClient, call: CageCall, setup: _CageSetup) -> Containe
         CageStartError: Docker refuses the create, an absent action or verifier
             image included.
     """
+    memory_bytes = call.grant.memory or CAGE_MEMORY_BYTES
     try:
         return client.containers.create(
             call.image,
@@ -579,7 +611,13 @@ def _create(client: DockerClient, call: CageCall, setup: _CageSetup) -> Containe
             environment={**call.network.environment, **setup.environment},
             network=call.network.name,
             labels=dict(CONTAINER_LABELS),
-            log_config=docker.types.LogConfig(type=LOG_DRIVER, config={}),
+            pids_limit=CAGE_PIDS_LIMIT,
+            mem_limit=memory_bytes,
+            # A swap limit equal to the memory limit gives the cage no swap.
+            memswap_limit=memory_bytes,
+            log_config=docker.types.LogConfig(
+                type=LOG_DRIVER, config=dict(LOG_OPTIONS)
+            ),
         )
     except DOCKER_FAILURES as exc:
         raise CageStartError(

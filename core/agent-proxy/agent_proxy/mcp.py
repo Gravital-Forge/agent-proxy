@@ -45,6 +45,7 @@ from agent_proxy.runner import (
     CageTimeoutError,
     Outcome,
     ensure_verifier,
+    limit_warnings,
 )
 from agent_proxy.selfcheck import (
     SELF_CHECK_INPUT_SCHEMA,
@@ -588,16 +589,18 @@ class Instance:
     def start(cls, state_dir: Path, config_path: Path, client: DockerClient) -> Self:
         """Open the stores under state_dir, then start the config and its servers.
 
-        The order is the stores, the verifier, the live config, the control
-        socket, and the overflow sweeper. The verifier step pulls a verifier
-        pinned by digest when the daemon lacks it. The control socket serves
-        reloads of the live config and the gateway's checks. A step that fails
-        closes what the steps before it started, then its error propagates.
-        The instance's warnings are those of the first snapshot.
+        The order is the stores, the verifier, the daemon's limits, the live
+        config, the control socket, and the overflow sweeper. The verifier step
+        pulls a verifier pinned by digest when the daemon lacks it. The control
+        socket serves reloads of the live config and the gateway's checks. A
+        step that fails closes what the steps before it started, then its error
+        propagates. The instance's warnings are one for each cage limit the
+        daemon cannot enforce, then those of the first snapshot.
 
         Raises:
             PluginImageError: a verifier pinned by digest cannot be looked up
                 or pulled.
+            RunnerError: the daemon's info cannot be read.
             ProxyError: the audit log cannot be prepared, the config cannot be
                 built, its egress cannot be made ready, or the control socket
                 cannot be bound.
@@ -609,6 +612,7 @@ class Instance:
         with contextlib.ExitStack() as started:
             started.callback(audit.close)
             ensure_verifier(client)
+            daemon_warnings = limit_warnings(client)
             live = LiveConfig.start(build, EgressProxies(client, state_dir / "egress"))
             runner = CageRunner(client, credentials, CageLimiter())
             gateway = CallGateway(
@@ -630,7 +634,11 @@ class Instance:
             sweeper.start()
             started.callback(sweeper.stop)
             instance = cls(
-                build_app(gateway), control, sweeper, audit, live.current.warnings
+                build_app(gateway),
+                control,
+                sweeper,
+                audit,
+                (*daemon_warnings, *live.current.warnings),
             )
             started.pop_all()
         return instance

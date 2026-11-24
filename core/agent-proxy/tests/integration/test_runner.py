@@ -75,6 +75,10 @@ HARDEN_PROBE = (
     '/^NoNewPrivs:/ {print "nonewprivs=" $2}'
     "' /proc/self/status"
 )
+CGROUP_LIMITS_PROBE = (
+    "cat /sys/fs/cgroup/pids.max /sys/fs/cgroup/memory.max "
+    "/sys/fs/cgroup/memory.swap.max"
+)
 OVERFLOW_BYTES = 1048576
 OVERFLOW_LINE = b"abcdefg\n"
 WARMUP_CALLS = 3
@@ -152,6 +156,7 @@ def _grant(
     credentials: Mapping[str, EnvMount | FileMount] | None = None,
     timeout: str | None = None,
     env: Mapping[str, str] | None = None,
+    memory: str | None = None,
 ) -> Grant:
     document: dict[str, object] = {
         "roots": list(roots),
@@ -160,6 +165,8 @@ def _grant(
     }
     if timeout is not None:
         document["timeout"] = timeout
+    if memory is not None:
+        document["memory"] = memory
     if env is not None:
         document["env"] = dict(env)
     return Grant.model_validate(document)
@@ -360,6 +367,29 @@ def test_the_cage_passes_the_hardening_probes(cages: _Cages) -> None:
     assert outcome.content["stdout"] == (
         "root=refused\ntmp=written\ncapeff=0000000000000000\nnonewprivs=1\n"
     )
+
+
+def test_a_cage_runs_under_the_default_process_and_memory_limits(
+    cages: _Cages,
+) -> None:
+    """The cage's cgroup caps it at 1024 processes and 4 GiB, with no swap."""
+    outcome = cages.run(_shell(CGROUP_LIMITS_PROBE), {}, _grant())
+
+    assert outcome.content["stdout"] == f"1024\n{4 * 2**30}\n0\n"
+
+
+def test_a_cage_runs_under_its_grant_s_memory_limit(cages: _Cages) -> None:
+    """A grant's memory of 256m sets the cgroup's memory limit, with no swap."""
+    outcome = cages.run(_shell(CGROUP_LIMITS_PROBE), {}, _grant(memory="256m"))
+
+    assert outcome.content["stdout"] == f"1024\n{256 * 2**20}\n0\n"
+
+
+def test_the_daemon_reports_it_enforces_both_cage_limits(
+    docker_client: DockerClient,
+) -> None:
+    """The daemon's info names both limits as enforced, so the start warns of none."""
+    assert runner.limit_warnings(docker_client) == ()
 
 
 def test_a_cage_cannot_make_a_setid_file_in_a_rw_root(
