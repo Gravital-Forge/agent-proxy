@@ -32,10 +32,10 @@ cage, so git fails with its own error. A command action passes `repo` to the wra
 `--repo`, and the wrapper takes the flag and its value out before git runs. `clone` takes `repo` as
 a GitHub repository's `owner/name`, as [`clone`](#clone) gives.
 
-`repo` names the top level of a checkout: a main checkout or a linked worktree. The plugin refuses a
-`repo` that is a directory with no `.git`, such as a directory inside a checkout. A `repo` that does
-not exist reaches git, and git's error is the result. [Repository shapes](#repository-shapes) gives
-the checkouts the plugin refuses for their shape.
+For every other action, `repo` names the top level of a checkout: a main checkout or a linked
+worktree. The plugin refuses a `repo` that is a directory with no `.git`, such as a directory inside
+a checkout. A `repo` that does not exist reaches git, and git's error is the result.
+[Repository shapes](#repository-shapes) gives the checkouts the plugin refuses for their shape.
 
 A file or pattern input with a `..` segment fails the input schema, so the core refuses the call
 before a cage starts.

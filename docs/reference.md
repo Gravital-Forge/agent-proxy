@@ -399,5 +399,6 @@ gives. A run fails when:
 - it gives no `expires_at` and the entry sets no `max_age`.
 - the value it gives has already expired: `the value it gave expired at <expiry>`, in ISO 8601.
 
-No failure that its stdout causes quotes a value from it. The failure for an extra key names the
-keys. [A provider action](writing-a-plugin.md#a-provider-action) gives what a run must print.
+No failure quotes the credential's `value`. The failure for an extra key names the keys, and the
+failure for an expired value gives the expiry.
+[A provider action](writing-a-plugin.md#a-provider-action) gives what a run must print.

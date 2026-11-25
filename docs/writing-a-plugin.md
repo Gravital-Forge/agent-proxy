@@ -232,11 +232,6 @@ action kind. Among its actions are a command action with a flag and a positional
 action whose executable the image also holds, and a provider action, `issue_value`. `COPY` keeps
 each file's mode, so an executable must already be executable in the build context.
 
-`plugins/git/` is a full plugin: a uv package with its own tests, whose actions run git in the cage.
-Its [README](../plugins/git/README.md) gives what it offers and how it is built. `plugins/github/`
-is also a full plugin, whose actions run gh in a cage, and its [README](../plugins/github/README.md)
-gives what it offers. `plugins/hcp-terraform/` is a full plugin whose script actions call HCP
-Terraform's API with Python's standard library, and its [README](../plugins/hcp-terraform/README.md)
-gives what it offers. `plugins/github-app/` is a full plugin with one provider action, which mints a
-GitHub App installation token, and its [README](../plugins/github-app/README.md) gives what it
-offers.
+Each directory under `plugins/` is a full plugin, and its README gives what it offers.
+`plugins/git/` is one: a uv package with its own tests, whose actions run git in the cage. Its
+[README](../plugins/git/README.md) also gives how it is built.

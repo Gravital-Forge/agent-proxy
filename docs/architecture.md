@@ -353,9 +353,10 @@ The instance writes one JSON line per call to `audit/audit.log` in the state dir
 `action`, `arguments`, `arguments_cut`, `exit_code`, `duration_ms`, `stdout_bytes`, `stderr_bytes`,
 `truncated`, for a refused call the `refusal` without its MCP prefix, and `credential`. `credential`
 names the provided credential on a provider run's line, and is `null` on every other line. A line
-never holds a credential's value or any output's content, except the stderr of a failed provider
-run. The `refusal` of the run's line quotes it as the stderr excerpt, and so does the `refusal` of
-the call that the failure refuses.
+never holds a credential's value or any output's content, except the parts of a failed provider
+run's output that its failure quotes, as [A provider's failure](reference.md#a-providers-failure)
+gives. The `refusal` of the run's line quotes that failure, and so does the `refusal` of the call
+that the failure refuses.
 
 The caller chooses the arguments, the tool name, and any input that a refusal quotes, so the line
 caps each of them where it is rendered:
