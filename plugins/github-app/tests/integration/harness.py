@@ -1,7 +1,7 @@
 """What the github-app plugin's integration tests share with their fixtures."""
 
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -9,8 +9,6 @@ from typing import Protocol
 from agent_proxy.runner import Outcome
 
 OPENSSL = "/usr/bin/openssl"
-
-type FakeApiLog = Callable[[], list[dict[str, object]]]
 
 
 @dataclass(frozen=True)

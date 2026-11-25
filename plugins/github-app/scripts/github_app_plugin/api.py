@@ -95,7 +95,7 @@ def _issued_token(path: str, body: bytes) -> InstallationToken:
     """Return the token and expiry a 201's body holds.
 
     Raises:
-        ProviderError: the body holds no non-empty token string and no
+        ProviderError: the body holds no non-empty token string, or no
             expires_at string. The reason never quotes the body.
     """
     answer = _json_object(body)
