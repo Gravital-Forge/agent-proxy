@@ -95,7 +95,7 @@ sudo core/docker/provision-instance.sh [--release <version>] [--tree <path>] age
 ```
 
 `<port>` is the loopback port the instance serves on, and `<config-file>` is the config to install.
-The config may name credentials that the operator has not stored yet;
+The config may name stored credentials that are not in the store yet;
 [The first start](#the-first-start) stores them.
 
 The options come before the positional arguments, in any order:
@@ -241,7 +241,7 @@ also warns when the service user's daemon cannot enforce a cage's memory or proc
 [Failures and warnings](reference.md#failures-and-warnings) gives. `docker logs agent-proxy` shows
 the warnings. Then:
 
-1. Store each credential the config names. The command reads the value from stdin:
+1. Store each stored credential the config names. The command reads the value from stdin:
 
    ```sh
    docker exec -i agent-proxy agent-proxy credential set <name>

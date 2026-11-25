@@ -290,10 +290,12 @@ README.
     Store the key as the credential `github-app-key`, as
     [The first start](deployment.md#the-first-start) gives. In the config, pin the github-app
     plugin's image, and give a `provided_credentials` entry shaped like the one in
-    `examples/instance.yaml`, with the App's ID and the installation's ID. Give a `git.fetch` grant
-    whose `roots` name the checkout, whose `domains` name `github.com`, whose `credentials` give
-    that provided credential as `GH_TOKEN`, and whose `GITHUB_REPOS` names `<repo>`. Put the config
-    in force as [Changing the config](deployment.md#changing-the-config) gives.
+    `examples/instance.yaml`, with the App's ID and the installation's ID.
+    [A provided credential](../plugins/github-app/README.md#a-provided-credential) gives the entry.
+    Give a `git.fetch` grant whose `roots` name the checkout, whose `domains` name `github.com`,
+    whose `credentials` give that provided credential as `GH_TOKEN`, and whose `GITHUB_REPOS` names
+    `<repo>`. Put the config in force as [Changing the config](deployment.md#changing-the-config)
+    gives.
 
     1. Run `docker exec agent-proxy agent-proxy check`. The `credential` row of the provided
        credential passes, and its detail begins `provided by 'github-app.installation_token'`.
@@ -313,8 +315,8 @@ README.
     and that later git actions accept that checkout. Take the config of check 14, and as the agent,
     make an empty directory below the tree, `<clone dir>` below. Give a `git.clone` grant shaped
     like the one in `examples/instance.yaml`, whose `roots` name `<clone dir>` with mode `rw` and
-    whose `GITHUB_REPOS` names `<repo>`. Give a `git.status` grant whose `roots` name `<clone dir>`
-    with mode `rw`. Put the config in force as
+    whose `GITHUB_REPOS` names `<repo>`, as [`clone`](../plugins/git/README.md#clone) gives. Give a
+    `git.status` grant whose `roots` name `<clone dir>` with mode `rw`. Put the config in force as
     [Changing the config](deployment.md#changing-the-config) gives.
 
     1. Through the agent's MCP client, call `git_clone` with `repo` set to `<repo>` and `path` set

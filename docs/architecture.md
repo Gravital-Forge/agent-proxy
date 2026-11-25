@@ -70,8 +70,8 @@ A call goes through these steps:
    [Provided credentials](#provided-credentials) gives. A provider run takes a cage of its own, and
    the call holds no cage while it waits.
 5. It refuses a bad call before the call waits for a cage: input that fails the action's input
-   schema, a value for argv that begins with `-`, a root it cannot open, and a credential that is
-   not stored.
+   schema, a value for argv that begins with `-`, a root it cannot open, and a stored credential
+   that the store lacks.
 6. It runs the action in a cage, as [The cage](#the-cage) gives, and forms the result.
 7. It writes the call's audit line, as [Audit](#audit) gives, and only then returns the result.
 
@@ -324,9 +324,8 @@ A call refreshes a value when the value is not fresh, never on a timer:
 
 - A fresh value serves the call, and no provider runs.
 - Otherwise the provider runs under a lock of that credential's own. A call that needs the same
-  value waits on the lock, then takes the value the run left when that value is fresh. When it is
-  not, because the run failed or its audit line was not written, the waiting call runs the provider
-  itself. Runs for different credentials go side by side.
+  value waits on the lock, then takes the value the run left when that value is fresh. Otherwise the
+  waiting call runs the provider itself. Runs for different credentials go side by side.
 - When the run fails and the cached value has not expired, the call uses that value, and the next
   call runs the provider again.
 - When the run fails and no unexpired value is cached, the call is refused before its cage starts,
@@ -399,10 +398,10 @@ Each provider run writes one line of its own, with a call ID of its own. Its `ac
 provider's `<plugin>_<action>`, and its `credential` names the provided credential. Its
 `token_name`, `scope`, `arguments`, and `arguments_cut` are `null`. It carries the exit code, the
 duration, the stream sizes, and `truncated`, and when the run failed, the failure as `refusal`. A
-run that the runner refused or failed before the cage exited has no exit code and no stream sizes.
-The call that waited on the run writes its own line. When a run's line cannot be written, its value
-is neither cached nor used, and the call that started the run is refused with the audit refusal of
-the run's call ID.
+run that the runner refused, or whose output it could not read, has no exit code and no stream
+sizes. The call that needed the value writes its own line, as every call does. When a run's line
+cannot be written, its value is neither cached nor used, and the call that started the run is
+refused with the audit refusal of the run's call ID.
 
 ## The self-check
 

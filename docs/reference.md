@@ -350,7 +350,7 @@ The proxy refuses a call when:
 - a value that a parameter places in argv begins with `-`;
 - a root is missing, is not a directory, has a symbolic link in its path, or was replaced before the
   cage started;
-- a credential that the grant names is not stored, as in the example above;
+- a stored credential that the grant names is not in the store, as in the example above;
 - a credential that the grant gives as an environment variable is not valid UTF-8, or holds a NUL;
 - a provided credential that the grant names has no unexpired value, because its provider's run
   failed, as [A provider's failure](#a-providers-failure) gives;
