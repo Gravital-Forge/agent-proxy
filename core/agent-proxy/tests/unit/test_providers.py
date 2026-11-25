@@ -365,7 +365,7 @@ def test_output_that_breaks_the_contract_is_refused_without_the_value(
 
     assert str(caught.value) == failure
     assert caught.value.__cause__ is None
-    assert caught.value.__context__ is None or caught.value.__suppress_context__
+    assert caught.value.__context__ is None
 
 
 def test_a_grant_naming_no_provided_credential_resolves_to_nothing(

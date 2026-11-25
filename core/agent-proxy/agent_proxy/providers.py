@@ -23,6 +23,7 @@ from agent_proxy.runner import (
 )
 
 _OUTPUT_KEYS = frozenset({"value", "expires_at"})
+_NOT_JSON = object()
 
 
 class ProvisionError(CredentialError):
@@ -59,13 +60,11 @@ def parse_provider_output(
     value = document.get("value")
     if not isinstance(value, str) or not value:
         raise ProvisionError("its output's 'value' is not a non-empty string")
-    try:
-        check_environment_value("value", value)
-    except CredentialError:
+    if not _is_environment_value(value):
         raise ProvisionError(
             "its output's 'value' is not valid UTF-8 or holds a NUL, so it cannot"
             " be an environment value"
-        ) from None
+        )
     expiries = [] if max_age is None else [fetched_at + max_age]
     if "expires_at" in document:
         expiries.append(_expires_at(document["expires_at"]))
@@ -83,11 +82,9 @@ def _output_document(stdout: bytes) -> Mapping[str, object]:
         ProvisionError: stdout is not UTF-8 JSON, is not an object, or holds a
             key other than value and expires_at.
     """
-    try:
-        document = json.loads(stdout.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError, RecursionError):
-        # These errors quote or carry the output, which may hold the value.
-        raise ProvisionError("its output is not UTF-8 JSON") from None
+    document = _decoded(stdout)
+    if document is _NOT_JSON:
+        raise ProvisionError("its output is not UTF-8 JSON")
     if not isinstance(document, dict):
         raise ProvisionError("its output is not a JSON object")
     extra = sorted(document.keys() - _OUTPUT_KEYS)
@@ -96,6 +93,27 @@ def _output_document(stdout: bytes) -> Mapping[str, object]:
             f"its output holds keys other than 'value' and 'expires_at': {extra!r}"
         )
     return cast("dict[str, object]", document)
+
+
+# Each refusal below is raised after its except block has ended: a decode or
+# encode error holds the output it failed on, and one raised inside the block
+# would keep that error as its __context__, even with "from None".
+
+
+def _decoded(stdout: bytes) -> object:
+    """Return the JSON document stdout holds as UTF-8, or _NOT_JSON."""
+    try:
+        return json.loads(stdout.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError):
+        return _NOT_JSON
+
+
+def _is_environment_value(value: str) -> bool:
+    try:
+        check_environment_value("value", value)
+    except CredentialError:
+        return False
+    return True
 
 
 def _expires_at(text: object) -> datetime:
@@ -107,15 +125,22 @@ def _expires_at(text: object) -> datetime:
     """
     if not isinstance(text, str):
         raise ProvisionError("its output's 'expires_at' is not a string")
-    try:
-        moment = datetime.fromisoformat(text)
-    except ValueError:
+    moment = _iso_moment(text)
+    if moment is None:
         raise ProvisionError(
             "its output's 'expires_at' is not an ISO 8601 date and time"
-        ) from None
+        )
     if moment.utcoffset() is None:
         raise ProvisionError("its output's 'expires_at' carries no time zone")
     return moment
+
+
+def _iso_moment(text: str) -> datetime | None:
+    """Return the date and time text names in ISO 8601, or None."""
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
 
 
 @dataclass(frozen=True)
