@@ -29,6 +29,7 @@ from agent_proxy.auth import TokenRecord, TokenStore, TokenStoreError
 from agent_proxy.credentials import CredentialStore
 from agent_proxy.egress import EgressProxies, cage_network
 from agent_proxy.errors import ProxyError
+from agent_proxy.providers import ProvidedCredentials
 from agent_proxy.reload import (
     CONTROL_SOCKET_NAME,
     ControlServer,
@@ -166,6 +167,7 @@ class CallGateway:
         tokens: TokenStore,
         live: LiveConfig,
         runner: CageRunner,
+        provided: ProvidedCredentials,
         self_check: SelfCheck,
         audit: AuditWriter,
         now: Callable[[], datetime],
@@ -174,6 +176,7 @@ class CallGateway:
         self._tokens = tokens
         self._live = live
         self._runner = runner
+        self._provided = provided
         self._self_check = self_check
         self._audit = audit
         self._now = now
@@ -346,9 +349,14 @@ class CallGateway:
     def _run(self, call: _Call, scope_name: str) -> Outcome:
         """Run call in a cage, holding the snapshot in force in use throughout.
 
+        The grant's provided credentials resolve before the cage takes its
+        slot, and their values go to the runner with the call.
+
         Raises:
             CallRefusedError: the scope is not defined in the config in force,
                 or the tool names no grant of it.
+            ProvisionError: a provided credential the grant names has no value
+                the call can use; no cage of the call has started.
             ProxyError: the runner refuses or fails the call.
         """
         with self._live.use() as snapshot:
@@ -361,6 +369,7 @@ class CallGateway:
                 raise CallRefusedError(
                     f"tool {call.tool!r} is not granted to scope {scope_name!r}"
                 )
+            provided = self._provided.resolve(snapshot, grant)
             return self._runner.run(
                 CageCall(
                     call_id=call.call_id,
@@ -371,6 +380,7 @@ class CallGateway:
                     network=cage_network(grant.domains),
                     overflow_dir=snapshot.config.overflow_dir,
                     max_cages=snapshot.config.max_cages,
+                    provided=provided,
                 )
             )
 
@@ -593,8 +603,10 @@ class Instance:
         The verifier step pulls a verifier pinned by digest when the daemon
         lacks it. The left-cages step force-removes every cage an earlier
         instance left on the daemon, and the instance holds the name of each
-        cage it removed. The control socket serves reloads of the live config
-        and the gateway's checks. A step that fails closes what the steps
+        cage it removed. The instance holds one cache of provided values, and
+        each reload drops every value whose definition it changed. The
+        control socket serves reloads of the live config and the gateway's
+        checks. A step that fails closes what the steps
         before it started, then its error propagates. The instance's warnings
         are one for each cage limit the daemon cannot enforce, then one for
         each left cage that could not be removed, then those of the first
@@ -618,12 +630,18 @@ class Instance:
             ensure_verifier(client)
             daemon_warnings = limit_warnings(client)
             removal = remove_left_cages(client)
-            live = LiveConfig.start(build, EgressProxies(client, state_dir / "egress"))
             runner = CageRunner(client, credentials, CageLimiter())
+            provided = ProvidedCredentials(runner, audit, _utc_now)
+            live = LiveConfig.start(
+                build,
+                EgressProxies(client, state_dir / "egress"),
+                on_reload=provided.retain,
+            )
             gateway = CallGateway(
                 tokens,
                 live,
                 runner,
+                provided,
                 SelfCheck(client, credentials, runner),
                 audit,
                 _utc_now,

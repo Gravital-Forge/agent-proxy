@@ -297,16 +297,25 @@ def check_environment_value(name: str, value: str) -> None:
     Raises:
         CredentialError: value is not valid UTF-8 or holds a NUL.
     """
-    try:
-        value.encode("utf-8")
-    except UnicodeEncodeError:
-        # The encode error quotes the offending character, so it must not
-        # travel as the cause.
-        raise _not_utf8(name) from None
+    if not _encodes_as_utf8(value):
+        raise _not_utf8(name)
     if "\0" in value:
         raise CredentialError(
             f"credential {name!r} holds a NUL, so it cannot be an environment value"
         )
+
+
+# Each UTF-8 refusal is raised after its except block has ended: an encode or
+# decode error holds the whole value it failed on, and a refusal raised inside
+# the block would keep that error as its __context__, even with "from None".
+
+
+def _encodes_as_utf8(value: str) -> bool:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _environment_value(
@@ -320,12 +329,17 @@ def _environment_value(
 def _stored_text(name: str, store: CredentialStore) -> str:
     with _stored_credential(name):
         stored_bytes = store.read(name)
+    text = _utf8_text(stored_bytes)
+    if text is None:
+        raise _not_utf8(name)
+    return text
+
+
+def _utf8_text(stored_bytes: bytes) -> str | None:
     try:
         return stored_bytes.decode("utf-8")
     except UnicodeDecodeError:
-        # The decode error quotes the offending byte, so it must not travel as
-        # the cause.
-        raise _not_utf8(name) from None
+        return None
 
 
 def _not_utf8(name: str) -> CredentialError:

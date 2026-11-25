@@ -541,6 +541,112 @@ def test_a_failed_ensure_keeps_current_and_still_prunes(tmp_path: Path) -> None:
     assert egress.calls == [("ensure", {NEW_DOMAINS}), ("prune", {OLD_DOMAINS})]
 
 
+class RecordingReloads:
+    """An on_reload hook that records each snapshot and the one in force then."""
+
+    def __init__(self) -> None:
+        """Start with no reload seen."""
+        self.live: LiveConfig | None = None
+        self.seen: list[tuple[Snapshot, Snapshot | None]] = []
+
+    def __call__(self, snapshot: Snapshot) -> None:
+        """Record snapshot and the snapshot then in force."""
+        current = None if self.live is None else self.live.current
+        self.seen.append((snapshot, current))
+
+
+def test_a_reload_hands_the_snapshot_it_put_in_force_to_on_reload(
+    tmp_path: Path,
+) -> None:
+    """The hook gets the new snapshot once, after it is in force."""
+    old = _snapshot(tmp_path, "60s", "old.yaml")
+    new = _snapshot(tmp_path, "120s", "new.yaml")
+    reloads = RecordingReloads()
+    live = LiveConfig(old, RecordingEgress(), on_reload=reloads)
+    reloads.live = live
+
+    live.reload(lambda: new)
+
+    assert reloads.seen == [(new, new)]
+
+
+def test_start_calls_no_on_reload_and_a_later_reload_does(
+    tmp_path: Path,
+) -> None:
+    """The first snapshot is no reload; a later reload reaches the hook."""
+    first = _snapshot(tmp_path, "60s", "first.yaml")
+    new = _snapshot(tmp_path, "120s", "new.yaml")
+    reloads = RecordingReloads()
+
+    live = LiveConfig.start(lambda: first, RecordingEgress(), on_reload=reloads)
+    assert reloads.seen == []
+    live.reload(lambda: new)
+
+    assert [snapshot for snapshot, _ in reloads.seen] == [new]
+
+
+def test_a_failed_build_calls_no_on_reload(tmp_path: Path) -> None:
+    """A refused config leaves the hook uncalled."""
+    reloads = RecordingReloads()
+    live = LiveConfig(
+        _snapshot(tmp_path, "60s", "old.yaml"), RecordingEgress(), on_reload=reloads
+    )
+    invalid = _write(tmp_path, _config({"git.rebase": _grant()}), "invalid.yaml")
+
+    with pytest.raises(ConfigError):
+        live.reload(
+            functools.partial(build_snapshot, invalid, CREDENTIAL_NAMES, LOAD_BOTH)
+        )
+
+    assert reloads.seen == []
+
+
+def test_a_failed_ensure_calls_no_on_reload(tmp_path: Path) -> None:
+    """A reload whose egress cannot be made ready leaves the hook uncalled."""
+    old = _egress_snapshot(tmp_path, OLD_DOMAINS, "old.yaml")
+    new = _egress_snapshot(tmp_path, NEW_DOMAINS, "new.yaml")
+    egress = RecordingEgress(ensure_error=EgressError("proxy did not start"))
+    reloads = RecordingReloads()
+    live = LiveConfig(old, egress, on_reload=reloads)
+
+    with pytest.raises(EgressError):
+        live.reload(lambda: new)
+
+    assert reloads.seen == []
+
+
+def test_on_reload_runs_inside_the_reload_lock(tmp_path: Path) -> None:
+    """A second reload waits for the first one's hook, so hooks run in reload order."""
+    old = _snapshot(tmp_path, "60s", "old.yaml")
+    new = _snapshot(tmp_path, "120s", "new.yaml")
+    hook_started = threading.Event()
+    release_hook = threading.Event()
+    second_built = threading.Event()
+    order: list[Snapshot] = []
+
+    def on_reload(snapshot: Snapshot) -> None:
+        if not order:
+            hook_started.set()
+            release_hook.wait(WAIT_SECONDS)
+        order.append(snapshot)
+
+    def second_build() -> Snapshot:
+        second_built.set()
+        return new
+
+    live = LiveConfig(old, RecordingEgress(), on_reload=on_reload)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(live.reload, lambda: old)
+        assert hook_started.wait(WAIT_SECONDS)
+        second = pool.submit(live.reload, second_build)
+        assert not second_built.wait(0.2)
+        release_hook.set()
+
+    first.result()
+    second.result()
+    assert order == [old, new]
+
+
 def test_the_prune_after_a_swap_keeps_a_list_only_a_snapshot_in_use_names(
     tmp_path: Path,
 ) -> None:

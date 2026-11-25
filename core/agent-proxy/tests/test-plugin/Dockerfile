@@ -14,4 +14,5 @@ COPY manifest.json /plugin/manifest.json
 COPY describe /usr/local/bin/describe
 COPY count-bytes /plugin/count-bytes
 COPY fail /plugin/fail
+COPY issue-value /plugin/issue-value
 COPY --from=build /out/setid-probe /plugin/setid-probe

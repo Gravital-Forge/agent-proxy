@@ -72,7 +72,11 @@ class Tree:
         self.overflow_dir.mkdir(parents=True)
         self.repo.mkdir()
 
-    def snapshot(self, grants: Mapping[str, Mapping[str, object]]) -> Snapshot:
+    def snapshot(
+        self,
+        grants: Mapping[str, Mapping[str, object]],
+        provided: Mapping[str, Mapping[str, object]] = MappingProxyType({}),
+    ) -> Snapshot:
         """Return a snapshot whose scope dev holds grants, and whose idle holds none."""
         config = InstanceConfig.model_validate(
             {
@@ -81,6 +85,7 @@ class Tree:
                 "max_cages": MAX_CAGES,
                 "plugins": {"git": GIT_IMAGE, "github": GITHUB_IMAGE},
                 "scopes": {"dev": {"grants": grants}, "idle": {"grants": {}}},
+                "provided_credentials": provided,
             }
         )
         return Snapshot(config=config, manifests=MappingProxyType({}), warnings=())
@@ -245,6 +250,151 @@ def test_no_credential_value_appears_in_the_report(
     report = _check(snapshot, store, runner)
 
     assert SECRET.decode() not in repr(report.content())
+
+
+def _provided(
+    *inputs: str, domains: tuple[str, ...] = ("api.github.com",)
+) -> dict[str, object]:
+    return {
+        "provider": "github.issue",
+        "credentials": {name: {"file": f"/run/credentials/{name}"} for name in inputs},
+        "domains": list(domains),
+        "refresh_before": "10m",
+    }
+
+
+def test_a_provided_credential_whose_inputs_are_stored_passes(
+    tree: Tree, store: CredentialStore, runner: FakeRunner
+) -> None:
+    """The entry is by the provided name, and its detail names the provider."""
+    store.set("app-key", SECRET)
+    snapshot = tree.snapshot(
+        {"git.clone": _grant(credentials=("app-token",))},
+        {"app-token": _provided("app-key")},
+    )
+
+    report = _check(snapshot, store, runner)
+
+    assert _entries(report, "credential") == [
+        CheckEntry(
+            check="credential",
+            subject="app-token",
+            ok=True,
+            detail="provided by 'github.issue'; every stored credential it takes"
+            " is stored",
+        )
+    ]
+
+
+def test_a_provided_credential_with_no_stored_input_passes(
+    tree: Tree, store: CredentialStore, runner: FakeRunner
+) -> None:
+    """A provider that takes no stored credential has nothing to miss."""
+    snapshot = tree.snapshot(
+        {"git.clone": _grant(credentials=("app-token",))},
+        {"app-token": _provided()},
+    )
+
+    [entry] = _entries(_check(snapshot, store, runner), "credential")
+
+    assert entry.ok is True
+
+
+def test_a_provided_credential_fails_naming_each_unstored_input(
+    tree: Tree, store: CredentialStore, runner: FakeRunner
+) -> None:
+    """The detail names the provider, then the unset message of each missing input."""
+    store.set("app-id", SECRET)
+    snapshot = tree.snapshot(
+        {"git.clone": _grant(credentials=("app-token",))},
+        {"app-token": _provided("app-key", "app-id", "app-ca")},
+    )
+
+    report = _check(snapshot, store, runner)
+
+    assert _entries(report, "credential") == [
+        CheckEntry(
+            check="credential",
+            subject="app-token",
+            ok=False,
+            detail="provided by 'github.issue'; "
+            f"{unset_message('app-key')}; {unset_message('app-ca')}",
+        )
+    ]
+    assert report.ok is False
+
+
+def test_a_provided_and_a_stored_credential_keep_first_named_order(
+    tree: Tree, store: CredentialStore, runner: FakeRunner
+) -> None:
+    """Provided names are checked in grant order beside stored ones, once each."""
+    snapshot = tree.snapshot(
+        {
+            "git.clone": _grant(credentials=("api-token", "app-token")),
+            "git.push": _grant(credentials=("app-token",)),
+        },
+        {"app-token": _provided()},
+    )
+
+    report = _check(snapshot, store, runner)
+
+    checked = [(entry.subject, entry.ok) for entry in _entries(report, "credential")]
+    assert checked == [("api-token", False), ("app-token", True)]
+
+
+def test_a_provided_credential_no_grant_names_has_no_entry(
+    tree: Tree, store: CredentialStore, runner: FakeRunner
+) -> None:
+    """A provided credential no grant names adds no credential or egress entry."""
+    snapshot = tree.snapshot(
+        {"git.clone": _grant()}, {"app-token": _provided("app-key")}
+    )
+
+    report = _check(snapshot, store, runner)
+
+    assert _entries(report, "credential") == []
+    assert _entries(report, "egress") == []
+
+
+def test_a_provided_credentials_domains_join_the_egress_checks(
+    tree: Tree, store: CredentialStore, runner: FakeRunner
+) -> None:
+    """Its list follows the grants' lists, once each, and its empty list has none."""
+    snapshot = tree.snapshot(
+        {
+            "git.clone": _grant(
+                domains=("github.com",), credentials=("app-token", "ci-token")
+            ),
+            "git.push": _grant(credentials=("vault-token", "idle-token")),
+        },
+        {
+            "app-token": _provided(domains=("api.github.com",)),
+            "ci-token": _provided(domains=("github.com",)),
+            "vault-token": _provided(domains=("api.github.com",)),
+            "idle-token": _provided(domains=()),
+        },
+    )
+
+    report = _check(snapshot, store, runner)
+
+    assert [entry.subject for entry in _entries(report, "egress")] == [
+        _proxy_name("github.com"),
+        _proxy_name("api.github.com"),
+    ]
+
+
+def test_the_check_never_runs_a_provider(
+    tree: Tree, store: CredentialStore, runner: FakeRunner
+) -> None:
+    """Every cage the check runs is a plugin's describe."""
+    snapshot = tree.snapshot(
+        {"git.clone": _grant(credentials=("app-token",))},
+        {"app-token": _provided()},
+    )
+
+    _check(snapshot, store, runner)
+
+    assert [call.action.name for call in runner.calls] == ["describe"]
 
 
 def test_a_root_the_instance_opens_passes(

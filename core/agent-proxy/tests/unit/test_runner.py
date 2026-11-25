@@ -587,7 +587,7 @@ def test_cage_environment_refuses_a_value_that_is_not_utf8(
 
     assert "xff" not in str(excinfo.value)
     assert excinfo.value.__cause__ is None
-    assert excinfo.value.__suppress_context__
+    assert excinfo.value.__context__ is None
 
 
 def test_cage_environment_refuses_a_value_that_holds_a_nul(
@@ -637,6 +637,7 @@ def test_check_environment_value_refuses_by_name_without_the_value(
     message = str(excinfo.value)
     assert message.startswith(f"credential 'app-token' {reason}")
     assert value not in message
+    assert excinfo.value.__context__ is None
 
 
 def test_cage_environment_takes_a_provided_value_without_reading_the_store(
@@ -692,7 +693,7 @@ def test_cage_environment_refuses_a_provided_value_that_is_not_utf8(
         "so it cannot be an environment value"
     )
     assert excinfo.value.__cause__ is None
-    assert excinfo.value.__suppress_context__
+    assert excinfo.value.__context__ is None
 
 
 def test_cage_environment_refuses_a_provided_value_that_holds_a_nul(

@@ -178,17 +178,34 @@ class LiveConfig:
     never while holding it.
     """
 
-    def __init__(self, snapshot: Snapshot, egress: Egress) -> None:
-        """Put snapshot in force, with egress neither ensured nor pruned."""
+    def __init__(
+        self,
+        snapshot: Snapshot,
+        egress: Egress,
+        on_reload: Callable[[Snapshot], None] = lambda snapshot: None,
+    ) -> None:
+        """Put snapshot in force, with egress neither ensured nor pruned.
+
+        on_reload is called with each snapshot a reload puts in force, after
+        the swap and inside the reload lock, so its calls come in reload order.
+        """
         self._current = snapshot
         self._egress = egress
+        self._on_reload = on_reload
         self._uses: dict[int, _Use] = {}
         self._reload_lock = threading.Lock()
         self._state_lock = threading.Lock()
 
     @classmethod
-    def start(cls, build: Callable[[], Snapshot], egress: Egress) -> Self:
+    def start(
+        cls,
+        build: Callable[[], Snapshot],
+        egress: Egress,
+        on_reload: Callable[[Snapshot], None] = lambda snapshot: None,
+    ) -> Self:
         """Build the first snapshot, ensure its egress, and prune every other.
+
+        on_reload is not called for the first snapshot, only for each reload.
 
         Raises:
             ProxyError: build or egress.ensure fails; its error propagates.
@@ -197,7 +214,7 @@ class LiveConfig:
         lists = domain_lists(snapshot.config)
         egress.ensure(lists)
         egress.prune(lists)
-        return cls(snapshot, egress)
+        return cls(snapshot, egress, on_reload)
 
     @property
     def current(self) -> Snapshot:
@@ -227,7 +244,7 @@ class LiveConfig:
                 ).start()
 
     def reload(self, build: Callable[[], Snapshot]) -> Snapshot:
-        """Build a snapshot, ensure its egress, and put it in force.
+        """Build a snapshot, ensure its egress, put it in force, and call on_reload.
 
         One reload runs at a time. Egress is pruned afterwards, whether or not
         the reload succeeded.
@@ -245,6 +262,7 @@ class LiveConfig:
                 self._egress.ensure(domain_lists(snapshot.config))
                 with self._state_lock:
                     self._current = snapshot
+                self._on_reload(snapshot)
             finally:
                 self._prune()
         return snapshot
