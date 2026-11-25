@@ -82,10 +82,10 @@ def test_main_refuses_a_name_with_no_action(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A name that no action runs under is refused with exit 2."""
-    exit_code = entry.main(["/plugin/bin/clone"])
+    exit_code = entry.main(["/plugin/bin/gc"])
 
     assert exit_code == 2
-    assert capsys.readouterr().err == "git plugin refused: no action is named 'clone'\n"
+    assert capsys.readouterr().err == "git plugin refused: no action is named 'gc'\n"
 
 
 def test_a_helper_link_answers_gits_get(tmp_path: Path) -> None:
