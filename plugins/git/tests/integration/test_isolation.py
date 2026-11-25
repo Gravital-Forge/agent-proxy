@@ -193,8 +193,8 @@ def test_every_action_round_trips_and_runs_no_planted_program(
 
     The drivers sit in the repository's .git/config and the LFS transfer in
     its .lfsconfig. The pull after the push finds the upstream the push wrote
-    back to the real config. clone takes an empty root, never a checkout, so
-    no canary can be planted for it; test_clone.py runs it.
+    back to the real config. clone takes an empty root, so it reads no
+    .git/config the agent wrote; test_clone.py runs it.
     """
     checkout = canary_checkout
     ran: set[str] = set()
