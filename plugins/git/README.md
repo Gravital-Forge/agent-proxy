@@ -436,7 +436,9 @@ with its own file tools, and a key there can name a program for git to run: a fi
 `diff` textconv, `core.fsmonitor`, or an LFS custom transfer. That program would run with the cage's
 credential. So every action, through the wrapper or as a script, in a cage with a credential or
 without one, runs git against a config that the plugin builds for that action. The plugin never
-filters the agent's config. `build_isolation` in `scripts/git_plugin/cage.py` builds it.
+filters the agent's config. `build_isolation` in `scripts/git_plugin/cage.py` builds the isolation.
+The one exception is `clone`'s `git init`, which runs before the repository exists and reads no
+config the agent wrote, as [`clone`](#clone) gives.
 
 Before git runs, the plugin finds the repository's real git directories by reading files, with no
 git run. The git directory is `<repo>/.git`, or the directory a `.git` file names after `gitdir: `.

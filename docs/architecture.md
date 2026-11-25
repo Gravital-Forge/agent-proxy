@@ -42,7 +42,8 @@ These terms carry one meaning each through the code and the documents.
 - **Manifest** — the JSON a plugin image's `describe` entrypoint prints.
   [The manifest](writing-a-plugin.md#the-manifest) gives its members and rules.
 - **Cage** — the short-lived container one action call runs in, built from its grant: only the
-  grant's roots mounted, only the grant's domains reachable, only the grant's credentials present.
+  grant's roots mounted, only the grant's domains reachable, only the grant's credentials present. A
+  provider run's cage is built from its `provided_credentials` entry in the same way.
 - **Egress proxy** — an iron-proxy container serving one distinct domain list.
 
 ## The call path
@@ -276,21 +277,23 @@ token. The operator delivers a token by writing it into the agent's MCP client c
 
 ## Credentials
 
-A credential is an opaque named value, stored verbatim as one file in the state directory's
-`credentials/`, which only the instance's service user can read
+A credential is an opaque named value. A stored credential is stored verbatim as one file in the
+state directory's `credentials/`, which only the instance's service user can read
 (`core/agent-proxy/agent_proxy/credentials.py`). A write goes to a staging file first, then renames
-it over the target, so a listing never shows a half-written credential.
+it over the target, so a listing never shows a half-written credential. A provided credential's
+value never enters the store, as [Provided credentials](#provided-credentials) gives.
 
-Only the operator manages credentials, with the `credential` verbs of
-[The operator command](reference.md#the-operator-command). A grant gives each credential it uses to
-the cage as an environment variable or as a file, in the forms of
+Only the operator manages stored credentials, with the `credential` verbs of
+[The operator command](reference.md#the-operator-command). A grant gives each stored credential it
+uses to the cage as an environment variable or as a file, in the forms of
 [A scope's grants](reference.md#a-scopes-grants).
 
 The instance reads the store on every call, so a stored credential takes effect on the next call
-with no reload. A call under a grant whose credential is not stored is refused before a cage starts,
-and audited like any other refusal. The grant's tools stay listed for the token. The config load
-never consults the store: a stored credential that a grant or a provided credential names and the
-store lacks is a warning, as [Failures and warnings](reference.md#failures-and-warnings) gives.
+with no reload. A call under a grant whose stored credential the store lacks is refused before a
+cage starts, and audited like any other refusal. The grant's tools stay listed for the token. The
+config load never consults the store: a stored credential that a grant or a provided credential
+names and the store lacks is a warning, as
+[Failures and warnings](reference.md#failures-and-warnings) gives.
 
 ### Provided credentials
 
@@ -320,9 +323,10 @@ treats the value as absent.
 A call refreshes a value when the value is not fresh, never on a timer:
 
 - A fresh value serves the call, and no provider runs.
-- Otherwise the provider runs once, under a lock of that credential's own. A call that needs the
-  same value waits on the lock, then takes the value the run left. Runs for different credentials go
-  side by side.
+- Otherwise the provider runs under a lock of that credential's own. A call that needs the same
+  value waits on the lock, then takes the value the run left when that value is fresh. When it is
+  not, because the run failed or its audit line was not written, the waiting call runs the provider
+  itself. Runs for different credentials go side by side.
 - When the run fails and the cached value has not expired, the call uses that value, and the next
   call runs the provider again.
 - When the run fails and no unexpired value is cached, the call is refused before its cage starts,
@@ -408,8 +412,8 @@ the calling token's scope alone, and the operator's `check`, which checks one sc
 
 It checks the local wiring, the things that can be wrong while the instance looks healthy:
 
-- each stored credential a grant names is stored, read afresh on each check, and reported by name,
-  never by value;
+- each stored credential a grant names is in the store, read afresh on each check, and reported by
+  name, never by value;
 - for each provided credential a grant names, every stored credential its provider takes is stored.
   The entry reports the provided credential by name, and names its provider;
 - each root a grant names opens as it opens for a call;

@@ -126,8 +126,7 @@ Python's `timedelta` form, hours, minutes, and seconds, not as the file wrote th
 config file '/etc/agent-proxy/config.yaml': provided_credentials.github-app-token.max_age must be longer than refresh_before 0:10:00, got 0:05:00
 ```
 
-Each provider plugin's README gives the entry it needs:
-[github-app](../plugins/github-app/README.md#a-provided-credential).
+Each provider plugin's README gives the entry it needs, under "A provided credential".
 
 ### Failures and warnings
 
@@ -316,10 +315,11 @@ The kinds come in this order, and within a kind each subject comes once, in the 
 grants first name it:
 
 - `credential`, whose subject is a credential's name. The entry never holds the value. The detail of
-  a stored credential that is not stored is the text of its refusal. A provided credential's detail
-  begins `provided by '<plugin>.<action>'`. It passes when every stored credential its entry names
-  is stored, and its detail ends `every stored credential it takes is stored`. Otherwise it fails,
-  and its detail follows with the refusal text of each one that is not stored, separated by `; `.
+  a stored credential that the store lacks is the text of its refusal. A provided credential's
+  detail begins `provided by '<plugin>.<action>'`. It passes when every stored credential its entry
+  names is stored, and its detail ends `every stored credential it takes is stored`. Otherwise it
+  fails, and its detail follows with the refusal text of each one that is not stored, separated by
+  `; `.
 - `root`, whose subject is a root's path.
 - `overflow_dir`, whose subject is the overflow directory.
 - `egress`, whose subject is an egress proxy's container name. The detail names the domains it
@@ -354,7 +354,7 @@ The proxy refuses a call when:
 - a credential that the grant gives as an environment variable is not valid UTF-8, or holds a NUL;
 - a provided credential that the grant names has no unexpired value, because its provider's run
   failed, as [A provider's failure](#a-providers-failure) gives;
-- the audit log cannot record the run of a provider that the call waits on;
+- the audit log cannot record the run of a provider that the call started;
 - the cage cannot start, or the action's executable cannot run in it;
 - the action does not finish within its timeout;
 - the cage fails after it starts;

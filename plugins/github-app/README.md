@@ -40,7 +40,7 @@ it takes a stored one. In the form the core's reference gives under
 
 ```yaml
 provided_credentials:
-  github-token:
+  github-app-token:
     provider: github-app.installation_token
     credentials: {github-app-key: {file: /run/credentials/github-app-key}}
     env: {GITHUB_APP_ID: "123456", GITHUB_INSTALLATION_ID: "7654321"}
@@ -53,7 +53,7 @@ scopes:
       git.fetch:
         roots: [{path: /home/agent-01/Projects/example-repo, mode: rw}]
         domains: [github.com]
-        credentials: {github-token: {env: GH_TOKEN}}
+        credentials: {github-app-token: {env: GH_TOKEN}}
 ```
 
 `refresh_before: 10m` asks for a new token when the cached one has ten minutes or less left. The
@@ -156,7 +156,7 @@ poe test
 poe test-integration
 ```
 
-`poe test` runs the unit tests and needs no Docker. `poe test-integration` runs on the Docker daemon
-that `DOCKER_HOST` names. The contributing guide gives under
-[The checks](../../CONTRIBUTING.md#the-checks) what each check needs, and what the integration tests
-must leave behind.
+`poe test` runs the unit tests and needs only the host's `openssl` at `/usr/bin/openssl`.
+`poe test-integration` runs on the Docker daemon that `DOCKER_HOST` names. The contributing guide
+gives under [The checks](../../CONTRIBUTING.md#the-checks) what each check needs, and what the
+integration tests must leave behind.
