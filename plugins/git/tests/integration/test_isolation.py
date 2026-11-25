@@ -189,11 +189,12 @@ def canary_checkout(
 def test_every_action_round_trips_and_runs_no_planted_program(
     run_action: RunAction, plugin_manifest: Manifest, canary_checkout: CanaryCheckout
 ) -> None:
-    """Each action, in an ordinary round trip, succeeds and fires no canary.
+    """Each checkout action, in an ordinary round trip, succeeds and fires no canary.
 
     The drivers sit in the repository's .git/config and the LFS transfer in
     its .lfsconfig. The pull after the push finds the upstream the push wrote
-    back to the real config.
+    back to the real config. clone takes an empty root, never a checkout, so
+    no canary can be planted for it; test_clone.py runs it.
     """
     checkout = canary_checkout
     ran: set[str] = set()
@@ -248,7 +249,7 @@ def test_every_action_round_trips_and_runs_no_planted_program(
     run("worktree", action="list")
     run("worktree", action="remove", path=added)
 
-    assert ran == set(plugin_manifest.actions)
+    assert ran == set(plugin_manifest.actions) - {"clone"}
     assert _fired(checkout.root) == set()
 
 

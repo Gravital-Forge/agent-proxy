@@ -487,9 +487,10 @@ def _write_config(
 ) -> ScriptResult:
     """Write each key and value in values into repo's real config, in order.
 
-    git push -u and git clone would write to the action's scratch config,
-    which no later action reads. stderr holds the stderr of the steps before
-    the writes, and each write's joins it. The result is the last write's.
+    A config write in the action's isolation with no --file lands in its
+    scratch config, which no later action reads. stderr holds the stderr of
+    the steps before the writes, and each write's joins it. The result is the
+    last write's.
 
     Raises:
         _GitFailedError: a write failed.

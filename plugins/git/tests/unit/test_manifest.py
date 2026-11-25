@@ -352,8 +352,10 @@ def test_every_action_requires_repo_as_an_absolute_path(manifest: Manifest) -> N
         name
         for name, action in manifest.actions.items()
         if name != "clone"
-        and _properties(action).get("repo") != REPO_PROPERTY
-        or "repo" not in _required(action)
+        and (
+            _properties(action).get("repo") != REPO_PROPERTY
+            or "repo" not in _required(action)
+        )
     ]
 
     assert offenders == []
