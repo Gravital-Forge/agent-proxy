@@ -288,12 +288,14 @@ Only the operator manages stored credentials, with the `credential` verbs of
 uses to the cage as an environment variable or as a file, in the forms of
 [A scope's grants](reference.md#a-scopes-grants).
 
-The instance reads the store on every call, so a stored credential takes effect on the next call
-with no reload. A call under a grant whose stored credential the store lacks is refused before a
-cage starts, and audited like any other refusal. The grant's tools stay listed for the token. The
-config load never consults the store: a stored credential that a grant or a provided credential
-names and the store lacks is a warning, as
-[Failures and warnings](reference.md#failures-and-warnings) gives.
+The instance reads the store on every call, so a stored credential that a grant gives takes effect
+on the next call with no reload. A stored credential that is a provider's input takes effect at the
+provider's next run: when the cached value stops being fresh, after a restart, or after a reload
+that changes the entry or the provider image, as [Provided credentials](#provided-credentials)
+gives. A call under a grant whose stored credential the store lacks is refused before a cage starts,
+and audited like any other refusal. The grant's tools stay listed for the token. The config load
+never consults the store: a stored credential that a grant or a provided credential names and the
+store lacks is a warning, as [Failures and warnings](reference.md#failures-and-warnings) gives.
 
 ### Provided credentials
 
@@ -314,11 +316,10 @@ as it places a stored credential given as an environment variable, through the s
 checks, and knows nothing of where a provided value comes from or of the cache.
 
 The instance holds one cache of provided values, in memory, so a restart empties it. Each value has
-an expiry: the earlier of the provider's `expires_at` and the start of its run plus the entry's
-`max_age`. A value is fresh until `refresh_before` before its expiry, usable until its expiry, and
-never handed out at or after it. Each cached value also holds what it came from: the config entry
-and the provider plugin's image reference. A lookup under a config whose entry or image differs
-treats the value as absent.
+an expiry, which [A provider action](writing-a-plugin.md#a-provider-action) gives. A value is fresh
+until `refresh_before` before its expiry, usable until its expiry, and never handed out at or after
+it. Each cached value also holds what it came from: the config entry and the provider plugin's image
+reference. A lookup under a config whose entry or image differs treats the value as absent.
 
 A call refreshes a value when the value is not fresh, never on a timer:
 
@@ -340,9 +341,9 @@ entry's stored credentials and its `env`, and reaches the hosts of the entry's `
 timeout is the entry's `timeout`, or else the action's. Its stdin is `{}`. The instance counts every
 byte of both streams, and the run's audit line gives the full sizes. It keeps the stdout up to the
 output cap and never writes it to an overflow file, because the overflow directory lies in the
-agent's tree. A stdout past the cap fails the run. Of the stderr, it keeps only the first 1,024
-bytes, for the failure's message. [A provider action](writing-a-plugin.md#a-provider-action) gives
-what a run must print.
+agent's tree. Of the stderr, it keeps only the part that a failure quotes.
+[A provider action](writing-a-plugin.md#a-provider-action) gives what a run must print, and
+[A provider's failure](reference.md#a-providers-failure) gives each way a run fails.
 
 ## Audit
 
@@ -624,7 +625,8 @@ from the tree it is given.
   bounds a run to one scope.
 - The github plugin's `run_view` with `log_failed` works only under a grant that names each storage
   host, as [Egress](../plugins/github/README.md#egress) in the plugin's README gives.
-- Credentials are not encrypted at rest: each is a plain file protected by the service user's uid.
+- Stored credentials are not encrypted at rest: each is a plain file protected by the service user's
+  uid. The instance holds a provided value in memory and never writes it to the state directory.
 - A call's cage outlives the instance when the instance's process is killed while the call runs. The
   process removes each cage when its call ends, and a stop on SIGINT or SIGTERM waits for the
   running calls to end. These kill the process while a call runs:

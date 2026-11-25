@@ -271,9 +271,9 @@ The reference gives every verb under [The operator command](reference.md#the-ope
 
 Run the self-check on every scope with `docker exec agent-proxy agent-proxy check`. Add
 `--scope <scope>` to check one scope. Each row is one check, and a `fail` row's detail says what is
-wrong, such as a credential that is not stored, a root that the instance cannot open, or an egress
-proxy that does not run. Fix each one, then run the check again, until every row passes. The agent
-can run the same check on its own scope through the tool `agent-proxy_self_check`.
+wrong, such as a stored credential that is not in the store, a root that the instance cannot open,
+or an egress proxy that does not run. Fix each one, then run the check again, until every row
+passes. The agent can run the same check on its own scope through the tool `agent-proxy_self_check`.
 
 The reference gives the rows and the exit status under the `check` verb of
 [The operator command](reference.md#the-operator-command), and the report under

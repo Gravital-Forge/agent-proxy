@@ -138,10 +138,9 @@ The value expires at the earlier of `expires_at` and the start of the run plus t
 `expires_at` whenever the service states an expiry. A value that has already expired fails the run.
 The reference gives every failure under [A provider's failure](reference.md#a-providers-failure).
 
-On a failure, exit non-zero and write one line on stderr that says why. The first 1,024 bytes of
-stderr reach the provider's audit line, and the refusal of a call that finds no unexpired value, so
-stderr must never hold the value or a secret input. Stdout past the cap fails the run, and no
-overflow file holds it.
+On a failure, exit non-zero and write one line on stderr that says why. The start of stderr reaches
+the provider's audit line, and the refusal of a call that finds no unexpired value, so stderr must
+never hold the value or a secret input.
 
 ## How argv is formed
 

@@ -290,9 +290,8 @@ example:
 {"exit_code": 0, "stdout_file": "/home/agent-01/Projects/.agent-proxy-overflow/0123456789abcdef0123456789abcdef.stdout", "stdout_bytes": 4194304, "stderr": "", "truncated": true}
 ```
 
-A script's stdout over the cap fails the script, so its result is the command form above. A
-provider's stdout over the cap fails its run and goes to no file, as
-[A provider's failure](#a-providers-failure) gives.
+A script's stdout over the cap fails the script, so its result is the command form above. A provider
+run writes no overflow file, as [Provided credentials](architecture.md#provided-credentials) gives.
 
 The instance writes each file with mode `0660`. No cage mounts the overflow directory. The instance
 removes each file there that is more than 7 days old, at start and then once a day.
