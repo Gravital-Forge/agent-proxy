@@ -1,9 +1,9 @@
 # Third-party notices
 
-`LICENSE` covers the source in this repository, except the vendored seccomp profile that
-[The instance image](#the-instance-image) names. Each published image also holds third-party
-software, and that software keeps its own licence. This notice names where each image's third-party
-software comes from.
+`LICENSE` covers the source in this repository, except the vendored seccomp profile and its licence
+text, which [The instance image](#the-instance-image) names. Each published image also holds
+third-party software, and that software keeps its own licence. This notice names where each image's
+third-party software comes from.
 
 ## The verifier image
 

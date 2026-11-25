@@ -385,8 +385,8 @@ before the instance serves (`remove_left_cages` in `runner.py`). The start repor
 removes on stderr, by name. A left cage can be a call that the killed instance never finished, and
 such a call never got its audit line, so the report keeps a record of it in the instance's log. A
 removal that fails gives a warning that names the container, and the start goes on. A container that
-is already gone when the start removes it counts as removed, and gives neither a report nor a
-warning. A listing that fails stops the start.
+is already gone when the start removes it is no failure, and gives neither a report nor a warning. A
+listing that fails stops the start.
 
 The start reads the daemon's info, and gives a warning for each cage limit that the daemon cannot
 enforce, as [Failures and warnings](reference.md#failures-and-warnings) gives. A daemon that does
