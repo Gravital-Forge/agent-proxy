@@ -311,7 +311,7 @@ provider is never a tool, and only a `provided_credentials` entry runs one.
 The gateway resolves each provided credential that a call's grant names before the call's cage takes
 its slot, and hands the values to the runner with the call (`mcp.py`). The runner places each value
 as it places a stored credential given as an environment variable, through the same UTF-8 and NUL
-checks, and knows nothing else of providers.
+checks, and knows nothing of where a provided value comes from or of the cache.
 
 The instance holds one cache of provided values, in memory, so a restart empties it. Each value has
 an expiry: the earlier of the provider's `expires_at` and the start of its run plus the entry's
@@ -352,7 +352,8 @@ The instance writes one JSON line per call to `audit/audit.log` in the state dir
 `truncated`, for a refused call the `refusal` without its MCP prefix, and `credential`. `credential`
 names the provided credential on a provider run's line, and is `null` on every other line. A line
 never holds a credential's value or any output's content, except the stderr of a failed provider
-run, which its `refusal` quotes as the stderr excerpt.
+run. The `refusal` of the run's line quotes it as the stderr excerpt, and so does the `refusal` of
+the call that the failure refuses.
 
 The caller chooses the arguments, the tool name, and any input that a refusal quotes, so the line
 caps each of them where it is rendered:
@@ -398,10 +399,10 @@ Each provider run writes one line of its own, with a call ID of its own. Its `ac
 provider's `<plugin>_<action>`, and its `credential` names the provided credential. Its
 `token_name`, `scope`, `arguments`, and `arguments_cut` are `null`. It carries the exit code, the
 duration, the stream sizes, and `truncated`, and when the run failed, the failure as `refusal`. A
-run that the runner refused, or whose output it could not read, has no exit code and no stream
-sizes. The call that needed the value writes its own line, as every call does. When a run's line
-cannot be written, its value is neither cached nor used, and the call that started the run is
-refused with the audit refusal of the run's call ID.
+run whose cage the runner refused or failed, for any reason, has no exit code and no stream sizes.
+The call that needed the value writes its own line, as every call does. When a run's line cannot be
+written, its value is neither cached nor used, and the call that started the run is refused with the
+audit refusal of the run's call ID.
 
 ## The self-check
 

@@ -173,8 +173,8 @@ the action's isolation, with hooks off and the transport pins:
 
 1. It refuses unless `GITHUB_REPOS` parses and names `repo`, as
    [The repository list](#the-repository-list) gives, whether or not the cage holds `GH_TOKEN`. The
-   other actions check the list only when git asks the credential helper, and a public repository
-   never asks.
+   other actions check that the list names the repository only when git asks the credential helper,
+   and a public repository never asks.
 2. It refuses unless `path`, normalized, equals one of the grant's roots, and is an empty directory
    that is not a symbolic link.
 3. `git init` makes an empty repository at `path`, with an empty template directory, hooks off, and

@@ -54,11 +54,13 @@ scopes:
         roots: [{path: /home/agent-01/Projects/example-repo, mode: rw}]
         domains: [github.com]
         credentials: {github-app-token: {env: GH_TOKEN}}
+        env: {GITHUB_REPOS: "example-org/*"}
 ```
 
 `refresh_before: 10m` asks for a new token when the cached one has ten minutes or less left. The
 entry needs no `max_age`, because GitHub's answer always carries `expires_at`. Quote each ID, so the
-YAML holds it as a string.
+YAML holds it as a string. The git plugin refuses every call of a grant that gives a `GH_TOKEN` and
+sets no `GITHUB_REPOS`, as its [credential helper](../git/README.md#the-credential-helper) gives.
 
 ## The App's permissions
 

@@ -292,10 +292,10 @@ README.
     plugin's image, and give a `provided_credentials` entry shaped like the one in
     `examples/instance.yaml`, with the App's ID and the installation's ID.
     [A provided credential](../plugins/github-app/README.md#a-provided-credential) gives the entry.
-    Give a `git.fetch` grant whose `roots` name the checkout, whose `domains` name `github.com`,
-    whose `credentials` give that provided credential as `GH_TOKEN`, and whose `GITHUB_REPOS` names
-    `<repo>`. Put the config in force as [Changing the config](deployment.md#changing-the-config)
-    gives.
+    Give a `git.fetch` grant whose `roots` name the checkout with mode `rw`, whose `domains` name
+    `github.com`, whose `credentials` give that provided credential as `GH_TOKEN`, and whose
+    `GITHUB_REPOS` names `<repo>`. Put the config in force as
+    [Changing the config](deployment.md#changing-the-config) gives.
 
     1. Run `docker exec agent-proxy agent-proxy check`. The `credential` row of the provided
        credential passes, and its detail begins `provided by 'github-app.installation_token'`.
