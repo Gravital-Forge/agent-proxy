@@ -51,7 +51,7 @@ GIT_IDENTITY = (
     "commit.gpgsign=false",
 )
 STAT_SCRIPT = "import os, sys; s = os.stat(sys.argv[1]); print(s.st_dev, s.st_ino)"
-UNBUILT_PLUGIN = "hcp-terraform"
+UNBUILT_PLUGINS = frozenset({"hcp-terraform", "github-app"})
 CREDENTIAL_TOOLS = {
     "github_pr_view": "github-token",
     "probe_read_credential": "probe-secret",
@@ -119,17 +119,22 @@ def _full_config(
 ) -> dict[str, object]:
     """Return the sample config for agent_tree, with the pushed plugins and a probe.
 
-    The config leaves out the hcp-terraform plugin and every grant of its
-    actions, because the test builds no image for it.
+    The config leaves out the hcp-terraform and github-app plugins, because
+    the test builds no image for either. So it also leaves out every grant of
+    their actions, and the provided credentials, which github-app provides,
+    with every grant that names one.
     """
     text = EXAMPLE_CONFIG.read_text(encoding="utf-8")
     config = yaml.safe_load(text.replace(EXAMPLE_TREE, str(agent_tree)))
-    del config["plugins"][UNBUILT_PLUGIN]
+    for plugin in UNBUILT_PLUGINS:
+        del config["plugins"][plugin]
+    provided = config.pop("provided_credentials")
     for scope in config["scopes"].values():
         scope["grants"] = {
             action: grant
             for action, grant in scope["grants"].items()
-            if not action.startswith(f"{UNBUILT_PLUGIN}.")
+            if action.split(".", 1)[0] not in UNBUILT_PLUGINS
+            and provided.keys().isdisjoint(grant["credentials"])
         }
     config["plugins"]["git"] = git_plugin
     config["plugins"]["github"] = github_plugin

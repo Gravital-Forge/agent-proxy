@@ -9,6 +9,17 @@ plugins:
   git: registry.example.com/agent-proxy/git@sha256:0000000000000000000000000000000000000000000000000000000000000000
   github: registry.example.com/agent-proxy/github@sha256:0000000000000000000000000000000000000000000000000000000000000000
   hcp-terraform: registry.example.com/agent-proxy/hcp-terraform@sha256:0000000000000000000000000000000000000000000000000000000000000000
+  github-app: registry.example.com/agent-proxy/github-app@sha256:0000000000000000000000000000000000000000000000000000000000000000
+
+# A grant names a provided credential as it names a stored one. Replace each
+# ID with your App's and its installation's, quoted so YAML keeps a string.
+provided_credentials:
+  github-app-token:
+    provider: github-app.installation_token
+    credentials: {github-app-key: {file: /run/credentials/github-app-key}}
+    env: {GITHUB_APP_ID: "000000", GITHUB_INSTALLATION_ID: "00000000"}
+    domains: [api.github.com]
+    refresh_before: 10m
 
 scopes:
   dev-agent:
@@ -40,6 +51,11 @@ scopes:
         credentials: {github-token: {env: GH_TOKEN}}
         # Every grant that holds github-token sets GITHUB_REPOS, or its calls are refused.
         env: {GIT_BRANCH_PREFIXES: "task/", GITHUB_REPOS: &repos "example-org/*"}
+      git.clone:
+        roots: [{path: /home/agent-01/Projects/example-clone, mode: rw}]
+        domains: [github.com]
+        credentials: {github-app-token: {env: GH_TOKEN}}
+        env: {GITHUB_REPOS: *repos}
       github.pr_view:
         roots: []
         domains: [api.github.com]

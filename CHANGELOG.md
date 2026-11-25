@@ -8,8 +8,13 @@ This file holds one entry per release, newest first.
   grant, as [the architecture](docs/architecture.md) gives. The operator manages its tokens,
   credentials, audit log, and config reloads with the `agent-proxy` command, as
   [The operator command](docs/reference.md#the-operator-command) gives.
-- The [git](plugins/git/README.md), [github](plugins/github/README.md), and
-  [hcp-terraform](plugins/hcp-terraform/README.md) plugins.
+- Provided credentials: a credential whose value a provider plugin action gives, cached in the
+  instance's memory and fetched again before it expires, as
+  [Provided credentials](docs/architecture.md#provided-credentials) gives.
+- The [git](plugins/git/README.md), [github](plugins/github/README.md),
+  [hcp-terraform](plugins/hcp-terraform/README.md), and [github-app](plugins/github-app/README.md)
+  plugins. The git plugin's `clone` builds a checkout of a listed GitHub repository in an empty
+  root.
 - The instance can start and reload its config, and `token mint` can mint a token, before the
   operator stores a grant's credential, as
   [Failures and warnings](docs/reference.md#failures-and-warnings) gives.

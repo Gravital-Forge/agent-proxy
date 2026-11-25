@@ -13,9 +13,10 @@ refused, and so is a merge key (`<<`), because an explicit key overrides a merge
 trace. The top level is a mapping, and every mapping the format defines refuses a field it does not
 name.
 
-No field has a default except a grant's `timeout`, `memory`, and `env`. There are no scope-level
-defaults and no layering between files. Each grant states its own fields, so a grant reads correctly
-on its own, and repetition across grants and across instances is accepted.
+No field has a default except `provided_credentials`, a grant's `timeout`, `memory`, and `env`, and
+a provided credential's `env`, `max_age`, and `timeout`. There are no scope-level defaults and no
+layering between files. Each grant states its own fields, so a grant reads correctly on its own, and
+repetition across grants and across instances is accepted.
 
 ### Top-level fields
 
@@ -31,12 +32,15 @@ on its own, and repetition across grants and across instances is accepted.
   refused, so no tool name can take the self-check tool's name.
 - `scopes` maps each scope name to a scope. A scope name matches `^[a-z0-9][a-z0-9-]{0,63}$`, the
   pattern that token and credential names also match. A scope has one field, `grants`.
+- `provided_credentials` is optional, and defaults to an empty map. It maps each provided
+  credential's name to its entry, as [Provided credentials](#provided-credentials) gives.
 
 ### A scope's grants
 
 `grants` maps each grant key to a grant. A grant key is `<plugin>.<action>`: `<plugin>` is a name in
 `plugins`, and `<action>` matches `^[a-z][a-z0-9_]*$` and is an action that the plugin's manifest
-declares. The agent sees the grant as the MCP tool `<plugin>_<action>`.
+declares, other than a provider action. The agent sees the grant as the MCP tool
+`<plugin>_<action>`.
 
 A grant has these fields:
 
@@ -55,7 +59,7 @@ A grant has these fields:
     file. `PATH` is an absolute path beneath `/run/credentials/` with no `..` segment.
 
   No two credentials of one grant share an environment name or a file path. The cage receives only
-  its grant's credentials.
+  its grant's credentials. A provided credential takes the `{env: NAME}` form only.
 - `timeout` is optional. It overrides the action's default timeout. It is a duration: a positive
   count with no leading zero, then a unit of `s`, `m`, `h`, or `d`, such as `120s`.
 - `memory` is optional. It sets the memory limit of every cage under the grant, which is 4 GiB
@@ -88,12 +92,50 @@ scopes:
         timeout: 120s
 ```
 
+### Provided credentials
+
+`provided_credentials` maps each provided credential's name to its entry. A name matches the
+credential name pattern of [Top-level fields](#top-level-fields). A grant names a provided
+credential in its `credentials` as it names a stored one, in the `{env: NAME}` form, and the
+instance never reads the store for that name.
+[Provided credentials](architecture.md#provided-credentials) gives how the instance fetches, caches,
+and refreshes each value.
+
+An entry has these fields:
+
+- `provider` is required. It is the `<plugin>.<action>` of a provider action: `<plugin>` is a name
+  in `plugins`, and `<action>` is an action that the plugin's manifest declares with the kind
+  `provider`.
+- `credentials` is required. It is a map, possibly empty, from a stored credential's name to the way
+  the provider's cage receives it, in a grant's forms and under a grant's rules. It names no
+  provided credential.
+- `env` is optional, and defaults to an empty map. It holds the provider's settings, under a grant's
+  rules.
+- `domains` is required. It lists the hosts the provider's cage may reach, under a grant's rules.
+- `refresh_before` is required. It is a duration, in the form of a grant's `timeout`. A call runs
+  the provider again when the cached value expires within `refresh_before`.
+- `max_age` is optional. It is a duration, in the same form, and is longer than `refresh_before`. A
+  value expires at most `max_age` after the start of the run that fetched it. A provider that gives
+  no `expires_at` needs it.
+- `timeout` is optional. It overrides the provider action's default timeout, as a grant's does.
+
+A `max_age` that is not longer than `refresh_before` is a failure whose line gives both durations in
+Python's `timedelta` form, hours, minutes, and seconds, not as the file wrote them:
+
+```text
+config file '/etc/agent-proxy/config.yaml': provided_credentials.github-app-token.max_age must be longer than refresh_before 0:10:00, got 0:05:00
+```
+
+Each provider plugin's README gives the entry it needs:
+[github-app](../plugins/github-app/README.md#a-provided-credential).
+
 ### Failures and warnings
 
 The instance also checks each plugin at start and at `reload`. It pulls each plugin image that its
-Docker daemon lacks, by digest, and reads the image's manifest. An image that cannot be pulled, a
-manifest that fails its checks, and a grant whose action the manifest does not declare are failures.
-`token mint` loads no plugin.
+Docker daemon lacks, by digest, and reads the image's manifest. These are failures: an image that
+cannot be pulled, a manifest that fails its checks, a grant whose action the manifest does not
+declare or declares as a provider action, and a provided credential whose provider the manifest does
+not declare or declares as another kind. `token mint` loads no plugin.
 
 A config that breaks any rule is refused whole, with one line per failure. Each line names the
 config file, and a failure inside the file also names its location, such as
@@ -103,10 +145,12 @@ A config can also give warnings. A warning stops nothing: the instance starts, a
 effect, and `token mint` mints.
 
 - Each action that declares pass-through `args` gives a warning at start and at `reload`.
-- Each credential that a grant names and the credential store lacks gives a warning at start, at
-  `reload`, and at `token mint`. Its text is the text of the refusal that a call under that grant
+- Each stored credential that a grant names and the credential store lacks gives a warning at start,
+  at `reload`, and at `token mint`. Its text is the text of the refusal that a call under that grant
   gets, as [Refusals](#refusals) gives. So the operator can start the instance and mint tokens
-  before storing the credentials.
+  before storing the credentials. A provided credential gives no such warning.
+- Each stored credential that a provided credential's entry names and the store lacks gives the same
+  warning, at the same times, after those of the grants.
 
 The start also gives warnings of its own, which `serve` prints with the config's. None of them stops
 the start:
@@ -148,8 +192,9 @@ docker exec -i agent-proxy agent-proxy credential set github-token
   refuses a name that a stored token already holds. It reads the config file, refuses a config that
   breaks a rule of [The config file](#the-config-file), and refuses a scope that the config does not
   define, naming the defined scopes. `DURATION` has the form of a grant's `timeout`. A token minted
-  without `--expires` never expires. Before the token, it prints a warning for each credential that
-  the config names and the store lacks, and it still mints the token.
+  without `--expires` never expires. Before the token, it prints a warning for each stored
+  credential that the config names and the store lacks, as
+  [Failures and warnings](#failures-and-warnings) gives, and it still mints the token.
 - `token list` prints each token's name, scope, created time, last-used time, and expiry, sorted by
   name. It never prints a token.
 - `token revoke NAME` deletes a token and prints `revoked NAME`. The next call with that token is
@@ -246,7 +291,9 @@ example:
 {"exit_code": 0, "stdout_file": "/home/agent-01/Projects/.agent-proxy-overflow/0123456789abcdef0123456789abcdef.stdout", "stdout_bytes": 4194304, "stderr": "", "truncated": true}
 ```
 
-A script's stdout over the cap fails the script, so its result is the command form above.
+A script's stdout over the cap fails the script, so its result is the command form above. A
+provider's stdout over the cap fails its run and goes to no file, as
+[A provider's failure](#a-providers-failure) gives.
 
 The instance writes each file with mode `0660`. No cage mounts the overflow directory. The instance
 removes each file there that is more than 7 days old, at start and then once a day.
@@ -269,11 +316,15 @@ The kinds come in this order, and within a kind each subject comes once, in the 
 grants first name it:
 
 - `credential`, whose subject is a credential's name. The entry never holds the value. The detail of
-  a credential that is not stored is the text of its refusal.
+  a stored credential that is not stored is the text of its refusal. A provided credential's detail
+  begins `provided by '<plugin>.<action>'`. It passes when every stored credential its entry names
+  is stored, and its detail ends `every stored credential it takes is stored`. Otherwise it fails,
+  and its detail follows with the refusal text of each one that is not stored, separated by `; `.
 - `root`, whose subject is a root's path.
 - `overflow_dir`, whose subject is the overflow directory.
 - `egress`, whose subject is an egress proxy's container name. The detail names the domains it
-  allows. A grant with `domains: []` has no proxy, so it has no entry.
+  allows. The lists come from the grants, then from the provided credentials the grants name. A list
+  of no domains has no proxy, so it has no entry.
 - `plugin`, whose subject is a plugin's name.
 
 A failed check is an entry whose `ok` is false, in a normal result. It is not a refusal.
@@ -301,6 +352,9 @@ The proxy refuses a call when:
   cage started;
 - a credential that the grant names is not stored, as in the example above;
 - a credential that the grant gives as an environment variable is not valid UTF-8, or holds a NUL;
+- a provided credential that the grant names has no unexpired value, because its provider's run
+  failed, as [A provider's failure](#a-providers-failure) gives;
+- the audit log cannot record the run of a provider that the call waits on;
 - the cage cannot start, or the action's executable cannot run in it;
 - the action does not finish within its timeout;
 - the cage fails after it starts;
@@ -317,3 +371,34 @@ agent-proxy refused: the action ran and may have taken effect, but the audit log
 [Audit](architecture.md#audit) gives which calls get this refusal.
 
 The detail of any other error is masked.
+
+### A provider's failure
+
+When a provider's run fails and no unexpired value is cached, each call that needs the value is
+refused before its cage starts. The refusal names the provided credential, the provider, and the
+run's failure:
+
+```text
+agent-proxy refused: provided credential 'github-app-token' has no unexpired value: provider 'github-app.installation_token' failed: it exited 1, stderr 'github-app plugin failed: POST /app/installations/00000000/access_tokens answered 401: A JSON web token could not be decoded\n'
+```
+
+The provider's audit line holds the same failure as its `refusal`, as [Audit](architecture.md#audit)
+gives. A run fails when:
+
+- the runner refuses or fails its cage, for any reason a call's cage can be refused or fail in the
+  list above, such as a stored credential the entry names that is not stored, or a run past its
+  timeout. The failure is that refusal's text.
+- it exits non-zero: `it exited <code>, stderr <stderr>`, where `<stderr>` is the first 1,024 bytes
+  of its stderr, decoded as UTF-8 with each bad byte replaced, and quoted as a Python string
+  literal.
+- its stdout passes the output cap: `its stdout passed the output cap of 262144 bytes`.
+- its stdout is not UTF-8 JSON, is not a JSON object, or holds a key other than `value` and
+  `expires_at`.
+- its `value` is not a non-empty string, or cannot be an environment value because it holds a NUL or
+  does not encode as UTF-8.
+- its `expires_at` is not a string, is not an ISO 8601 date and time, or carries no time zone.
+- it gives no `expires_at` and the entry sets no `max_age`.
+- the value it gives has already expired: `the value it gave expired at <expiry>`, in ISO 8601.
+
+No failure that its stdout causes quotes a value from it. The failure for an extra key names the
+keys. [A provider action](writing-a-plugin.md#a-provider-action) gives what a run must print.
