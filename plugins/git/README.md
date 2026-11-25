@@ -163,8 +163,9 @@ value the plugin passes with `-c`, a value from a file the config includes, or a
 
 `clone` makes `path` a checkout of the GitHub repository `repo`, given as `owner/name`, from
 `https://github.com/<owner>/<name>.git`. It takes the full history, with no depth option and no
-refspec of the caller's. A fork's pull request head comes later, through `fetch`. Its timeout is 10
-minutes.
+refspec of the caller's. A fork's pull request head comes later: the agent adds its
+`refs/pull/<n>/head` refspec to `origin` in the repository's config with its own git, then calls
+`fetch`. Its timeout is 10 minutes.
 
 `clone` never runs `git clone`. git reads a repository's config again in each process it starts, so
 a config planted while `git clone` runs could name a program for git's next process. `clone` builds

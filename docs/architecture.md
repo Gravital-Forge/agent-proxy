@@ -337,11 +337,12 @@ drops the rest, once the new config is in force (`reload.py`).
 A provider run is a cage of its own, through the normal path of [The cage](#the-cage): the root
 verifier, the cage cap, the cage limits, and the seccomp profile. It has no roots. It receives the
 entry's stored credentials and its `env`, and reaches the hosts of the entry's `domains`. Its
-timeout is the entry's `timeout`, or else the action's. Its stdin is `{}`. The instance reads its
-stdout up to the output cap and never writes it to an overflow file, because the overflow directory
-lies in the agent's tree. A stdout past the cap fails the run. The instance reads the first 1,024
-bytes of its stderr, for the failure's message, and no more.
-[A provider action](writing-a-plugin.md#a-provider-action) gives what a run must print.
+timeout is the entry's `timeout`, or else the action's. Its stdin is `{}`. The instance counts every
+byte of both streams, and the run's audit line gives the full sizes. It keeps the stdout up to the
+output cap and never writes it to an overflow file, because the overflow directory lies in the
+agent's tree. A stdout past the cap fails the run. Of the stderr, it keeps only the first 1,024
+bytes, for the failure's message. [A provider action](writing-a-plugin.md#a-provider-action) gives
+what a run must print.
 
 ## Audit
 
