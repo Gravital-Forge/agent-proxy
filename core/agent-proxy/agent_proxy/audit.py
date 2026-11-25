@@ -43,6 +43,7 @@ class AuditRecord:
     stderr_bytes: int | None
     truncated: bool
     refusal: str | None
+    credential: str | None = None
 
 
 class AuditWriter:
@@ -225,6 +226,7 @@ def _render_line(record: AuditRecord) -> str:
             if record.refusal is None
             else _capped(record.refusal, REFUSAL_CAP_CHARACTERS)
         ),
+        "credential": record.credential,
     }
     return _compact_json(fields)
 

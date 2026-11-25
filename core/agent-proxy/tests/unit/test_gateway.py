@@ -576,6 +576,7 @@ def test_a_granted_calls_audit_line(harness: Harness) -> None:
             "stderr_bytes": 0,
             "truncated": False,
             "refusal": None,
+            "credential": None,
         }
     ]
 
@@ -605,6 +606,7 @@ def test_a_bad_tokens_audit_line_has_no_token_fields_and_no_arguments(
         "stderr_bytes": None,
         "truncated": False,
         "refusal": TOKEN_REFUSAL,
+        "credential": None,
     }
 
 
@@ -1021,6 +1023,7 @@ def test_the_self_checks_audit_line(harness: Harness) -> None:
         "stderr_bytes": None,
         "truncated": False,
         "refusal": None,
+        "credential": None,
     }
 
 
@@ -1129,6 +1132,7 @@ def test_check_scopes_writes_one_audit_line_per_scope(harness: Harness) -> None:
             "stderr_bytes": None,
             "truncated": False,
             "refusal": None,
+            "credential": None,
         }
         for scope in ("dev", "ops")
     ]
