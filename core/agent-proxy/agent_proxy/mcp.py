@@ -577,10 +577,12 @@ class Instance:
         control: ControlServer,
         sweeper: OverflowSweeper,
         audit: AuditWriter,
+        removed_cages: tuple[str, ...],
         warnings: tuple[str, ...],
     ) -> None:
-        """Hold the app, the start's warnings, and the parts close stops."""
+        """Hold the app, the left cages removed, the warnings, and what close stops."""
         self.app = app
+        self.removed_cages = removed_cages
         self.warnings = warnings
         self._control = control
         self._sweeper = sweeper
@@ -594,12 +596,13 @@ class Instance:
         cages, the live config, the control socket, and the overflow sweeper.
         The verifier step pulls a verifier pinned by digest when the daemon
         lacks it. The left-cages step force-removes every cage an earlier
-        instance left on the daemon. The control socket serves reloads of the
-        live config and the gateway's checks. A step that fails closes what
-        the steps before it started, then its error propagates. The instance's
-        warnings are one for each cage limit the daemon cannot enforce, then
-        one for each left cage that could not be removed, then those of the
-        first snapshot.
+        instance left on the daemon, and the instance holds the name of each
+        cage it removed. The control socket serves reloads of the live config
+        and the gateway's checks. A step that fails closes what the steps
+        before it started, then its error propagates. The instance's warnings
+        are one for each cage limit the daemon cannot enforce, then one for
+        each left cage that could not be removed, then those of the first
+        snapshot.
 
         Raises:
             PluginImageError: a verifier pinned by digest cannot be looked up
@@ -618,7 +621,7 @@ class Instance:
             started.callback(audit.close)
             ensure_verifier(client)
             daemon_warnings = limit_warnings(client)
-            removal_warnings = remove_left_cages(client)
+            removal = remove_left_cages(client)
             live = LiveConfig.start(build, EgressProxies(client, state_dir / "egress"))
             runner = CageRunner(client, credentials, CageLimiter())
             gateway = CallGateway(
@@ -644,7 +647,8 @@ class Instance:
                 control,
                 sweeper,
                 audit,
-                (*daemon_warnings, *removal_warnings, *live.current.warnings),
+                removal.removed,
+                (*daemon_warnings, *removal.warnings, *live.current.warnings),
             )
             started.pop_all()
         return instance

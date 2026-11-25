@@ -20,7 +20,8 @@ locks, without its dev group, each under its own licence.
 The instance image also ships Docker's default seccomp profile, verbatim, as the core package's
 `agent_proxy/seccomp/default.json`, from `core/agent-proxy/agent_proxy/seccomp/default.json`. The
 file comes from `github.com/moby/profiles/seccomp` v0.2.4, the version that Docker 29.9.2 builds in,
-under the Apache License 2.0.
+under the Apache License 2.0. The licence's text ships beside the profile, as
+`agent_proxy/seccomp/LICENSE`, from `core/agent-proxy/agent_proxy/seccomp/LICENSE`.
 
 ## The plugin images
 

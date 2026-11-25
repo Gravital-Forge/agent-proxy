@@ -1376,15 +1376,17 @@ def test_remove_left_cages_lists_every_cage_with_the_container_labels(
     )
 
 
-def test_remove_left_cages_force_removes_each_listed_cage() -> None:
-    """Each cage is removed by force, running or not, and no warning comes back."""
+def test_remove_left_cages_force_removes_each_listed_cage_and_names_it() -> None:
+    """Each cage is removed by force, running or not, and named in listing order."""
     running, stopped = _left_cage("running"), _left_cage("stopped")
     client = MagicMock()
     client.containers.list.return_value = [running, stopped]
 
-    warnings = runner.remove_left_cages(client)
+    removal = runner.remove_left_cages(client)
 
-    assert warnings == ()
+    assert removal == runner.LeftCageRemoval(
+        removed=("running", "stopped"), warnings=()
+    )
     running.remove.assert_called_once_with(force=True)
     stopped.remove.assert_called_once_with(force=True)
 
@@ -1396,22 +1398,25 @@ def test_remove_left_cages_warns_of_a_cage_it_cannot_remove_and_goes_on() -> Non
     client = MagicMock()
     client.containers.list.return_value = [stuck, next_cage]
 
-    warnings = runner.remove_left_cages(client)
+    removal = runner.remove_left_cages(client)
 
-    [warning] = warnings
+    [warning] = removal.warnings
     assert "'apx-stuck'" in warning
     assert "removal refused" in warning
+    assert removal.removed == ("apx-next",)
     next_cage.remove.assert_called_once_with(force=True)
 
 
-def test_remove_left_cages_gives_no_warning_for_a_cage_already_gone() -> None:
-    """A cage removed between the listing and its removal is no failure."""
+def test_remove_left_cages_neither_warns_of_nor_names_a_cage_already_gone() -> None:
+    """A cage gone between the listing and its removal gives no warning and no name."""
     gone = _left_cage("apx-gone")
     gone.remove.side_effect = docker.errors.NotFound("no such container")
     client = MagicMock()
     client.containers.list.return_value = [gone]
 
-    assert runner.remove_left_cages(client) == ()
+    assert runner.remove_left_cages(client) == runner.LeftCageRemoval(
+        removed=(), warnings=()
+    )
 
 
 @pytest.mark.parametrize(

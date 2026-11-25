@@ -119,6 +119,10 @@ the start:
   instance left and the start cannot remove. [The instance](architecture.md#the-instance) gives the
   removal.
 
+Before any warning, `serve` prints one report line on stderr for each left cage that the start
+removes: `agent-proxy: removed the left cage '<name>'`. A report is not a warning, and it stops
+nothing.
+
 Two failures of Docker stop the start:
 
 - `the Docker daemon's info could not be read, so the cage limits cannot be checked: <Docker's error>`,
@@ -177,9 +181,9 @@ docker exec -i agent-proxy agent-proxy credential set github-token
   `agent-proxy: FAILED of TOTAL checks failed` and exits 1. It refuses a scope that the config in
   force does not define, and names the defined scopes.
 - `serve --host HOST --port PORT` is the instance image's process; the operator does not run it by
-  hand. `PORT` is an integer from 1 to 65535. It prints the warnings of the start, which the
-  container's log shows, then serves the MCP surface at `/mcp` on that address. On SIGINT or SIGTERM
-  it stops and exits 0.
+  hand. `PORT` is an integer from 1 to 65535. It prints the reports and the warnings of the start,
+  which the container's log shows, then serves the MCP surface at `/mcp` on that address. On SIGINT
+  or SIGTERM it stops and exits 0.
 
 [Reload](architecture.md#reload) gives how `reload` and `check` reach the instance. Each waits at
 most 600 seconds for the reply. A socket with nothing listening, no reply in time, and a reply of

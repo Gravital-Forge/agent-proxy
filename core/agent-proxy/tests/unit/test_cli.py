@@ -199,6 +199,7 @@ class FakeInstance:
     def __init__(self) -> None:
         """Hold a stand-in app; not started, not closed."""
         self.app = object()
+        self.removed_cages: tuple[str, ...] = ()
         self.warnings: tuple[str, ...] = ()
         self.started_with: tuple[Path, Path, object] | None = None
         self.closed = False
@@ -1021,6 +1022,31 @@ def test_serve_prints_the_start_warnings_before_the_server_runs(
 
     assert err_at_run == [
         "".join(f"{PREFIX}warning: {line}\n" for line in instance.warnings)
+    ]
+
+
+def test_serve_reports_each_removed_left_cage_before_the_start_warnings(
+    fake_instance: tuple[FakeInstance, mock.MagicMock],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """One report line per removed cage, in order, then the warnings, then the run."""
+    instance, _ = fake_instance
+    instance.removed_cages = ("apx-running", "apx-stopped")
+    instance.warnings = (unset_message("github-token"),)
+    err_at_run: list[str] = []
+
+    def run(self: _Server, sockets: object = None) -> None:
+        err_at_run.append(capsys.readouterr().err)
+
+    monkeypatch.setattr(_Server, "run", run)
+
+    assert main(SERVE) == 0
+
+    assert err_at_run == [
+        f"{PREFIX}removed the left cage 'apx-running'\n"
+        f"{PREFIX}removed the left cage 'apx-stopped'\n"
+        f"{PREFIX}warning: {unset_message('github-token')}\n"
     ]
 
 

@@ -501,6 +501,10 @@ def _gone(client: DockerClient, container: Container) -> bool:
     return False
 
 
+def _removal_line(container: Container) -> str:
+    return f"agent-proxy: removed the left cage {container.name!r}"
+
+
 def test_an_instance_removes_the_cages_left_on_its_daemon_before_it_serves(
     docker_client: DockerClient,
     labelled_instance_image: str,
@@ -510,7 +514,8 @@ def test_an_instance_removes_the_cages_left_on_its_daemon_before_it_serves(
     """A running and a stopped cage are gone once it serves; an unlabelled one stays.
 
     The bystander carries the test label but no cage label, so only the cage
-    label sets the left cages apart from it.
+    label sets the left cages apart from it. The instance's log holds one
+    removal line for each left cage, and none for the bystander.
     """
     tree = _make_tree(tmp_path)
     config = {
@@ -551,10 +556,15 @@ def test_an_instance_removes_the_cages_left_on_its_daemon_before_it_serves(
             )
             assert started.returncode == 0, started.stderr
             wait_for_mcp(docker_client, name, port)
+            log = docker_client.containers.get(name).logs().decode()
 
             assert _gone(docker_client, running)
             assert _gone(docker_client, stopped)
             assert not _gone(docker_client, bystander)
+            lines = log.splitlines()
+            assert lines.count(_removal_line(running)) == 1, log
+            assert lines.count(_removal_line(stopped)) == 1, log
+            assert _removal_line(bystander) not in lines, log
     finally:
         for container in (running, stopped, bystander):
             with contextlib.suppress(docker.errors.NotFound):

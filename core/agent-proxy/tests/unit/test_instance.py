@@ -286,7 +286,10 @@ def _left_cage(name: str) -> mock.MagicMock:
 def test_start_removes_each_left_cage_before_the_live_config_starts(
     state_dir: Path, tmp_path: Path, egress: RecordingEgress
 ) -> None:
-    """Each cage is force-removed after the stores open and before any egress."""
+    """Each cage is force-removed after the stores open and before any egress.
+
+    The instance holds the name of each cage it removed.
+    """
     cage = _left_cage("apx-left")
     seen_at_removal: list[object] = []
     cage.remove.side_effect = lambda force: seen_at_removal.append(
@@ -297,6 +300,7 @@ def test_start_removes_each_left_cage_before_the_live_config_starts(
     instance.close()
 
     assert seen_at_removal == [(True, True, [])]
+    assert instance.removed_cages == ("apx-left",)
     assert instance.warnings == ()
 
 
@@ -325,6 +329,7 @@ def test_start_warns_of_a_left_cage_it_cannot_remove_between_its_other_warnings(
     assert "'apx-stuck'" in removal_warning
     assert "removal refused" in removal_warning
     assert config_warning == unset_message("github-token")
+    assert instance.removed_cages == ()
 
 
 def test_a_cage_listing_that_fails_raises_and_starts_nothing(

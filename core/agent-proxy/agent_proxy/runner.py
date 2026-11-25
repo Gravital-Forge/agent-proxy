@@ -410,8 +410,19 @@ def limit_warnings(client: DockerClient) -> tuple[str, ...]:
     )
 
 
-def remove_left_cages(client: DockerClient) -> tuple[str, ...]:
-    """Force-remove every cage on the daemon, and return one warning per failure.
+@dataclass(frozen=True)
+class LeftCageRemoval:
+    """The name of each left cage removed, and one warning per cage that was not.
+
+    A cage already gone at its removal is in neither.
+    """
+
+    removed: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+
+def remove_left_cages(client: DockerClient) -> LeftCageRemoval:
+    """Force-remove every cage on the daemon, naming each removal and each failure.
 
     One instance owns its daemon, so a cage there at start is one an earlier
     instance left behind, and it may still hold credentials.
@@ -425,12 +436,18 @@ def remove_left_cages(client: DockerClient) -> tuple[str, ...]:
         )
     except DOCKER_FAILURES as exc:
         raise CageFailedError(f"the left cages could not be listed: {exc}") from exc
+    removed = []
     warnings = []
     for cage in cages:
-        warning = _remove_left_cage(cage)
-        if warning is not None:
-            warnings.append(warning)
-    return tuple(warnings)
+        try:
+            cage.remove(force=True)
+        except docker.errors.NotFound:
+            continue
+        except DOCKER_FAILURES as exc:
+            warnings.append(f"the left cage {cage.name!r} could not be removed: {exc}")
+            continue
+        removed.append(cage.name)
+    return LeftCageRemoval(removed=tuple(removed), warnings=tuple(warnings))
 
 
 def _cage_filters() -> dict[str, list[str]]:
@@ -444,16 +461,6 @@ def _cage_filters() -> dict[str, list[str]]:
             *(f"{name}={value}" for name, value in CONTAINER_LABELS.items()),
         ]
     }
-
-
-def _remove_left_cage(cage: Container) -> str | None:
-    try:
-        cage.remove(force=True)
-    except docker.errors.NotFound:
-        return None
-    except DOCKER_FAILURES as exc:
-        return f"the left cage {cage.name!r} could not be removed: {exc}"
-    return None
 
 
 @dataclass(frozen=True)

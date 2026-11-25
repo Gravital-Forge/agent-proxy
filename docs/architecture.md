@@ -381,15 +381,19 @@ egress proxies stay too.
 
 One instance owns its daemon, so every cage on the daemon at start is one that a killed instance
 left. The start removes by force each container that carries the cage label, running or stopped,
-before the instance serves (`remove_left_cages` in `runner.py`). A removal that fails gives a
-warning that names the container, and the start goes on. A container that is already gone when the
-start removes it counts as removed, and gives no warning. A listing that fails stops the start.
+before the instance serves (`remove_left_cages` in `runner.py`). The start reports each cage it
+removes on stderr, by name. A left cage can be a call that the killed instance never finished, and
+such a call never got its audit line, so the report keeps a record of it in the instance's log. A
+removal that fails gives a warning that names the container, and the start goes on. A container that
+is already gone when the start removes it counts as removed, and gives neither a report nor a
+warning. A listing that fails stops the start.
 
 The start reads the daemon's info, and gives a warning for each cage limit that the daemon cannot
 enforce, as [Failures and warnings](reference.md#failures-and-warnings) gives. A daemon that does
 not report a limit counts as one that cannot enforce it. An info call that fails stops the start.
-`serve` prints the start's warnings, as the `serve` verb under [Verbs](reference.md#verbs) gives:
-first the limit warnings, then the removal warnings, then the config's own.
+`serve` prints the start's reports and warnings, as the `serve` verb under
+[Verbs](reference.md#verbs) gives: first the removal reports, then the limit warnings, then the
+removal warnings, then the config's own.
 
 `core/docker/start-instance.sh` holds the run line. It takes the image, the container name, the host
 port, the config directory, the state directory, and the agent tree, and passes any further
