@@ -1,3 +1,4 @@
+import os
 import secrets
 import shlex
 import shutil
@@ -21,6 +22,7 @@ from docker.models.containers import Container
 from harness import (
     FIXTURE_EMAIL,
     FIXTURE_NAME,
+    GitHubRemote,
     GrantedCredentials,
     OtherUidRepo,
     RemotePair,
@@ -28,6 +30,7 @@ from harness import (
     RunAction,
     RunInImage,
     host_git,
+    lfs_pointer,
 )
 
 TEST_LABELS = {"agent-proxy.test": "1"}
@@ -44,6 +47,8 @@ ROOT_USER = "0:0"
 OTHER_USER = "1000:1000"
 AUTH_SERVER_PATH = Path(__file__).with_name("auth_server.py")
 AUTH_ALIASES = ["github.com", "auth"]
+GIT_HTTP_SERVER_PATH = Path(__file__).with_name("git_http_server.py")
+GITHUB_ALIAS = "github.com"
 SERVER_CERTIFICATE_NAME = "server-certificate.pem"
 SERVER_KEY_NAME = "server-key.pem"
 GIT_DAEMON_ALIAS = "git-remote"
@@ -521,6 +526,86 @@ def auth_server(
         yield container
     finally:
         container.remove(force=True)
+
+
+@pytest.fixture
+def git_http_server(
+    docker_client: DockerClient,
+    fixture_image: str,
+    cage_network: str,
+    server_tls_dir: Path,
+    tmp_path: Path,
+) -> Iterator[GitHubRemote]:
+    """A git server over TLS on port 443 that answers 401 until the credential arrives.
+
+    It serves the bare listed-org/repo.git, whose HEAD is main, under
+    GITHUB_ALIAS on the network every cage joins; a cage trusts its
+    certificate through trust_auth_server. main holds a.txt, and big.bin, which
+    .gitattributes gives to git LFS, committed as its pointer; task/b adds
+    b.txt. No test requests this fixture and auth_server both, so the alias is
+    never held twice.
+    """
+    projects = tmp_path / "git-projects"
+    remote = GitHubRemote(
+        repository=projects / "listed-org" / "repo.git",
+        pointer=lfs_pointer(os.urandom(2048)),
+    )
+    _commit_github_remote(tmp_path / "git-work", remote)
+    tls_dir = str(server_tls_dir)
+    container = docker_client.containers.run(
+        fixture_image,
+        [
+            "python3",
+            "-u",
+            "-c",
+            GIT_HTTP_SERVER_PATH.read_text(),
+            str(server_tls_dir / SERVER_CERTIFICATE_NAME),
+            str(server_tls_dir / SERVER_KEY_NAME),
+            str(projects),
+        ],
+        detach=True,
+        mounts=[
+            docker.types.Mount(
+                target=tls_dir, source=tls_dir, type="bind", read_only=True
+            ),
+            docker.types.Mount(target=str(projects), source=str(projects), type="bind"),
+        ],
+        network=cage_network,
+        networking_config={
+            cage_network: docker_client.api.create_endpoint_config(
+                aliases=[GITHUB_ALIAS]
+            )
+        },
+        labels=TEST_LABELS,
+    )
+    try:
+        _wait_for_log(container, b"READY")
+        yield remote
+    finally:
+        container.remove(force=True)
+
+
+def _commit_github_remote(work: Path, remote: GitHubRemote) -> None:
+    """Fill remote's bare repository from a new repository at work.
+
+    The host's git runs with no LFS filter, so big.bin's blob is the pointer
+    text as written.
+    """
+    host_git(work.parent, "init", "-q", "--bare", "-b", "main", str(remote.repository))
+    host_git(work.parent, "init", "-q", "-b", "main", str(work))
+    _set_identity(work)
+    (work / "a.txt").write_text("one\n")
+    (work / ".gitattributes").write_text(
+        "big.bin filter=lfs diff=lfs merge=lfs -text\n"
+    )
+    (work / "big.bin").write_text(remote.pointer)
+    host_git(work, "add", ".")
+    host_git(work, "commit", "-q", "-m", "first")
+    host_git(work, "checkout", "-q", "-b", "task/b")
+    (work / "b.txt").write_text("b\n")
+    host_git(work, "add", "b.txt")
+    host_git(work, "commit", "-q", "-m", "second")
+    host_git(work, "push", "-q", str(remote.repository), "main", "task/b")
 
 
 @contextmanager

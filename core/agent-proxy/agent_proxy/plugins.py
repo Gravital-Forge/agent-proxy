@@ -130,10 +130,31 @@ class ScriptAction:
 
 
 @dataclass(frozen=True)
+class ProviderAction:
+    """An action that runs an executable in the image to give a credential's value."""
+
+    name: str
+    credentials: tuple[EnvMount | FileMount, ...]
+    timeout: timedelta
+    executable: str
+
+
+@dataclass(frozen=True)
 class Manifest:
     """The actions a plugin declares, by action name."""
 
-    actions: Mapping[str, CommandAction | ScriptAction]
+    actions: Mapping[str, CommandAction | ScriptAction | ProviderAction]
+
+    @property
+    def tools(self) -> Mapping[str, CommandAction | ScriptAction]:
+        """The actions a grant can name: every action that is not a provider."""
+        return types.MappingProxyType(
+            {
+                name: action
+                for name, action in self.actions.items()
+                if not isinstance(action, ProviderAction)
+            }
+        )
 
     def warnings(self) -> tuple[str, ...]:
         """Return one message per action that declares pass-through args."""
@@ -174,8 +195,15 @@ class _ScriptDoc(TypedDict):
     output_schema: dict[str, object]
 
 
+class _ProviderDoc(TypedDict):
+    kind: Literal["provider"]
+    credentials: list[_CredentialDoc]
+    timeout: str
+    executable: str
+
+
 class _ManifestDoc(TypedDict):
-    actions: dict[str, _CommandDoc | _ScriptDoc]
+    actions: dict[str, _CommandDoc | _ScriptDoc | _ProviderDoc]
 
 
 def parse_manifest(data: bytes) -> Manifest:
@@ -275,12 +303,19 @@ def _rule_failures(document: _ManifestDoc) -> Iterator[str]:
         yield from _action_failures(f"$.actions.{name}", action)
 
 
-def _action_failures(where: str, action: _CommandDoc | _ScriptDoc) -> Iterator[str]:
+def _action_failures(
+    where: str, action: _CommandDoc | _ScriptDoc | _ProviderDoc
+) -> Iterator[str]:
     yield from _credential_failures(where, action["credentials"])
     try:
         parse_duration(action["timeout"])
     except DurationError as exc:
         yield f"{where}.timeout: {exc}"
+    if action["kind"] != "provider":
+        yield from _tool_failures(where, action)
+
+
+def _tool_failures(where: str, action: _CommandDoc | _ScriptDoc) -> Iterator[str]:
     input_schema_failures = list(
         _embedded_schema_failures(f"{where}.input_schema", action["input_schema"])
     )
@@ -519,10 +554,17 @@ def _to_manifest(document: _ManifestDoc) -> Manifest:
 
 
 def _to_action(
-    name: str, document: _CommandDoc | _ScriptDoc
-) -> CommandAction | ScriptAction:
+    name: str, document: _CommandDoc | _ScriptDoc | _ProviderDoc
+) -> CommandAction | ScriptAction | ProviderAction:
     credentials = tuple(_to_credential(item) for item in document["credentials"])
     timeout = parse_duration(document["timeout"])
+    if document["kind"] == "provider":
+        return ProviderAction(
+            name=name,
+            credentials=credentials,
+            timeout=timeout,
+            executable=document["executable"],
+        )
     if document["kind"] == "command":
         return CommandAction(
             name=name,

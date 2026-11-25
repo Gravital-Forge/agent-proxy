@@ -4,7 +4,7 @@ import os
 import re
 import shutil
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 
 import pytest
@@ -116,6 +116,7 @@ def test_actions_holds_each_script_action() -> None:
         "checkout",
         "worktree",
         "config_get",
+        "clone",
     }
 
 
@@ -1472,5 +1473,459 @@ def test_run_script_returns_a_nested_worktree_refusal_as_its_result(
         "stderr": (
             f"git plugin refused: worktree path '{path}' "
             "is inside the repository it comes from\n"
+        ),
+    }
+
+
+CLONED = "octo/hello"
+CLONED_URL = "https://github.com/octo/hello.git"
+ORIGIN_REFSPEC = "+refs/heads/*:refs/remotes/origin/*"
+NO_REPOS = r"^GITHUB_REPOS is not set or names no repository; the grant's env sets it$"
+# An lfs smudge filter that writes, in place of the file, what git LFS was told.
+SKIP_REPORTING_SMUDGE = 'cat >/dev/null; echo "skip=$GIT_LFS_SKIP_SMUDGE"'
+
+type GitRun = tuple[list[str], dict[str, object]]
+
+
+def _reach_github_url_at(
+    monkeypatch: pytest.MonkeyPatch, remote: Path, *extra: tuple[str, str]
+) -> None:
+    """Make CLONED_URL lead to remote through insteadOf, with extra config entries.
+
+    The entries reach git through GIT_CONFIG_*, which clone's init drops and
+    this file's stand-in builder keeps. GIT_ALLOW_PROTOCOL overrides
+    git_argv's pin on the file transport.
+    """
+    entries = [(f"url.{remote.as_uri()}.insteadOf", CLONED_URL), *extra]
+    monkeypatch.setenv("GIT_ALLOW_PROTOCOL", "file")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", str(len(entries)))
+    for index, (key, value) in enumerate(entries):
+        monkeypatch.setenv(f"GIT_CONFIG_KEY_{index}", key)
+        monkeypatch.setenv(f"GIT_CONFIG_VALUE_{index}", value)
+
+
+@pytest.fixture
+def github_remote(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A bare remote that CLONED_URL leads to, which GITHUB_REPOS lists.
+
+    Its HEAD is main, which holds a.txt and big.bin, the lfs filter's by
+    .gitattributes; task/b adds b.txt.
+    """
+    remote = tmp_path / "remote.git"
+    work = tmp_path / "work"
+    _git(tmp_path, "init", "-q", "--bare", "-b", "main", str(remote))
+    _git(tmp_path, "init", "-q", "-b", "main", str(work))
+    _git(work, "config", "user.name", NAME)
+    _git(work, "config", "user.email", EMAIL)
+    (work / "a.txt").write_text("one\n")
+    (work / ".gitattributes").write_text("big.bin filter=lfs\n")
+    (work / "big.bin").write_text("raw\n")
+    _git(work, "add", ".")
+    _git(work, "commit", "-q", "-m", "first")
+    _git(work, "checkout", "-q", "-b", "task/b")
+    (work / "b.txt").write_text("b\n")
+    _git(work, "add", "b.txt")
+    _git(work, "commit", "-q", "-m", "second")
+    _git(work, "push", "-q", str(remote), "main", "task/b")
+    _reach_github_url_at(monkeypatch, remote)
+    monkeypatch.setenv("GITHUB_REPOS", CLONED)
+    return remote
+
+
+@pytest.fixture
+def clone_root(tmp_path: Path) -> Path:
+    """An empty directory for a clone to fill."""
+    root = tmp_path / "clone-root"
+    root.mkdir()
+    return root
+
+
+def _clone(root: Path) -> scripts.ScriptResult:
+    """Clone CLONED into root, the cage's one root."""
+    return scripts.clone({"repo": CLONED, "path": str(root)}, [str(root)])
+
+
+def _record_git(monkeypatch: pytest.MonkeyPatch) -> list[GitRun]:
+    """Record each subprocess run's argv and keywords, and run it."""
+    runs: list[GitRun] = []
+    run = subprocess.run
+
+    def recording(
+        argv: list[str], **keywords: object
+    ) -> subprocess.CompletedProcess[bytes]:
+        runs.append((argv, keywords))
+        return run(argv, **keywords)
+
+    monkeypatch.setattr(subprocess, "run", recording)
+    return runs
+
+
+def _git_arguments(argv: list[str]) -> list[str]:
+    """Return argv's arguments after git's own -C and -c options."""
+    words = iter(argv[1:])
+    for word in words:
+        if word not in ("-C", "-c"):
+            return [word, *words]
+        next(words)
+    return []
+
+
+def _subcommands(runs: list[GitRun]) -> list[str]:
+    return [_git_arguments(argv)[0] for argv, _ in runs]
+
+
+def _local_config(repo: Path, key: str) -> str:
+    """Return key's value in repo's own config file, with git's newline."""
+    return _git(repo, "config", "--local", "--get", key)
+
+
+def test_clone_checks_out_the_remotes_default_branch(
+    github_remote: Path, clone_root: Path
+) -> None:
+    """The clone checks out main, the remote's HEAD, with its files and no change."""
+    result = _clone(clone_root)
+
+    assert result["exit_code"] == 0, result
+    assert _head(clone_root) == "main\n"
+    assert (clone_root / "a.txt").read_text() == "one\n"
+    assert _git(clone_root, "status", "--porcelain") == ""
+
+
+def test_clone_names_origin_by_the_github_url(
+    github_remote: Path, clone_root: Path
+) -> None:
+    """The repository's own config names origin's URL and its fetch refspec."""
+    _clone(clone_root)
+
+    assert (
+        _local_config(clone_root, "remote.origin.url"),
+        _local_config(clone_root, "remote.origin.fetch"),
+    ) == (f"{CLONED_URL}\n", f"{ORIGIN_REFSPEC}\n")
+
+
+def test_clone_makes_the_default_branch_track_origin(
+    github_remote: Path, clone_root: Path
+) -> None:
+    """The upstream of main is origin/main."""
+    _clone(clone_root)
+
+    upstream = _git(clone_root, "rev-parse", "--abbrev-ref", "main@{upstream}")
+
+    assert upstream == "origin/main\n"
+
+
+def test_clone_fetches_every_branch_under_origin(
+    github_remote: Path, clone_root: Path
+) -> None:
+    """Each remote branch is under refs/remotes/origin/, and origin's HEAD is main."""
+    _clone(clone_root)
+
+    refs = _git(clone_root, "for-each-ref", "--format=%(refname)")
+
+    assert refs.split() == [
+        "refs/heads/main",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/main",
+        "refs/remotes/origin/task/b",
+    ]
+    assert _git(clone_root, "symbolic-ref", "refs/remotes/origin/HEAD") == (
+        "refs/remotes/origin/main\n"
+    )
+
+
+def test_clone_follows_a_default_branch_other_than_main(
+    github_remote: Path, clone_root: Path
+) -> None:
+    """With the remote's HEAD at task/b, clone checks out task/b."""
+    _git(github_remote, "symbolic-ref", "HEAD", "refs/heads/task/b")
+
+    result = _clone(clone_root)
+
+    assert (result["exit_code"], _head(clone_root)) == (0, "task/b\n")
+
+
+def test_clone_runs_its_steps_in_order(
+    github_remote: Path, clone_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """init, the remote's HEAD, the branches, origin, origin's HEAD, the checkout."""
+    runs = _record_git(monkeypatch)
+
+    _clone(clone_root)
+
+    config = f"{os.path.realpath(clone_root)}/.git/config"
+    write = ["config", "--file", config, "--no-includes"]
+    assert [_git_arguments(argv) for argv, _ in runs] == [
+        ["init", "--quiet", "--template=", str(clone_root)],
+        ["ls-remote", "--symref", CLONED_URL, "HEAD"],
+        ["fetch", CLONED_URL, ORIGIN_REFSPEC],
+        [*write, "remote.origin.url", CLONED_URL],
+        [*write, "remote.origin.fetch", ORIGIN_REFSPEC],
+        ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"],
+        ["checkout", "--no-track", "-b", "main", "refs/remotes/origin/main"],
+        [*write, "branch.main.remote", "origin"],
+        [*write, "branch.main.merge", "refs/heads/main"],
+    ]
+
+
+def test_clone_runs_init_from_root_with_no_git_variable(
+    github_remote: Path, clone_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The init runs hooks off, from /, with no GIT_ variable but the null configs."""
+    runs = _record_git(monkeypatch)
+
+    _clone(clone_root)
+
+    argv, keywords = runs[0]
+    environ = keywords["env"]
+    assert isinstance(environ, Mapping)
+    assert (
+        argv[:5],
+        keywords["cwd"],
+        {name: environ[name] for name in environ if name.startswith("GIT_")},
+    ) == (
+        ["git", "-c", "core.hooksPath=/dev/null", "-c", "init.defaultBranch=main"],
+        "/",
+        {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull},
+    )
+
+
+def test_clone_makes_the_lfs_directory_and_copies_no_template(
+    github_remote: Path, clone_root: Path
+) -> None:
+    """.git/lfs exists for the isolation's link, and no template made .git/hooks."""
+    _clone(clone_root)
+
+    assert (clone_root / ".git" / "lfs").is_dir()
+    assert not (clone_root / ".git" / "hooks").exists()
+
+
+def test_clone_checks_out_with_lfs_smudging_skipped(
+    github_remote: Path, clone_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The checkout runs the lfs filter with GIT_LFS_SKIP_SMUDGE set to 1."""
+    _reach_github_url_at(
+        monkeypatch, github_remote, ("filter.lfs.smudge", SKIP_REPORTING_SMUDGE)
+    )
+
+    result = _clone(clone_root)
+
+    assert result["exit_code"] == 0, result
+    assert (clone_root / "big.bin").read_text() == "skip=1\n"
+
+
+def test_clone_result_holds_each_steps_stderr_in_order(
+    github_remote: Path, clone_root: Path
+) -> None:
+    """The fetch's ref lines come before the checkout's line, in one stderr."""
+    _git(github_remote, "symbolic-ref", "HEAD", "refs/heads/task/b")
+
+    result = _clone(clone_root)
+
+    stderr = result["stderr"]
+    assert stderr.index(" * [new branch]") < stderr.index(
+        "Switched to a new branch 'task/b'"
+    )
+
+
+def test_clone_of_an_empty_remote_names_origin_and_checks_out_nothing(
+    tmp_path: Path, clone_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """With no default branch, clone stops once origin is written, with exit 0."""
+    remote = tmp_path / "empty.git"
+    _git(tmp_path, "init", "-q", "--bare", "-b", "main", str(remote))
+    _reach_github_url_at(monkeypatch, remote)
+    monkeypatch.setenv("GITHUB_REPOS", CLONED)
+    runs = _record_git(monkeypatch)
+
+    result = _clone(clone_root)
+
+    assert result == {"exit_code": 0, "stdout": "", "stderr": ""}
+    assert _subcommands(runs) == ["init", "ls-remote", "fetch", "config", "config"]
+    assert _local_config(clone_root, "remote.origin.url") == f"{CLONED_URL}\n"
+
+
+def test_clone_returns_a_failed_step_and_runs_no_later_one(
+    tmp_path: Path, clone_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A remote that is not there fails ls-remote, whose result is the clone's."""
+    _reach_github_url_at(monkeypatch, tmp_path / "missing.git")
+    monkeypatch.setenv("GITHUB_REPOS", CLONED)
+    runs = _record_git(monkeypatch)
+
+    result = _clone(clone_root)
+
+    assert result["exit_code"] == 128
+    assert "does not appear to be a git repository" in result["stderr"]
+    assert _subcommands(runs) == ["init", "ls-remote"]
+    assert "[remote " not in (clone_root / ".git" / "config").read_text()
+
+
+def test_clone_returns_a_failed_init(
+    github_remote: Path, clone_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A root git cannot write fails init, and no later step runs."""
+    clone_root.chmod(0o500)
+    runs = _record_git(monkeypatch)
+
+    result = _clone(clone_root)
+
+    assert result["exit_code"] != 0
+    assert "Permission denied" in result["stderr"]
+    assert _subcommands(runs) == ["init"]
+
+
+@pytest.mark.parametrize(
+    ("listed", "reason"),
+    [
+        (None, NO_REPOS),
+        ("*", r"^GITHUB_REPOS entry '\*' is not owner/name or owner/\*$"),
+        ("octo/other,else/*", r"^repository 'octo/hello' is not in GITHUB_REPOS$"),
+    ],
+    ids=["unset", "malformed", "unlisted"],
+)
+def test_clone_refuses_a_repository_the_list_does_not_name(
+    clone_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    listed: str | None,
+    reason: str,
+) -> None:
+    """With no GH_TOKEN, a list that is unset, malformed, or silent refuses clone."""
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_REPOS", raising=False)
+    if listed is not None:
+        monkeypatch.setenv("GITHUB_REPOS", listed)
+
+    with pytest.raises(RefusalError, match=reason):
+        _clone(clone_root)
+
+    assert list(clone_root.iterdir()) == []
+
+
+def _clone_refusal(path: Path, reason: str) -> str:
+    """Return the pattern of the refusal of path for reason."""
+    return f"^clone path '{re.escape(str(path))}' {reason}$"
+
+
+def test_clone_refuses_a_path_that_is_not_a_root(
+    github_remote: Path, clone_root: Path
+) -> None:
+    """An empty directory beneath the root is not the root, and is refused."""
+    path = clone_root / "sub"
+    path.mkdir()
+
+    with pytest.raises(
+        RefusalError, match=_clone_refusal(path, "is not one of the grant's roots")
+    ):
+        scripts.clone({"repo": CLONED, "path": str(path)}, [str(clone_root)])
+
+    assert list(path.iterdir()) == []
+
+
+def test_clone_takes_a_path_that_normalizes_to_a_root(
+    github_remote: Path, clone_root: Path
+) -> None:
+    """A path and a root that differ in a '.' or a trailing slash name one root."""
+    arguments = {"repo": CLONED, "path": f"{clone_root}/./"}
+
+    result = scripts.clone(arguments, [f"{clone_root}/"])
+
+    assert result["exit_code"] == 0, result
+    assert _head(clone_root) == "main\n"
+
+
+def test_clone_refuses_a_root_that_is_a_symbolic_link(
+    github_remote: Path, clone_root: Path, tmp_path: Path
+) -> None:
+    """A root that is a link to an empty directory is refused."""
+    link = tmp_path / "link"
+    link.symlink_to(clone_root)
+
+    with pytest.raises(RefusalError, match=_clone_refusal(link, "is a symbolic link")):
+        scripts.clone({"repo": CLONED, "path": str(link)}, [str(link)])
+
+    assert list(clone_root.iterdir()) == []
+
+
+@pytest.mark.parametrize("kind", ["file", "missing"])
+def test_clone_refuses_a_root_that_is_not_a_directory(
+    github_remote: Path, tmp_path: Path, kind: str
+) -> None:
+    """A root that is a file, or that is not there, is refused."""
+    path = tmp_path / "not-a-directory"
+    if kind == "file":
+        path.write_text("x\n")
+
+    with pytest.raises(RefusalError, match=_clone_refusal(path, "is not a directory")):
+        scripts.clone({"repo": CLONED, "path": str(path)}, [str(path)])
+
+
+def test_clone_refuses_a_root_that_is_not_empty(
+    github_remote: Path, clone_root: Path
+) -> None:
+    """A root that holds a file is refused, and the file stays alone in it."""
+    (clone_root / ".keep").touch()
+
+    with pytest.raises(RefusalError, match=_clone_refusal(clone_root, "is not empty")):
+        _clone(clone_root)
+
+    assert [entry.name for entry in clone_root.iterdir()] == [".keep"]
+
+
+@pytest.fixture
+def unlistable_root(clone_root: Path) -> Iterator[Path]:
+    """clone_root with its read permission off, given back at teardown.
+
+    pytest removes no directory it cannot list.
+    """
+    clone_root.chmod(0o300)
+    yield clone_root
+    clone_root.chmod(0o700)
+
+
+@pytest.mark.usefixtures("github_remote")
+def test_clone_refuses_a_root_it_cannot_list(unlistable_root: Path) -> None:
+    """A root whose entries cannot be read is refused with the reason."""
+    with pytest.raises(
+        RefusalError,
+        match=_clone_refusal(unlistable_root, "cannot be read: Permission denied"),
+    ):
+        _clone(unlistable_root)
+
+
+def test_run_script_builds_clones_isolation_on_its_path_after_init(
+    github_remote: Path, clone_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The isolation is built once, on the normalized path, once .git/lfs exists."""
+    built: list[tuple[str, bool]] = []
+
+    def isolated(repo: str, environ: Mapping[str, str]) -> dict[str, str]:
+        built.append((repo, Path(repo, ".git", "lfs").is_dir()))
+        return dict(os.environ)
+
+    monkeypatch.setattr(cage, "build_isolation", isolated)
+    stdin = json.dumps({"repo": CLONED, "path": f"{clone_root}/"}).encode()
+    environ = {"AGENT_PROXY_ROOTS": json.dumps([str(clone_root)])}
+
+    result = scripts.run_script("clone", stdin, environ)
+
+    assert result["exit_code"] == 0, result
+    assert built == [(str(clone_root), True)]
+
+
+def test_run_script_returns_a_clone_refusal_as_its_result(
+    clone_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unlisted repository in a cage with no GH_TOKEN comes back as exit code 2."""
+    monkeypatch.setenv("GITHUB_REPOS", "octo/other")
+    stdin = json.dumps({"repo": CLONED, "path": str(clone_root)}).encode()
+    environ = {"AGENT_PROXY_ROOTS": json.dumps([str(clone_root)])}
+
+    result = scripts.run_script("clone", stdin, environ)
+
+    assert result == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": (
+            "git plugin refused: repository 'octo/hello' is not in GITHUB_REPOS\n"
         ),
     }

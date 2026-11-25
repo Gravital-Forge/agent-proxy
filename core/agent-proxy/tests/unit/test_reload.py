@@ -19,6 +19,7 @@ from agent_proxy.plugins import (
     Manifest,
     ManifestError,
     PluginImageError,
+    ProviderAction,
 )
 from agent_proxy.reload import LiveConfig, Snapshot, build_snapshot
 
@@ -273,6 +274,119 @@ def test_an_unstored_credential_warns_after_the_manifest_warnings(
     )
 
 
+ISSUE = ProviderAction(
+    name="issue",
+    credentials=(),
+    timeout=timedelta(seconds=30),
+    executable="/plugin/bin/issue",
+)
+LOAD_WITH_PROVIDER = _loader(
+    {
+        GIT_IMAGE: Manifest(actions=GIT_MANIFEST.actions | {"issue": ISSUE}),
+        FS_IMAGE: FS_MANIFEST,
+    }
+)
+
+
+def _provided(provider: str, **credentials: dict[str, str]) -> dict[str, object]:
+    return {
+        "provider": provider,
+        "credentials": credentials,
+        "domains": [],
+        "refresh_before": "10m",
+    }
+
+
+def _provided_config(
+    grants: dict[str, object], **provided: dict[str, object]
+) -> dict[str, object]:
+    return _config(grants) | {"provided_credentials": provided}
+
+
+def test_a_snapshot_holds_a_provided_credential_whose_provider_is_declared(
+    tmp_path: Path,
+) -> None:
+    """An entry naming a provider action its plugin declares builds a snapshot."""
+    grant = _grant() | {"credentials": {"app-token": {"env": "GH_TOKEN"}}}
+    document = _provided_config(
+        {"git.clone": grant}, **{"app-token": _provided("git.issue")}
+    )
+    path = _write(tmp_path, document)
+
+    snapshot = build_snapshot(path, CREDENTIAL_NAMES, LOAD_WITH_PROVIDER)
+
+    assert set(snapshot.config.provided_credentials) == {"app-token"}
+    assert snapshot.warnings == ()
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [
+        pytest.param(
+            "git.mint",
+            "provided_credentials.app-token.provider: "
+            "action 'mint' is not declared by plugin 'git'",
+            id="undeclared",
+        ),
+        pytest.param(
+            "git.clone",
+            "provided_credentials.app-token.provider: "
+            "action 'clone' of plugin 'git' is not a provider action",
+            id="not-a-provider",
+        ),
+    ],
+)
+def test_a_provided_credential_needs_a_declared_provider_action(
+    tmp_path: Path, provider: str, expected: str
+) -> None:
+    """An entry's provider must be an action of kind provider its plugin declares."""
+    document = _provided_config(
+        {"git.clone": _grant()}, **{"app-token": _provided(provider)}
+    )
+    path = _write(tmp_path, document)
+
+    assert _failures(path, LOAD_WITH_PROVIDER) == (f"{_source(path)}: {expected}",)
+
+
+def test_a_grant_naming_a_provider_action_is_refused(tmp_path: Path) -> None:
+    """No grant can name a provider action, so no token can call one."""
+    path = _write(tmp_path, _config({"git.issue": _grant()}))
+
+    assert _failures(path, LOAD_WITH_PROVIDER) == (
+        f"{_source(path)}: scopes.dev.grants.git.issue: "
+        "action 'issue' of plugin 'git' is a provider action, which no grant can name",
+    )
+
+
+def test_the_provided_credentials_of_a_plugin_that_failed_to_load_are_not_reported(
+    tmp_path: Path,
+) -> None:
+    """With no manifest to check an entry against, only the plugin's failure shows."""
+    document = _provided_config(
+        {"fs.read": _grant()}, **{"app-token": _provided("git.mint")}
+    )
+    path = _write(tmp_path, document)
+    load_manifest = _loader({GIT_IMAGE: GIT_PULL_FAILURE, FS_IMAGE: FS_MANIFEST})
+
+    assert _failures(path, load_manifest) == (
+        f"{_source(path)}: plugins.git: {GIT_PULL_FAILURE}",
+    )
+
+
+def test_a_provider_s_unstored_input_warns_and_a_provided_name_does_not(
+    tmp_path: Path,
+) -> None:
+    """The grant's provided name is never looked up; the provider's input is."""
+    grant = _grant() | {"credentials": {"app-token": {"env": "GH_TOKEN"}}}
+    entry = _provided("git.issue", **{"app-key": {"file": "/run/credentials/key"}})
+    document = _provided_config({"git.clone": grant}, **{"app-token": entry})
+    path = _write(tmp_path, document)
+
+    snapshot = build_snapshot(path, CREDENTIAL_NAMES, LOAD_WITH_PROVIDER)
+
+    assert snapshot.warnings == (unset_message("app-key"),)
+
+
 def test_current_is_the_snapshot_live_config_was_given(tmp_path: Path) -> None:
     """A new LiveConfig puts its snapshot in force."""
     snapshot = _snapshot(tmp_path, "60s", "old.yaml")
@@ -425,6 +539,112 @@ def test_a_failed_ensure_keeps_current_and_still_prunes(tmp_path: Path) -> None:
 
     assert live.current is old
     assert egress.calls == [("ensure", {NEW_DOMAINS}), ("prune", {OLD_DOMAINS})]
+
+
+class RecordingReloads:
+    """An on_reload hook that records each snapshot and the one in force then."""
+
+    def __init__(self) -> None:
+        """Start with no reload seen."""
+        self.live: LiveConfig | None = None
+        self.seen: list[tuple[Snapshot, Snapshot | None]] = []
+
+    def __call__(self, snapshot: Snapshot) -> None:
+        """Record snapshot and the snapshot then in force."""
+        current = None if self.live is None else self.live.current
+        self.seen.append((snapshot, current))
+
+
+def test_a_reload_hands_the_snapshot_it_put_in_force_to_on_reload(
+    tmp_path: Path,
+) -> None:
+    """The hook gets the new snapshot once, after it is in force."""
+    old = _snapshot(tmp_path, "60s", "old.yaml")
+    new = _snapshot(tmp_path, "120s", "new.yaml")
+    reloads = RecordingReloads()
+    live = LiveConfig(old, RecordingEgress(), on_reload=reloads)
+    reloads.live = live
+
+    live.reload(lambda: new)
+
+    assert reloads.seen == [(new, new)]
+
+
+def test_start_calls_no_on_reload_and_a_later_reload_does(
+    tmp_path: Path,
+) -> None:
+    """The first snapshot is no reload; a later reload reaches the hook."""
+    first = _snapshot(tmp_path, "60s", "first.yaml")
+    new = _snapshot(tmp_path, "120s", "new.yaml")
+    reloads = RecordingReloads()
+
+    live = LiveConfig.start(lambda: first, RecordingEgress(), on_reload=reloads)
+    assert reloads.seen == []
+    live.reload(lambda: new)
+
+    assert [snapshot for snapshot, _ in reloads.seen] == [new]
+
+
+def test_a_failed_build_calls_no_on_reload(tmp_path: Path) -> None:
+    """A refused config leaves the hook uncalled."""
+    reloads = RecordingReloads()
+    live = LiveConfig(
+        _snapshot(tmp_path, "60s", "old.yaml"), RecordingEgress(), on_reload=reloads
+    )
+    invalid = _write(tmp_path, _config({"git.rebase": _grant()}), "invalid.yaml")
+
+    with pytest.raises(ConfigError):
+        live.reload(
+            functools.partial(build_snapshot, invalid, CREDENTIAL_NAMES, LOAD_BOTH)
+        )
+
+    assert reloads.seen == []
+
+
+def test_a_failed_ensure_calls_no_on_reload(tmp_path: Path) -> None:
+    """A reload whose egress cannot be made ready leaves the hook uncalled."""
+    old = _egress_snapshot(tmp_path, OLD_DOMAINS, "old.yaml")
+    new = _egress_snapshot(tmp_path, NEW_DOMAINS, "new.yaml")
+    egress = RecordingEgress(ensure_error=EgressError("proxy did not start"))
+    reloads = RecordingReloads()
+    live = LiveConfig(old, egress, on_reload=reloads)
+
+    with pytest.raises(EgressError):
+        live.reload(lambda: new)
+
+    assert reloads.seen == []
+
+
+def test_on_reload_runs_inside_the_reload_lock(tmp_path: Path) -> None:
+    """A second reload waits for the first one's hook, so hooks run in reload order."""
+    old = _snapshot(tmp_path, "60s", "old.yaml")
+    new = _snapshot(tmp_path, "120s", "new.yaml")
+    hook_started = threading.Event()
+    release_hook = threading.Event()
+    second_built = threading.Event()
+    order: list[Snapshot] = []
+
+    def on_reload(snapshot: Snapshot) -> None:
+        if not order:
+            hook_started.set()
+            release_hook.wait(WAIT_SECONDS)
+        order.append(snapshot)
+
+    def second_build() -> Snapshot:
+        second_built.set()
+        return new
+
+    live = LiveConfig(old, RecordingEgress(), on_reload=on_reload)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(live.reload, lambda: old)
+        assert hook_started.wait(WAIT_SECONDS)
+        second = pool.submit(live.reload, second_build)
+        assert not second_built.wait(0.2)
+        release_hook.set()
+
+    first.result()
+    second.result()
+    assert order == [old, new]
 
 
 def test_the_prune_after_a_swap_keeps_a_list_only_a_snapshot_in_use_names(

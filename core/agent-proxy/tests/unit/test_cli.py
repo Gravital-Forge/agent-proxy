@@ -269,6 +269,39 @@ def test_token_mint_under_an_unstored_credential_warns_and_prints_the_token(
     assert captured.err == f"{PREFIX}warning: {unset_message('github-token')}\n"
 
 
+def test_token_mint_warns_of_a_provider_s_unstored_input_not_the_provided_name(
+    state: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A granted provided name is not looked up; its provider's input is."""
+    grant = {
+        "roots": [],
+        "domains": [],
+        "credentials": {"app-token": {"env": "GH_TOKEN"}},
+    }
+    document = CONFIG | {
+        "plugins": {
+            "github": "ghcr.io/example/github@sha256:" + "c" * 64,
+            "github-app": "ghcr.io/example/github-app@sha256:" + "d" * 64,
+        },
+        "scopes": {"ci": {"grants": {"github.pr_view": grant}}},
+        "provided_credentials": {
+            "app-token": {
+                "provider": "github-app.installation_token",
+                "credentials": {"app-key": {"file": "/run/credentials/github-app-key"}},
+                "domains": ["api.github.com"],
+                "refresh_before": "10m",
+            }
+        },
+    }
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    assert main(["token", "mint", "--name", "ci-bot", "--scope", "ci"]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out.startswith("apx_")
+    assert captured.err == f"{PREFIX}warning: {unset_message('app-key')}\n"
+
+
 def test_token_mint_of_a_taken_name_exits_1_naming_it(
     state: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -614,6 +647,26 @@ def test_manifest_check_prints_warnings_and_the_pass_line(
     assert captured.err == (
         "agent-proxy: warning: actions.raw: declares pass-through args\n"
     )
+
+
+def test_manifest_check_accepts_a_provider_action(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A manifest whose one action is a provider passes, counted as one action."""
+    provider = {
+        "kind": "provider",
+        "credentials": [{"file": "/run/credentials/github-app-key"}],
+        "timeout": "30s",
+        "executable": "/plugin/bin/installation_token",
+    }
+    manifest = {"actions": {"installation_token": provider}}
+    _docker_describing(monkeypatch, json.dumps(manifest).encode())
+
+    assert main(["manifest", "check", MANIFEST_IMAGE]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.out == f"manifest ok: {MANIFEST_IMAGE} declares 1 actions\n"
+    assert captured.err == ""
 
 
 def test_manifest_check_prints_one_line_per_manifest_failure(

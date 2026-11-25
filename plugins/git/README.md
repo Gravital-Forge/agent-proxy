@@ -16,7 +16,7 @@ An action is a command action when its git argv is a fixed prefix plus typed par
 script action when it does more than that:
 
 - It carries a rule, as `push`, `checkout`, and `worktree` do.
-- It runs more than one git command, as `commit` and `push` do.
+- It runs more than one git command, as `commit`, `push`, and `clone` do.
 - It takes a list, as each action with a `files` or `patterns` input does.
 - It names a file git reads, as `config_get` does with the repository's config file.
 
@@ -26,15 +26,16 @@ gives, so they could pass git an option such as `diff --output`.
 
 ### The `repo` input
 
-Every action takes a required `repo`, the absolute path of the repository. git runs as
+Every action but `clone` takes a required `repo`, the absolute path of the repository. git runs as
 `git -C <repo>`. The path must lie under one of the grant's roots: no other host path exists in the
 cage, so git fails with its own error. A command action passes `repo` to the wrapper as the flag
-`--repo`, and the wrapper takes the flag and its value out before git runs.
+`--repo`, and the wrapper takes the flag and its value out before git runs. `clone` takes `repo` as
+a GitHub repository's `owner/name`, as [`clone`](#clone) gives.
 
-`repo` names the top level of a checkout: a main checkout or a linked worktree. The plugin refuses a
-`repo` that is a directory with no `.git`, such as a directory inside a checkout. A `repo` that does
-not exist reaches git, and git's error is the result. [Repository shapes](#repository-shapes) gives
-the checkouts the plugin refuses for their shape.
+For every other action, `repo` names the top level of a checkout: a main checkout or a linked
+worktree. The plugin refuses a `repo` that is a directory with no `.git`, such as a directory inside
+a checkout. A `repo` that does not exist reaches git, and git's error is the result.
+[Repository shapes](#repository-shapes) gives the checkouts the plugin refuses for their shape.
 
 A file or pattern input with a `..` segment fails the input schema, so the core refuses the call
 before a cage starts.
@@ -71,6 +72,10 @@ gives the reason. The wrapper refuses as its own exit; a script refuses through 
   empty.
 - `diff`'s `output` does not resolve strictly beneath the repository's `.agent-proxy` directory.
 - `worktree` with `add` names a `path` inside the repository it comes from.
+- `clone` names a `repo` that `GITHUB_REPOS` does not name, or runs while `GITHUB_REPOS` is unset,
+  names no entry, or holds a malformed entry, whether or not the cage holds `GH_TOKEN`.
+- `clone` names a `path` that is not one of the grant's roots, or that is a symbolic link, is not a
+  directory, is not empty, or cannot be read.
 - `commit` runs while `GIT_AUTHOR_NAME` or `GIT_AUTHOR_EMAIL` is unset or empty, or finds nothing
   staged.
 - `repo` is a directory with no `.git`, its `.git` file names no git directory, or the plugin cannot
@@ -154,6 +159,58 @@ does not take, such as a `message` with `pop`.
 value the plugin passes with `-c`, a value from a file the config includes, or a value from a
 `config.worktree`. An unset key gives git's exit code 1 and an empty `stdout`.
 
+### `clone`
+
+`clone` makes `path` a checkout of the GitHub repository `repo`, given as `owner/name`, from
+`https://github.com/<owner>/<name>.git`. It takes the full history, with no depth option and no
+refspec of the caller's. A fork's pull request head comes later: the agent adds its
+`refs/pull/<n>/head` refspec to `origin` in the repository's config with its own git, then calls
+`fetch`. Its timeout is 10 minutes.
+
+`clone` never runs `git clone`. git reads a repository's config again in each process it starts, so
+a config planted while `git clone` runs could name a program for git's next process. `clone` builds
+the repository in steps instead. Each step after `git init` runs git as every other action does, in
+the action's isolation, with hooks off and the transport pins:
+
+1. It refuses unless `GITHUB_REPOS` parses and names `repo`, as
+   [The repository list](#the-repository-list) gives, whether or not the cage holds `GH_TOKEN`. The
+   other actions check that the list names the repository only when git asks the credential helper,
+   and a public repository never asks.
+2. It refuses unless `path`, normalized, equals one of the grant's roots, and is an empty directory
+   that is not a symbolic link.
+3. `git init` makes an empty repository at `path`, with an empty template directory, hooks off, and
+   the initial branch `main`. git runs from `/` with no `GIT_` variable and no global or system
+   config, so it reads no config the agent wrote.
+4. In the isolation of `path`, which [Config isolation](#config-isolation) gives,
+   `git ls-remote --symref <url> HEAD` reads the remote's default branch, and
+   `git fetch <url> +refs/heads/*:refs/remotes/origin/*` fetches every branch. Both name the URL
+   itself, so nothing in the repository's config can redirect them.
+5. It writes `remote.origin.url` and `remote.origin.fetch` to the repository's real config file with
+   `git config --file <file> --no-includes`, as `push` writes tracking, so a later `fetch` and the
+   agent's own git find `origin`.
+6. It points `refs/remotes/origin/HEAD` at the default branch, checks that branch out with
+   `GIT_LFS_SKIP_SMUDGE=1`, and makes it track origin's branch of its name, in the repository's real
+   config file.
+
+An empty remote has no default branch, so the clone ends after step 5, on the unborn branch `main`.
+The checkout writes each LFS file as its pointer, so a clone needs no LFS egress. `lfs_pull` fetches
+the content under a grant whose `domains` allow it.
+
+The result is the last step's, with the stderr of every step in order. The first step that fails
+ends the clone: its exit code and stdout are the result, with the stderr of every step so far. Steps
+1 and 2 refuse as [Refusals](#refusals) gives.
+
+A `git.clone` grant names `path` as a root of mode `rw` and `github.com` in its `domains`. For a
+private repository it gives a token as `GH_TOKEN`, and it always sets `GITHUB_REPOS`:
+
+```yaml
+git.clone:
+  roots: [{path: /home/agent-01/Projects/example-clone, mode: rw}]
+  domains: [github.com]
+  credentials: {github-app-token: {env: GH_TOKEN}}
+  env: {GITHUB_REPOS: "example-org/*"}
+```
+
 ## In the cage
 
 ### Trusted roots
@@ -219,7 +276,8 @@ Before git runs, the wrapper and each script action check the cage's environment
 holds `GH_TOKEN`, they refuse the call when `GITHUB_REPOS` is unset, names no entry, or holds a
 malformed entry, whether or not git would ask the helper. So a grant that lacks the list fails on
 its first call, a fetch from a public repository or a local path included. In a cage without
-`GH_TOKEN`, this check reads no list.
+`GH_TOKEN`, this check reads no list. `clone` reads the list on every call, as [`clone`](#clone)
+gives.
 
 Each action that reaches a remote declares `{"env": "GH_TOKEN"}` in its `credentials` in
 `manifest.json`. The core does not compare a grant's credentials with that declaration, so the check
@@ -379,7 +437,9 @@ with its own file tools, and a key there can name a program for git to run: a fi
 `diff` textconv, `core.fsmonitor`, or an LFS custom transfer. That program would run with the cage's
 credential. So every action, through the wrapper or as a script, in a cage with a credential or
 without one, runs git against a config that the plugin builds for that action. The plugin never
-filters the agent's config. `build_isolation` in `scripts/git_plugin/cage.py` builds it.
+filters the agent's config. `build_isolation` in `scripts/git_plugin/cage.py` builds the isolation.
+The one exception is `clone`'s `git init`, which runs before the repository exists and reads no
+config the agent wrote, as [`clone`](#clone) gives.
 
 Before git runs, the plugin finds the repository's real git directories by reading files, with no
 git run. The git directory is `<repo>/.git`, or the directory a `.git` file names after `gitdir: `.
@@ -420,7 +480,8 @@ scratch config.
 
 git writes each config change that an action makes to the scratch config, and the cage discards it.
 `push` writes the branch's tracking to the real config itself, as [Branch rules](#branch-rules)
-gives.
+gives, and `clone` writes `origin` and the default branch's tracking the same way, as
+[`clone`](#clone) gives.
 
 #### Transport pins
 
@@ -494,7 +555,8 @@ also name each host the LFS server sends objects to, which can differ from the r
 `git.push`, sets `GITHUB_REPOS` in its `env`, as [The repository list](#the-repository-list) gives.
 Every grant for an action that creates a commit sets `GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL`, as
 [Commit identity](#commit-identity) gives. A grant that signs its commits gives the key as a file
-credential and sets `GIT_SIGNING_KEY`, as [Commit signing](#commit-signing) gives.
+credential and sets `GIT_SIGNING_KEY`, as [Commit signing](#commit-signing) gives. A `git.clone`
+grant takes the form that [`clone`](#clone) gives.
 
 Grant a root of mode `rw` to each action that can run the LFS clean filter on a working-tree file:
 `status`, `blame`, and `lfs_status`. The filter writes a temporary file under the `lfs` directory of
@@ -528,7 +590,10 @@ Under a root of mode `ro`, the action fails with a read-only file system error.
   `openssl`, which makes a self-signed certificate for the names `github.com` and `auth`.
   `auth_server.py` there serves the credential helper's tests. It serves TLS on port 443 with that
   certificate, on the tests' network under both names. A cage trusts the certificate through
-  `GIT_SSL_CAINFO` in its grant's `env`, which git and git LFS both read.
+  `GIT_SSL_CAINFO` in its grant's `env`, which git and git LFS both read. `git_http_server.py` there
+  serves `clone`'s tests: it runs on Python 3 from the fixture image, and serves TLS on port 443
+  with the same certificate, under the name `github.com`. It answers `401` until a request carries
+  the plugin's credential, then relays git's `http-backend`.
 
 ## Build and test
 

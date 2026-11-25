@@ -39,14 +39,17 @@ from agent_proxy.egress import CageNetwork
 from agent_proxy.errors import ProxyError
 from agent_proxy.plugins import (
     DOCKER_FAILURES,
+    STDERR_EXCERPT_LIMIT,
     WAIT_TIMEOUTS,
     CommandAction,
+    ProviderAction,
     ScriptAction,
     ensure_image,
     schema_validator,
 )
 from agent_proxy.results import (
     CALL_ID_PATTERN,
+    OUTPUT_CAP_BYTES,
     CapturedStream,
     Stream,
     capture_stream,
@@ -87,6 +90,8 @@ _DIRECTORY_FLAGS = os.O_PATH | os.O_DIRECTORY
 _STDIN_ATTACH_PARAMS: Mapping[str, int] = types.MappingProxyType(
     {"stdin": 1, "stream": 1}
 )
+_PROVIDER_STDIN = b"{}"
+_NO_PROVIDED_VALUES: Mapping[str, str] = types.MappingProxyType({})
 
 
 class RunnerError(ProxyError):
@@ -263,9 +268,14 @@ def roots_environment(roots: Sequence[Root]) -> dict[str, str]:
 
 
 def cage_environment(
-    credentials: Mapping[str, EnvMount | FileMount], store: CredentialStore
+    credentials: Mapping[str, EnvMount | FileMount],
+    store: CredentialStore,
+    provided: Mapping[str, str],
 ) -> dict[str, str]:
     """Return the environment variables the grant's env credentials give a cage.
+
+    An env credential named in provided takes its provided value, and the
+    store is not read for it; every other one takes its stored value.
 
     Raises:
         CredentialError: a credential is not stored, is not UTF-8, or holds a
@@ -273,29 +283,69 @@ def cage_environment(
             such credential in grant order.
     """
     return {
-        mount.env: _environment_value(name, store)
+        mount.env: _environment_value(name, store, provided)
         for name, mount in credentials.items()
         if isinstance(mount, EnvMount)
     }
 
 
-def _environment_value(name: str, store: CredentialStore) -> str:
-    with _stored_credential(name):
-        stored_bytes = store.read(name)
-    try:
-        value = stored_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        # The decode error quotes the offending byte, so it must not travel as
-        # the cause.
-        raise CredentialError(
-            f"credential {name!r} is not valid UTF-8, "
-            "so it cannot be an environment value"
-        ) from None
+def check_environment_value(name: str, value: str) -> None:
+    """Check that credential name's value can be an environment value.
+
+    Neither message holds the value.
+
+    Raises:
+        CredentialError: value is not valid UTF-8 or holds a NUL.
+    """
+    if not _encodes_as_utf8(value):
+        raise _not_utf8(name)
     if "\0" in value:
         raise CredentialError(
             f"credential {name!r} holds a NUL, so it cannot be an environment value"
         )
+
+
+# Each UTF-8 refusal is raised after its except block has ended: an encode or
+# decode error holds the whole value it failed on, and a refusal raised inside
+# the block would keep that error as its __context__, even with "from None".
+
+
+def _encodes_as_utf8(value: str) -> bool:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _environment_value(
+    name: str, store: CredentialStore, provided: Mapping[str, str]
+) -> str:
+    value = provided[name] if name in provided else _stored_text(name, store)
+    check_environment_value(name, value)
     return value
+
+
+def _stored_text(name: str, store: CredentialStore) -> str:
+    with _stored_credential(name):
+        stored_bytes = store.read(name)
+    text = _utf8_text(stored_bytes)
+    if text is None:
+        raise _not_utf8(name)
+    return text
+
+
+def _utf8_text(stored_bytes: bytes) -> str | None:
+    try:
+        return stored_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _not_utf8(name: str) -> CredentialError:
+    return CredentialError(
+        f"credential {name!r} is not valid UTF-8, so it cannot be an environment value"
+    )
 
 
 def cage_mounts(
@@ -465,21 +515,32 @@ def _cage_filters() -> dict[str, list[str]]:
 
 @dataclass(frozen=True)
 class CageCall:
-    """One action call, and what the instance's config gives it."""
+    """One action call, and what the instance's config gives it.
+
+    provided maps each provided credential's name to the value resolved for
+    this call.
+    """
 
     call_id: str
     image: str
-    action: CommandAction | ScriptAction
+    action: CommandAction | ScriptAction | ProviderAction
     grant: Grant
     arguments: Mapping[str, object]
     network: CageNetwork
     overflow_dir: str
     max_cages: int
+    provided: Mapping[str, str] = _NO_PROVIDED_VALUES
 
 
 @dataclass(frozen=True)
 class Outcome:
-    """What a cage produced: its result, and what an audit record needs of it."""
+    """What a cage produced: its result, and what an audit record needs of it.
+
+    A provider's content is {"exit_code": int, "stdout": bytes | None,
+    "stderr": str}: stdout is None when it passed OUTPUT_CAP_BYTES, and stderr
+    is an excerpt of at most STDERR_EXCERPT_LIMIT bytes. The sizes count every
+    byte of each stream, and truncated is True when stdout passed the cap.
+    """
 
     content: Mapping[str, object]
     exit_code: int
@@ -616,13 +677,7 @@ def _set_up(call: CageCall, store: CredentialStore, held: ExitStack) -> _CageSet
     """
     if re.fullmatch(CALL_ID_PATTERN, call.call_id) is None:
         raise InputError(f"call ID {call.call_id!r} does not match {CALL_ID_PATTERN!r}")
-    validate_input(call.action, call.arguments)
-    if isinstance(call.action, CommandAction):
-        entrypoint = form_argv(call.action, call.arguments)
-        stdin = None
-    else:
-        entrypoint = (call.action.executable,)
-        stdin = script_stdin(call.arguments)
+    entrypoint, stdin = _entrypoint_and_stdin(call.action, call.arguments)
     roots = hold_roots(call.grant.roots, held)
     credentials = call.grant.credentials
     return _CageSetup(
@@ -632,11 +687,31 @@ def _set_up(call: CageCall, store: CredentialStore, held: ExitStack) -> _CageSet
         stdin=stdin,
         environment={
             **roots_environment(call.grant.roots),
-            **cage_environment(credentials, store),
+            **cage_environment(credentials, store, call.provided),
             **call.grant.env,
         },
         mounts=cage_mounts(call.grant.roots, credentials, store),
     )
+
+
+def _entrypoint_and_stdin(
+    action: CommandAction | ScriptAction | ProviderAction,
+    arguments: Mapping[str, object],
+) -> tuple[tuple[str, ...], bytes | None]:
+    """Return what the action runs and what it reads on stdin, if anything.
+
+    A provider has no input schema, so its arguments are neither checked nor
+    sent.
+
+    Raises:
+        InputError: a command or script action's input is refused.
+    """
+    if isinstance(action, ProviderAction):
+        return (action.executable,), _PROVIDER_STDIN
+    validate_input(action, arguments)
+    if isinstance(action, CommandAction):
+        return form_argv(action, arguments), None
+    return (action.executable,), script_stdin(arguments)
 
 
 def _create(client: DockerClient, call: CageCall, setup: _CageSetup) -> Container:
@@ -703,9 +778,12 @@ def _run_container(container: Container, call: CageCall, setup: _CageSetup) -> O
         duration_ms = deadline.elapsed_ms()
     if exit_code == VERIFIER_REFUSED_EXIT:
         _raise_verifier_refusal(container, call, setup.nonce)
+    action = call.action
+    if isinstance(action, ProviderAction):
+        return _provider_outcome(container, call, exit_code, duration_ms)
     stdout = _capture(container, call, "stdout")
     stderr = _capture(container, call, "stderr")
-    return _outcome(call.action, exit_code, duration_ms, stdout, stderr)
+    return _outcome(action, exit_code, duration_ms, stdout, stderr)
 
 
 @contextmanager
@@ -833,6 +911,64 @@ def _capture(container: Container, call: CageCall, stream: Stream) -> CapturedSt
         raise CageFailedError(
             f"action {call.action.name!r}: the cage's {stream} could not be read: {exc}"
         ) from exc
+
+
+@dataclass(frozen=True)
+class _BoundedStream:
+    """The head of one stream, at most a limit's bytes of it, and its full size."""
+
+    head: bytes
+    size: int
+
+
+def _read_bounded(
+    container: Container, call: CageCall, stream: Stream, limit: int
+) -> _BoundedStream:
+    """Read one stream from the exited cage's log, holding at most limit bytes.
+
+    Every byte is counted, held or not, and none is written to a file.
+
+    Raises:
+        CageFailedError: the logs call fails.
+    """
+    head = bytearray()
+    size = 0
+    try:
+        for chunk in container.logs(
+            stdout=stream == "stdout", stderr=stream == "stderr", stream=True
+        ):
+            size += len(chunk)
+            head += chunk[: limit - len(head)]
+    except DOCKER_FAILURES as exc:
+        raise CageFailedError(
+            f"action {call.action.name!r}: the cage's {stream} could not be read: {exc}"
+        ) from exc
+    return _BoundedStream(head=bytes(head), size=size)
+
+
+def _provider_outcome(
+    container: Container, call: CageCall, exit_code: int, duration_ms: int
+) -> Outcome:
+    """Return a provider's outcome, its stdout to the cap and its stderr excerpted.
+
+    Raises:
+        CageFailedError: the logs call fails.
+    """
+    stdout = _read_bounded(container, call, "stdout", OUTPUT_CAP_BYTES)
+    stderr = _read_bounded(container, call, "stderr", STDERR_EXCERPT_LIMIT)
+    over_cap = stdout.size > OUTPUT_CAP_BYTES
+    return Outcome(
+        content={
+            "exit_code": exit_code,
+            "stdout": None if over_cap else stdout.head,
+            "stderr": stderr.head.decode("utf-8", errors="replace"),
+        },
+        exit_code=exit_code,
+        duration_ms=duration_ms,
+        stdout_bytes=stdout.size,
+        stderr_bytes=stderr.size,
+        truncated=over_cap,
+    )
 
 
 def _outcome(

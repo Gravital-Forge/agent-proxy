@@ -28,17 +28,22 @@ These terms carry one meaning each through the code and the documents.
 - **Token** — a bearer secret that names exactly one scope. It carries no policy of its own.
 - **Grant** — one entry in a scope: an action, plus that action's roots, domains, and credentials,
   an optional timeout override, an optional memory limit, and an optional `env`.
-- **Action** — one operation a plugin offers, of one of two kinds:
+- **Action** — one operation a plugin offers, of one of three kinds:
   - a **command** action runs a fixed argv prefix at subcommand granularity (`gh pr create`, never
     bare `gh`), extended by typed parameters;
   - a **script** action runs an executable in the image that takes its input as JSON on stdin and
-    prints JSON on stdout, so filtering and special logic live there.
+    prints JSON on stdout, so filtering and special logic live there;
+  - a **provider** action runs an executable in the image that prints the value of a provided
+    credential. It is never a tool, as [Provided credentials](#provided-credentials) gives.
+- **Provided credential** — a credential whose value a provider action gives, in place of a value
+  the operator stores.
 - **Plugin** — an OCI image, pinned by digest, whose manifest declares its actions.
   [Writing a plugin](writing-a-plugin.md) gives what the image holds.
 - **Manifest** — the JSON a plugin image's `describe` entrypoint prints.
   [The manifest](writing-a-plugin.md#the-manifest) gives its members and rules.
 - **Cage** — the short-lived container one action call runs in, built from its grant: only the
-  grant's roots mounted, only the grant's domains reachable, only the grant's credentials present.
+  grant's roots mounted, only the grant's domains reachable, only the grant's credentials present. A
+  provider run's cage is built from its `provided_credentials` entry in the same way.
 - **Egress proxy** — an iron-proxy container serving one distinct domain list.
 
 ## The call path
@@ -61,11 +66,14 @@ A call goes through these steps:
    not change the grant the call runs under.
 3. It finds the grant that the tool names. A call of a tool that the token's scope does not grant
    still reaches this step, so it is refused and audited like any other refusal.
-4. It refuses a bad call before the call waits for a cage: input that fails the action's input
-   schema, a value for argv that begins with `-`, a root it cannot open, and a credential that is
-   not stored.
-5. It runs the action in a cage, as [The cage](#the-cage) gives, and forms the result.
-6. It writes the call's audit line, as [Audit](#audit) gives, and only then returns the result.
+4. It resolves the value of each provided credential the grant names, as
+   [Provided credentials](#provided-credentials) gives. A provider run takes a cage of its own, and
+   the call holds no cage while it waits.
+5. It refuses a bad call before the call waits for a cage: input that fails the action's input
+   schema, a value for argv that begins with `-`, a root it cannot open, and a stored credential
+   that the store lacks.
+6. It runs the action in a cage, as [The cage](#the-cage) gives, and forms the result.
+7. It writes the call's audit line, as [Audit](#audit) gives, and only then returns the result.
 
 The reference gives the result forms and every refusal under
 [Results and refusals](reference.md#results-and-refusals).
@@ -122,8 +130,8 @@ inside the instance's process (`core/agent-proxy/agent_proxy/runner.py`).
   start finds the cages a killed instance left by that label, as [The instance](#the-instance)
   gives.
 - **Concurrency:** the config's `max_cages` caps the cages that run at one time. A call over the cap
-  waits, with no bound, for a cage to end. Every call and every self-check of an instance shares one
-  count, so calls that started under different configs still count together.
+  waits, with no bound, for a cage to end. Every call, provider run, and self-check of an instance
+  shares one count, so calls that started under different configs still count together.
 - **Timeout:** the grant's `timeout`, or else the action's. It runs from the cage's start and covers
   a script's input and the wait for the exit. On timeout the cage is killed.
 
@@ -208,8 +216,8 @@ that keeps a directory's setgid bit fails too, as
 
 ## Egress
 
-The instance runs one egress proxy for each distinct domain list across its grants
-(`core/agent-proxy/agent_proxy/egress.py`).
+The instance runs one egress proxy for each distinct domain list across its grants and its provided
+credentials (`core/agent-proxy/agent_proxy/egress.py`).
 
 - A proxy is named for its list: `apx-egress-` and the first 16 hex digits of the SHA-256 of the
   sorted list, so two grants that name the same domains in any order share one proxy. The proxy sits
@@ -269,21 +277,73 @@ token. The operator delivers a token by writing it into the agent's MCP client c
 
 ## Credentials
 
-A credential is an opaque named value, stored verbatim as one file in the state directory's
-`credentials/`, which only the instance's service user can read
+A credential is an opaque named value. A stored credential is stored verbatim as one file in the
+state directory's `credentials/`, which only the instance's service user can read
 (`core/agent-proxy/agent_proxy/credentials.py`). A write goes to a staging file first, then renames
-it over the target, so a listing never shows a half-written credential.
+it over the target, so a listing never shows a half-written credential. A provided credential's
+value never enters the store, as [Provided credentials](#provided-credentials) gives.
 
-Only the operator manages credentials, with the `credential` verbs of
-[The operator command](reference.md#the-operator-command). A grant gives each credential it uses to
-the cage as an environment variable or as a file, in the forms of
+Only the operator manages stored credentials, with the `credential` verbs of
+[The operator command](reference.md#the-operator-command). A grant gives each stored credential it
+uses to the cage as an environment variable or as a file, in the forms of
 [A scope's grants](reference.md#a-scopes-grants).
 
-The instance reads the store on every call, so a stored credential takes effect on the next call
-with no reload. A call under a grant whose credential is not stored is refused before a cage starts,
+The instance reads the store on every call, so a stored credential that a grant gives takes effect
+on the next call with no reload. A stored credential that is a provider's input takes effect at the
+provider's next run: when the cached value stops being fresh, after a restart, or after a reload
+that changes the entry or the provider image, as [Provided credentials](#provided-credentials)
+gives. A call under a grant whose stored credential the store lacks is refused before a cage starts,
 and audited like any other refusal. The grant's tools stay listed for the token. The config load
-never consults the store: a credential that a grant names and the store lacks is a warning, as
-[Failures and warnings](reference.md#failures-and-warnings) gives.
+never consults the store: a stored credential that a grant or a provided credential names and the
+store lacks is a warning, as [Failures and warnings](reference.md#failures-and-warnings) gives.
+
+### Provided credentials
+
+A provided credential's value comes from a provider action, not from the store
+(`core/agent-proxy/agent_proxy/providers.py`). The config names each one under
+`provided_credentials`, with its provider and the provider's inputs, as
+[Provided credentials](reference.md#provided-credentials) gives. A grant names a provided credential
+as it names a stored one, and its cage receives the value as an environment variable. The store is
+never read for a provided name. A provider's inputs are stored credentials only, so no provided
+credential is the input of another provider.
+
+No token can run a provider. A grant that names a provider action is refused at config load, so a
+provider is never a tool, and only a `provided_credentials` entry runs one.
+
+The gateway resolves each provided credential that a call's grant names before the call's cage takes
+its slot, and hands the values to the runner with the call (`mcp.py`). The runner places each value
+as it places a stored credential given as an environment variable, through the same UTF-8 and NUL
+checks, and knows nothing of where a provided value comes from or of the cache.
+
+The instance holds one cache of provided values, in memory, so a restart empties it. Each value has
+an expiry, which [A provider action](writing-a-plugin.md#a-provider-action) gives. A value is fresh
+until `refresh_before` before its expiry, usable until its expiry, and never handed out at or after
+it. Each cached value also holds what it came from: the config entry and the provider plugin's image
+reference. A lookup under a config whose entry or image differs treats the value as absent.
+
+A call refreshes a value when the value is not fresh, never on a timer:
+
+- A fresh value serves the call, and no provider runs.
+- Otherwise the provider runs under a lock of that credential's own. A call that needs the same
+  value waits on the lock, then takes the value the run left when that value is fresh. Otherwise the
+  waiting call runs the provider itself. Runs for different credentials go side by side.
+- When the run fails and the cached value has not expired, the call uses that value, and the next
+  call runs the provider again.
+- When the run fails and no unexpired value is cached, the call is refused before its cage starts,
+  as [Refusals](reference.md#refusals) gives.
+
+A reload keeps each cached value whose entry and provider image the new config leaves unchanged, and
+drops the rest, once the new config is in force (`reload.py`).
+
+A provider run is a cage of its own, through the normal path of [The cage](#the-cage): the root
+verifier, the cage cap, the cage limits, and the seccomp profile. It has no roots. It receives the
+entry's stored credentials and its `env`, and reaches the hosts of the entry's `domains`. Its
+timeout is the entry's `timeout`, or else the action's. Its stdin is `{}`. The instance counts every
+byte of both streams, and the run's audit line gives the full sizes. It keeps the stdout up to the
+output cap and never writes it to an overflow file, because the overflow directory lies in the
+agent's tree. Of the stderr, it keeps only the part that a failure quotes.
+[A provider action](writing-a-plugin.md#a-provider-action) gives what a run must print, and
+[A provider's failure](reference.md#a-providers-failure) gives each way a run fails.
 
 ## Audit
 
@@ -291,8 +351,12 @@ The instance writes one JSON line per call to `audit/audit.log` in the state dir
 (`core/agent-proxy/agent_proxy/audit.py`), except for the calls with no verified token that the
 60-second rule below holds back. A line holds `timestamp`, `call_id`, `token_name`, `scope`,
 `action`, `arguments`, `arguments_cut`, `exit_code`, `duration_ms`, `stdout_bytes`, `stderr_bytes`,
-`truncated`, and, for a refused call, the `refusal` without its MCP prefix. A line never holds a
-credential's value or any output's content.
+`truncated`, for a refused call the `refusal` without its MCP prefix, and `credential`. `credential`
+names the provided credential on a provider run's line, and is `null` on every other line. A line
+never holds a credential's value or any output's content, except the parts of a failed provider
+run's output that its failure quotes, as [A provider's failure](reference.md#a-providers-failure)
+gives. The `refusal` of the run's line quotes that failure, and so does the `refusal` of the call
+that the failure refuses.
 
 The caller chooses the arguments, the tool name, and any input that a refusal quotes, so the line
 caps each of them where it is rendered:
@@ -334,6 +398,15 @@ and no output sizes, because no single cage's output is the result. The line of 
 the call's token. The operator's command writes one line for each scope it checks, with no token
 name. The cages that a check runs write no line of their own.
 
+Each provider run writes one line of its own, with a call ID of its own. Its `action` is the
+provider's `<plugin>_<action>`, and its `credential` names the provided credential. Its
+`token_name`, `scope`, `arguments`, and `arguments_cut` are `null`. It carries the exit code, the
+duration, the stream sizes, and `truncated`, and when the run failed, the failure as `refusal`. A
+run whose cage the runner refused or failed, for any reason, has no exit code and no stream sizes.
+The call that needed the value writes its own line, as every call does. When a run's line cannot be
+written, its value is neither cached nor used, and the call that started the run is refused with the
+audit refusal of the run's call ID.
+
 ## The self-check
 
 The self-check is one check with two entrances: the MCP tool `agent-proxy_self_check`, which checks
@@ -342,22 +415,26 @@ the calling token's scope alone, and the operator's `check`, which checks one sc
 
 It checks the local wiring, the things that can be wrong while the instance looks healthy:
 
-- each credential a grant names is stored, read afresh on each check, and reported by name, never by
-  value;
+- each stored credential a grant names is in the store, read afresh on each check, and reported by
+  name, never by value;
+- for each provided credential a grant names, every stored credential its provider takes is stored.
+  The entry reports the provided credential by name, and names its provider;
 - each root a grant names opens as it opens for a call;
 - the overflow directory exists, and the instance can create a file in it;
-- each egress proxy that the scope's domain lists need is running;
-- for each plugin the scope uses, a cage runs the image's `describe` and exits 0. The cage goes
-  through the normal path, root verifier and cage cap included, with no roots, no credentials, no
-  `env`, and no network, within 30 seconds. The check discards the output. A `describe` whose output
-  passes the cap still writes an overflow file in `overflow_dir` on every check, as any call's
-  output does, and the sweep removes it, as [Output past the cap](reference.md#output-past-the-cap)
-  gives. The instance never pulls for a cage, so an image that has left the daemon since the config
-  loaded fails the check.
+- each egress proxy that the scope's domain lists need is running, the lists of the provided
+  credentials its grants name included;
+- for each plugin the scope's grants name, a cage runs the image's `describe` and exits 0. The cage
+  goes through the normal path, root verifier and cage cap included, with no roots, no credentials,
+  no `env`, and no network, within 30 seconds. The check discards the output. A `describe` whose
+  output passes the cap still writes an overflow file in `overflow_dir` on every check, as any
+  call's output does, and the sweep removes it, as
+  [Output past the cap](reference.md#output-past-the-cap) gives. The instance never pulls for a
+  cage, so an image that has left the daemon since the config loaded fails the check. A provider's
+  plugin that no grant names gets no such cage.
 
 It leaves out what the config load already refuses, such as an image that does not load, a grant
 that names an undeclared action, or a root outside the agent tree. It never tests a credential
-against its service.
+against its service, and it never runs a provider.
 
 A check that fails is an entry in the report, never an error. The reference gives the report under
 [The self-check report](reference.md#the-self-check-report), and the `check` verb under
@@ -549,7 +626,8 @@ from the tree it is given.
   bounds a run to one scope.
 - The github plugin's `run_view` with `log_failed` works only under a grant that names each storage
   host, as [Egress](../plugins/github/README.md#egress) in the plugin's README gives.
-- Credentials are not encrypted at rest: each is a plain file protected by the service user's uid.
+- Stored credentials are not encrypted at rest: each is a plain file protected by the service user's
+  uid. The instance holds a provided value in memory and never writes it to the state directory.
 - A call's cage outlives the instance when the instance's process is killed while the call runs. The
   process removes each cage when its call ends, and a stop on SIGINT or SIGTERM waits for the
   running calls to end. These kill the process while a call runs:

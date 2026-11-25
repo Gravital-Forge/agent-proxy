@@ -1,0 +1,10 @@
+{
+  "actions": {
+    "installation_token": {
+      "kind": "provider",
+      "credentials": [{"file": "/run/credentials/github-app-key"}],
+      "timeout": "30s",
+      "executable": "/plugin/bin/installation_token"
+    }
+  }
+}

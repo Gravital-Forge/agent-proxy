@@ -1,6 +1,7 @@
+from datetime import timedelta
 from pathlib import Path
 
-from agent_proxy.config import load_config
+from agent_proxy.config import EnvMount, FileMount, load_config
 from agent_proxy.credentials import unset_message, unset_warnings
 
 EXAMPLE_CONFIG = Path(__file__).parents[4] / "examples" / "instance.yaml"
@@ -66,11 +67,53 @@ def test_example_commit_grant_sets_the_agents_identity() -> None:
     }
 
 
-def test_example_config_warns_of_each_credential_an_empty_store_lacks() -> None:
-    """The example loads, and an empty store lacks github-token, then hcp-terraform."""
+def test_example_provided_credential_is_a_github_app_token() -> None:
+    """The example's provided credential runs the github-app provider on the App key.
+
+    Its IDs are placeholder strings, and it refreshes ten minutes before
+    expiry with no max_age, because GitHub gives each token's expiry.
+    """
     config = load_config(EXAMPLE_CONFIG)
 
-    assert unset_warnings(config.scopes.values(), frozenset()) == (
+    entry = config.provided_credentials["github-app-token"]
+    assert list(config.provided_credentials) == ["github-app-token"]
+    assert entry.provider == "github-app.installation_token"
+    assert entry.credentials == {
+        "github-app-key": FileMount(file="/run/credentials/github-app-key")
+    }
+    assert entry.env == {
+        "GITHUB_APP_ID": "000000",
+        "GITHUB_INSTALLATION_ID": "00000000",
+    }
+    assert entry.domains == ["api.github.com"]
+    assert entry.refresh_before == timedelta(minutes=10)
+    assert entry.max_age is None
+
+
+def test_example_clone_grant_takes_the_provided_token_beside_stored_ones() -> None:
+    """git.clone alone takes the provided token as GH_TOKEN; push keeps github-token."""
+    config = load_config(EXAMPLE_CONFIG)
+
+    grants = config.scopes["dev-agent"].grants
+    takers = {
+        key for key, grant in grants.items() if "github-app-token" in grant.credentials
+    }
+    assert takers == {"git.clone"}
+    assert grants["git.clone"].credentials == {
+        "github-app-token": EnvMount(env="GH_TOKEN")
+    }
+    assert grants["git.clone"].domains == ["github.com"]
+    assert grants["git.push"].credentials == {"github-token": EnvMount(env="GH_TOKEN")}
+
+
+def test_example_config_warns_of_each_credential_an_empty_store_lacks() -> None:
+    """An empty store lacks github-token, hcp-terraform-token, then the App key."""
+    config = load_config(EXAMPLE_CONFIG)
+
+    assert unset_warnings(
+        config.scopes.values(), config.provided_credentials, frozenset()
+    ) == (
         unset_message("github-token"),
         unset_message("hcp-terraform-token"),
+        unset_message("github-app-key"),
     )

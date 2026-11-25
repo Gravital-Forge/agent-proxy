@@ -5,6 +5,7 @@ import errno
 import functools
 import json
 import os
+import re
 import stat
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
@@ -30,6 +31,20 @@ DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 # O_NONBLOCK keeps a planted fifo from blocking the open. No O_TRUNC: the file
 # is emptied only after its descriptor passes the checks in _write_file.
 FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK
+CLONE_ACTION = "clone"
+# git's options and words before the path in clone's git init.
+INIT_ARGUMENTS = (
+    *cage.HOOKS_OFF,
+    "-c",
+    "init.defaultBranch=main",
+    "init",
+    "--quiet",
+    "--template=",
+)
+ORIGIN_REFSPEC = "+refs/heads/*:refs/remotes/origin/*"
+ORIGIN_HEAD = "refs/remotes/origin/HEAD"
+# ls-remote --symref's line for a HEAD that names a branch.
+DEFAULT_BRANCH_LINE = re.compile(r"ref: refs/heads/(.+)\tHEAD")
 
 
 class ScriptResult(TypedDict):
@@ -100,6 +115,11 @@ class ConfigGetInput(TypedDict):
     key: str
 
 
+class CloneInput(TypedDict):
+    repo: str
+    path: str
+
+
 _ACTION_ISOLATION: ContextVar[Callable[[], Mapping[str, str]]] = ContextVar(
     "action_isolation"
 )
@@ -142,8 +162,9 @@ def _completed_git(
 def _isolated_environ(repo: str) -> Mapping[str, str]:
     """Return the environment of the action's isolation, built at its first call.
 
-    Inside run_script the isolation is the input repo's, whatever repo is
-    passed here, so every git call of an action runs on that one repository.
+    Inside run_script the isolation is the input repo's, or clone's path's,
+    whatever repo is passed here, so every git call of an action runs on that
+    one repository.
     Outside run_script, each call builds an isolation of its own for repo.
     """
     build = _ACTION_ISOLATION.get(None)
@@ -157,6 +178,29 @@ def _script_result(completed: subprocess.CompletedProcess[bytes]) -> ScriptResul
         "exit_code": completed.returncode,
         "stdout": completed.stdout.decode("utf-8", errors="replace"),
         "stderr": completed.stderr.decode("utf-8", errors="replace"),
+    }
+
+
+def _step(result: ScriptResult, stderr: list[str]) -> ScriptResult:
+    """Return result, one step of an action, once stderr holds its stderr too.
+
+    stderr holds the stderr of each step before this one, in order.
+
+    Raises:
+        _GitFailedError: the step failed; the error's result is the step's,
+            its stderr every step's.
+    """
+    stderr.append(result["stderr"])
+    if result["exit_code"] != 0:
+        raise _GitFailedError(_with_stderr(result, stderr))
+    return result
+
+
+def _with_stderr(result: ScriptResult, stderr: Sequence[str]) -> ScriptResult:
+    return {
+        "exit_code": result["exit_code"],
+        "stdout": result["stdout"],
+        "stderr": "".join(stderr),
     }
 
 
@@ -413,21 +457,51 @@ def _track_upstream(
 ) -> ScriptResult:
     """Make branch track origin's branch of its name, in repo's real config.
 
-    git push -u would write the tracking to the action's scratch config,
-    which no later action reads. pushed is the push's result; a failed write
-    becomes its exit code, its stderr following the push's.
+    pushed is the push's result; a failed write becomes its exit code, its
+    stderr following the push's.
+    """
+    try:
+        _write_config(repo, roots, _tracking(branch), [pushed["stderr"]])
+    except _GitFailedError as failure:
+        return {
+            "exit_code": failure.result["exit_code"],
+            "stdout": pushed["stdout"],
+            "stderr": failure.result["stderr"],
+        }
+    return pushed
+
+
+def _tracking(branch: str) -> tuple[tuple[str, str], ...]:
+    """Return the config keys and values that make branch track origin's branch."""
+    return (
+        (f"branch.{branch}.remote", "origin"),
+        (f"branch.{branch}.merge", f"refs/heads/{branch}"),
+    )
+
+
+def _write_config(
+    repo: str,
+    roots: Sequence[str],
+    values: Sequence[tuple[str, str]],
+    stderr: list[str],
+) -> ScriptResult:
+    """Write each key and value in values into repo's real config, in order.
+
+    A config write in the action's isolation with no --file lands in its
+    scratch config, which no later action reads. stderr holds the stderr of
+    the steps before the writes, and each write's joins it. The result is the
+    last write's.
+
+    Raises:
+        _GitFailedError: a write failed.
     """
     config = cage.real_git_dirs(repo).common_dir / "config"
     write = ["config", "--file", str(config), "--no-includes"]
-    for variable, value in (("remote", "origin"), ("merge", f"refs/heads/{branch}")):
-        written = run_git(repo, roots, [*write, f"branch.{branch}.{variable}", value])
-        if written["exit_code"] != 0:
-            return {
-                "exit_code": written["exit_code"],
-                "stdout": pushed["stdout"],
-                "stderr": pushed["stderr"] + written["stderr"],
-            }
-    return pushed
+    written = [
+        _step(run_git(repo, roots, [*write, key, value]), stderr)
+        for key, value in values
+    ]
+    return written[-1]
 
 
 def _current_branch(repo: str, roots: Sequence[str]) -> str:
@@ -549,6 +623,131 @@ def config_get(arguments: ConfigGetInput, roots: Sequence[str]) -> ScriptResult:
     return run_git(repo, roots, [*read, "--", arguments["key"]])
 
 
+def clone(arguments: CloneInput, roots: Sequence[str]) -> ScriptResult:
+    """Make path a clone of the GitHub repository repo, in steps that run no git clone.
+
+    git reads a repository's config again in each process it starts, so a
+    config planted during git clone could name a program. Instead, init makes
+    an empty repository, and every later step runs in the isolation of path
+    and names the URL itself. Those steps read the remote's default branch,
+    fetch every branch into refs/remotes/origin/, and name origin in the
+    repository's own config. With a default branch, they then point origin's
+    HEAD at it, check it out with LFS smudging skipped, and make it track
+    origin. The first step that fails ends the clone, and its result is the
+    clone's. The result is the last step's, its stderr every step's in order.
+
+    The repository list comes from GITHUB_REPOS in the environment, which the
+    grant's env sets; it is read whether or not the cage holds GH_TOKEN.
+
+    Raises:
+        RefusalError: GITHUB_REPOS is unset, names no repository, holds a
+            malformed entry, or does not name repo; or path, normalized, is
+            not one of roots, is a symbolic link, is not a directory, is not
+            empty, or cannot be read.
+    """
+    repo = arguments["repo"]
+    path = os.path.normpath(arguments["path"])
+    rules.check_repo(repo, rules.allowed_repos(os.environ))
+    _check_clone_target(path, roots)
+    url = f"https://github.com/{repo}.git"
+    stderr: list[str] = []
+    try:
+        _step(_init(path), stderr)
+        listed = _step(
+            run_git(path, roots, ["ls-remote", "--symref", url, "HEAD"]), stderr
+        )
+        _step(run_git(path, roots, ["fetch", url, ORIGIN_REFSPEC]), stderr)
+        origin = (("remote.origin.url", url), ("remote.origin.fetch", ORIGIN_REFSPEC))
+        last = _write_config(path, roots, origin, stderr)
+        branch = _default_branch(listed["stdout"])
+        if branch is not None:
+            last = _check_out_default_branch(path, roots, branch, stderr)
+    except _GitFailedError as failure:
+        return failure.result
+    return _with_stderr(last, stderr)
+
+
+def _check_clone_target(path: str, roots: Sequence[str]) -> None:
+    """Return if path is one of roots, compared normalized, and an empty directory.
+
+    Raises:
+        RefusalError: path is not one of roots, is a symbolic link, is not a
+            directory, is not empty, or cannot be read.
+    """
+    if path in map(os.path.normpath, roots):
+        flaw = _clone_target_flaw(path)
+    else:
+        flaw = "is not one of the grant's roots"
+    if flaw is not None:
+        raise cage.RefusalError(f"clone path '{path}' {flaw}")
+
+
+def _clone_target_flaw(path: str) -> str | None:
+    """Return why path cannot take a clone, or None when it is an empty directory."""
+    try:
+        mode = os.lstat(path).st_mode
+        if stat.S_ISLNK(mode):
+            return "is a symbolic link"
+        if not stat.S_ISDIR(mode):
+            return "is not a directory"
+        if any(Path(path).iterdir()):
+            return "is not empty"
+    except FileNotFoundError:
+        return "is not a directory"
+    except OSError as error:
+        return f"cannot be read: {error.strerror}"
+    return None
+
+
+def _init(path: str) -> ScriptResult:
+    """Make an empty repository at path, with no template and hooks off.
+
+    git runs from / with no GIT_ variable and no global or system config, so
+    it reads no config the agent wrote. Once git succeeds, .git/lfs is made:
+    git LFS makes no directory through the isolation's link to it, and with
+    smudging skipped, the checkout makes none.
+    """
+    completed = subprocess.run(  # noqa: S603 - fixed arguments and the checked path
+        ["git", *INIT_ARGUMENTS, path],  # noqa: S607 - the image's git, on PATH
+        capture_output=True,
+        check=False,
+        cwd="/",
+        env=cage.unconfigured_environ(os.environ),
+    )
+    if completed.returncode == 0:
+        (Path(path) / ".git" / "lfs").mkdir()
+    return _script_result(completed)
+
+
+def _default_branch(listing: str) -> str | None:
+    """Return the branch that ls-remote --symref's first line names as HEAD.
+
+    An empty remote lists no HEAD, and gives None.
+    """
+    named = DEFAULT_BRANCH_LINE.fullmatch(listing.partition("\n")[0])
+    return named[1] if named else None
+
+
+def _check_out_default_branch(
+    path: str, roots: Sequence[str], branch: str, stderr: list[str]
+) -> ScriptResult:
+    """Point origin's HEAD at branch, check branch out, and make it track origin.
+
+    The checkout writes each LFS file's pointer: a clone needs no LFS egress,
+    and git.lfs_pull fetches the content where a grant allows it. stderr
+    holds the stderr of the steps before these, and each one's joins it.
+
+    Raises:
+        _GitFailedError: a step failed.
+    """
+    remote_branch = f"refs/remotes/origin/{branch}"
+    _step(run_git(path, roots, ["symbolic-ref", ORIGIN_HEAD, remote_branch]), stderr)
+    environ = {**_isolated_environ(path), "GIT_LFS_SKIP_SMUDGE": "1"}
+    checkout = ["checkout", "--no-track", "-b", branch, remote_branch]
+    _step(_script_result(_completed_git(path, roots, checkout, environ)), stderr)
+    return _write_config(path, roots, _tracking(branch), stderr)
+
+
 def _check_outside_repo(repo: str, path: str) -> None:
     """Return if path, its symlinks followed, lies outside repo.
 
@@ -588,6 +787,7 @@ ACTIONS: Mapping[str, Callable[..., ActionResult]] = {
     "checkout": checkout,
     "worktree": worktree,
     "config_get": config_get,
+    CLONE_ACTION: clone,
 }
 
 
@@ -596,18 +796,24 @@ def run_script(name: str, stdin: bytes, environ: Mapping[str, str]) -> ActionRes
 
     A cage that holds GH_TOKEN is refused before the action runs unless
     GITHUB_REPOS parses, and a set GIT_SIGNING_KEY is refused unless it names a
-    readable file. The isolation of the input's repo is built from environ
-    once, at the action's first git call, and every git call of the action
-    runs in it. A refusal is returned as the result: exit code 2, no stdout,
-    and the refusal's reason on stderr.
+    readable file. The isolation of the input's repo, or for clone of its
+    path as clone normalizes it, is built from environ once, at the action's
+    first isolated git call, and every isolated git call of the action runs
+    in it. A refusal is returned as the result: exit code 2, no stdout, and
+    the refusal's reason on stderr.
     """
     try:
         roots = cage.roots_from_env(environ)
         rules.check_token_cage(environ)
         cage.check_signing_key(environ)
         arguments = json.loads(stdin)
+        isolated = (
+            os.path.normpath(arguments["path"])
+            if name == CLONE_ACTION
+            else arguments["repo"]
+        )
         token = _ACTION_ISOLATION.set(
-            functools.cache(lambda: cage.build_isolation(arguments["repo"], environ))
+            functools.cache(lambda: cage.build_isolation(isolated, environ))
         )
         try:
             return ACTIONS[name](arguments, roots)

@@ -82,6 +82,21 @@
       "argv": ["cat", "/run/credentials/probe"],
       "parameters": [],
       "passthrough_args": false
+    },
+    "read_env": {
+      "kind": "command",
+      "input_schema": {"type": "object", "additionalProperties": false},
+      "credentials": [{"env": "PROBE"}],
+      "timeout": "10s",
+      "argv": ["printenv", "PROBE"],
+      "parameters": [],
+      "passthrough_args": false
+    },
+    "issue_value": {
+      "kind": "provider",
+      "credentials": [{"file": "/run/credentials/seed"}],
+      "timeout": "10s",
+      "executable": "/plugin/issue-value"
     }
   }
 }

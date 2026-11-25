@@ -335,7 +335,7 @@ def real_config_entries(
         capture_output=True,
         check=False,
         cwd="/",
-        env={**_without_git_variables(environ), **NO_GLOBAL_OR_SYSTEM},
+        env=unconfigured_environ(environ),
     )
     if completed.returncode != 0:
         reason = completed.stderr.decode("utf-8", errors="replace").strip()
@@ -413,8 +413,14 @@ def _git_false(value: str | None) -> bool:
     return value is not None and value.lower() in GIT_FALSE
 
 
-def _without_git_variables(environ: Mapping[str, str]) -> dict[str, str]:
-    return {name: environ[name] for name in environ if not name.startswith("GIT_")}
+def unconfigured_environ(environ: Mapping[str, str]) -> dict[str, str]:
+    """Return environ with no GIT_ variable, and the global and system config /dev/null.
+
+    git run from / in it finds no repository and reads no global or system
+    config.
+    """
+    plain = {name: environ[name] for name in environ if not name.startswith("GIT_")}
+    return plain | NO_GLOBAL_OR_SYSTEM
 
 
 def _config_entry(record: bytes) -> ConfigEntry:

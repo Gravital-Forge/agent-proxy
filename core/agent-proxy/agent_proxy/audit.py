@@ -43,6 +43,7 @@ class AuditRecord:
     stderr_bytes: int | None
     truncated: bool
     refusal: str | None
+    credential: str | None = None
 
 
 class AuditWriter:
@@ -189,6 +190,11 @@ class AuditWriter:
             self._latched = True
 
 
+def audit_refusal(call_id: str) -> str:
+    """Return the refusal of call call_id, whose audit line could not be written."""
+    return f"the audit log could not record call {call_id}, so its result is withheld"
+
+
 def tail(directory: Path, count: int) -> list[str]:
     """Return the last count audit lines in write order.
 
@@ -225,6 +231,7 @@ def _render_line(record: AuditRecord) -> str:
             if record.refusal is None
             else _capped(record.refusal, REFUSAL_CAP_CHARACTERS)
         ),
+        "credential": record.credential,
     }
     return _compact_json(fields)
 

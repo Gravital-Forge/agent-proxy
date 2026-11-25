@@ -16,7 +16,7 @@
     "action": {
       "type": "object",
       "required": ["kind"],
-      "properties": {"kind": {"enum": ["command", "script"]}},
+      "properties": {"kind": {"enum": ["command", "script", "provider"]}},
       "allOf": [
         {
           "if": {"required": ["kind"], "properties": {"kind": {"const": "command"}}},
@@ -25,6 +25,10 @@
         {
           "if": {"required": ["kind"], "properties": {"kind": {"const": "script"}}},
           "then": {"$ref": "#/$defs/script_action"}
+        },
+        {
+          "if": {"required": ["kind"], "properties": {"kind": {"const": "provider"}}},
+          "then": {"$ref": "#/$defs/provider_action"}
         }
       ]
     },
@@ -69,6 +73,16 @@
         "timeout": {"$ref": "#/$defs/timeout"},
         "executable": {"type": "string", "pattern": "^/"},
         "output_schema": {"$ref": "#/$defs/object_schema"}
+      },
+      "additionalProperties": false
+    },
+    "provider_action": {
+      "required": ["kind", "credentials", "timeout", "executable"],
+      "properties": {
+        "kind": {"const": "provider"},
+        "credentials": {"$ref": "#/$defs/credentials"},
+        "timeout": {"$ref": "#/$defs/timeout"},
+        "executable": {"type": "string", "pattern": "^/"}
       },
       "additionalProperties": false
     },

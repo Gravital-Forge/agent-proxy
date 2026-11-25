@@ -19,6 +19,7 @@ from agent_proxy.audit import (
     AuditError,
     AuditRecord,
     AuditWriter,
+    audit_refusal,
     tail,
 )
 
@@ -36,6 +37,7 @@ FIELD_NAMES = [
     "stderr_bytes",
     "truncated",
     "refusal",
+    "credential",
 ]
 
 _REAL_CLOSE = os.close
@@ -84,7 +86,14 @@ def _call_ids(lines: list[str]) -> list[str]:
     return [json.loads(line)["call_id"] for line in lines]
 
 
-def test_each_line_is_json_with_exactly_the_thirteen_keys(directory: Path) -> None:
+def test_the_audit_refusal_names_the_call_and_withholds_its_result() -> None:
+    """The gateway and the provider cache refuse an unwritten line in one text."""
+    assert audit_refusal("0" * 32) == (
+        f"the audit log could not record call {'0' * 32}, so its result is withheld"
+    )
+
+
+def test_each_line_is_json_with_exactly_the_fourteen_keys(directory: Path) -> None:
     """Every line parses as one JSON object keyed by the record's fields, in order."""
     _write(directory, [_record("call-0001"), _record("call-0002")])
 
@@ -113,7 +122,27 @@ def test_a_line_holds_the_record_values(directory: Path) -> None:
         "stderr_bytes": 0,
         "truncated": False,
         "refusal": None,
+        "credential": None,
     }
+
+
+def test_a_provider_run_s_line_names_its_provided_credential(directory: Path) -> None:
+    """A record that names a provided credential carries the name in its line."""
+    record = dataclasses.replace(
+        _record(),
+        token_name=None,
+        scope=None,
+        action="github-app_installation_token",
+        arguments=None,
+        credential="github-token",
+    )
+
+    line = _line_of(directory, record)
+
+    assert line["credential"] == "github-token"
+    assert line["token_name"] is None
+    assert line["scope"] is None
+    assert line["arguments"] is None
 
 
 def _line_of(directory: Path, record: AuditRecord) -> dict[str, object]:

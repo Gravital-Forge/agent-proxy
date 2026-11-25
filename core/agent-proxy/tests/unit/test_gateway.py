@@ -22,7 +22,7 @@ from agent_proxy.audit import (
     tail,
 )
 from agent_proxy.auth import TokenStore
-from agent_proxy.config import InstanceConfig
+from agent_proxy.config import Grant, InstanceConfig
 from agent_proxy.credentials import unset_message
 from agent_proxy.egress import cage_network
 from agent_proxy.errors import ProxyError
@@ -34,6 +34,7 @@ from agent_proxy.mcp import (
     ToolSpec,
 )
 from agent_proxy.plugins import parse_manifest
+from agent_proxy.providers import ProvisionError
 from agent_proxy.reload import LiveConfig, Snapshot
 from agent_proxy.results import CALL_ID_PATTERN, OverflowWriteError
 from agent_proxy.runner import (
@@ -205,6 +206,23 @@ class FakeRunner:
         return self.result
 
 
+class FakeProvided:
+    """Provided credentials that record each resolve and the use held during it."""
+
+    def __init__(self, live: LiveConfig) -> None:
+        """Resolve to no value until result is changed."""
+        self.result: dict[str, str] | ProvisionError = {}
+        self.resolves: list[tuple[Snapshot, Grant, int]] = []
+        self._live = live
+
+    def resolve(self, snapshot: Snapshot, grant: Grant) -> dict[str, str]:
+        """Record the resolve and the snapshot's use count, then return or raise."""
+        self.resolves.append((snapshot, grant, self._live._uses[id(snapshot)].count))
+        if isinstance(self.result, ProvisionError):
+            raise self.result
+        return self.result
+
+
 class FakeSelfCheck:
     """A self-check that records each run and the use held while it runs."""
 
@@ -223,6 +241,7 @@ class FakeSelfCheck:
 class Harness:
     gateway: CallGateway
     runner: FakeRunner
+    provided: FakeProvided
     self_check: FakeSelfCheck
     store: TokenStore
     clock: Clock
@@ -243,10 +262,12 @@ def harness(tmp_path: Path) -> Harness:
     audit = AuditWriter(audit_dir)
     live = LiveConfig(SNAPSHOT, RecordingEgress())
     runner = FakeRunner(live)
+    provided = FakeProvided(live)
     self_check = FakeSelfCheck(live)
     return Harness(
-        gateway=CallGateway(store, live, runner, self_check, audit, clock),
+        gateway=CallGateway(store, live, runner, provided, self_check, audit, clock),
         runner=runner,
+        provided=provided,
         self_check=self_check,
         store=store,
         clock=clock,
@@ -576,6 +597,7 @@ def test_a_granted_calls_audit_line(harness: Harness) -> None:
             "stderr_bytes": 0,
             "truncated": False,
             "refusal": None,
+            "credential": None,
         }
     ]
 
@@ -605,6 +627,7 @@ def test_a_bad_tokens_audit_line_has_no_token_fields_and_no_arguments(
         "stderr_bytes": None,
         "truncated": False,
         "refusal": TOKEN_REFUSAL,
+        "credential": None,
     }
 
 
@@ -647,6 +670,74 @@ def test_an_unset_credential_is_refused_by_name_and_audited(
 
     [line] = _audit_lines(harness)
     assert line["refusal"] == unset_message("api-token")
+
+
+PROVISION_FAILURE = (
+    "provided credential 'app-token' has no unexpired value: provider"
+    " 'tools.issue' failed: it exited 4, stderr 'boom\\n'"
+)
+
+
+def test_the_provided_values_resolve_for_the_calls_grant_while_in_use(
+    harness: Harness,
+) -> None:
+    """The grant's provided values resolve once, on the snapshot the call holds."""
+    harness.gateway.call(_bearer(harness.token), "tools_echo", ECHO_ARGUMENTS)
+
+    assert harness.provided.resolves == [
+        (SNAPSHOT, CONFIG.scopes["dev"].grants["tools.echo"], 1)
+    ]
+
+
+def test_the_cage_call_carries_the_resolved_values(harness: Harness) -> None:
+    """The runner gets the resolved map as the cage call's provided values."""
+    harness.provided.result = {"app-token": "ghs_value"}
+
+    harness.gateway.call(_bearer(harness.token), "tools_echo", ECHO_ARGUMENTS)
+
+    [call] = harness.runner.calls
+    assert call.provided == {"app-token": "ghs_value"}
+
+
+def test_a_refused_tool_resolves_no_provided_value(harness: Harness) -> None:
+    """A tool the scope does not grant is refused before any provider runs."""
+    _refusal(harness, _bearer(harness.token), "other_echo")
+
+    assert harness.provided.resolves == []
+
+
+def test_a_provision_error_refuses_the_call_before_its_cage(
+    harness: Harness,
+) -> None:
+    """The caller gets the provider's failure; no cage of the call runs."""
+    harness.provided.result = ProvisionError(PROVISION_FAILURE)
+
+    assert _refusal(harness, _bearer(harness.token)) == PROVISION_FAILURE
+    assert harness.runner.calls == []
+
+
+def test_a_provision_errors_line_is_a_refusal_of_the_call(harness: Harness) -> None:
+    """The call's one line holds the failure as its refusal and no outcome."""
+    harness.provided.result = ProvisionError(PROVISION_FAILURE)
+
+    _refusal(harness, _bearer(harness.token))
+
+    [line] = _audit_lines(harness)
+    assert line["token_name"] == "ci-bot"
+    assert line["action"] == "tools_echo"
+    assert line["refusal"] == PROVISION_FAILURE
+    assert line["exit_code"] is None
+    assert line["credential"] is None
+
+
+def test_a_failed_audit_write_of_a_provision_refusal_is_plain(
+    harness: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A provider failure comes before the call's cage, so it never says it ran."""
+    harness.provided.result = ProvisionError(PROVISION_FAILURE)
+    fail_next_write_after_half(monkeypatch)
+
+    assert AUDIT_REFUSAL.fullmatch(_refusal(harness, _bearer(harness.token)))
 
 
 def test_a_failed_audit_write_withholds_the_result_and_the_next_call_succeeds(
@@ -1021,6 +1112,7 @@ def test_the_self_checks_audit_line(harness: Harness) -> None:
         "stderr_bytes": None,
         "truncated": False,
         "refusal": None,
+        "credential": None,
     }
 
 
@@ -1129,6 +1221,7 @@ def test_check_scopes_writes_one_audit_line_per_scope(harness: Harness) -> None:
             "stderr_bytes": None,
             "truncated": False,
             "refusal": None,
+            "credential": None,
         }
         for scope in ("dev", "ops")
     ]

@@ -2,8 +2,8 @@ import json
 import shutil
 import tempfile
 import threading
-from collections.abc import Iterator
-from datetime import timedelta
+from collections.abc import Callable, Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
@@ -13,14 +13,15 @@ import yaml
 from egress_fakes import RecordingEgress
 
 from agent_proxy import runner
-from agent_proxy.audit import tail
-from agent_proxy.config import ConfigError
+from agent_proxy.audit import AuditWriter, tail
+from agent_proxy.config import ConfigError, load_config
 from agent_proxy.credentials import unset_message
 from agent_proxy.mcp import Instance
 from agent_proxy.plugins import CommandAction, Manifest, PluginImageError
 from agent_proxy.reload import (
     CONTROL_SOCKET_NAME,
     ControlError,
+    Snapshot,
     request_check,
     request_reload,
 )
@@ -81,6 +82,38 @@ def egress(monkeypatch: pytest.MonkeyPatch) -> RecordingEgress:
         "agent_proxy.mcp.EgressProxies", lambda client, config_root: fake
     )
     return fake
+
+
+class RecordingProvided:
+    """Provided credentials that record what built them and each retain."""
+
+    def __init__(
+        self, runner: object, audit: object, now: Callable[[], datetime]
+    ) -> None:
+        """Hold what the instance built it from."""
+        self.runner = runner
+        self.audit = audit
+        self.now = now
+        self.retained: list[Snapshot] = []
+
+    def retain(self, snapshot: Snapshot) -> None:
+        """Record the snapshot a reload put in force."""
+        self.retained.append(snapshot)
+
+
+@pytest.fixture
+def provided(monkeypatch: pytest.MonkeyPatch) -> list[RecordingProvided]:
+    """Make the instance's provided credentials recording fakes, and list them."""
+    built: list[RecordingProvided] = []
+
+    def build(
+        runner: object, audit: object, now: Callable[[], datetime]
+    ) -> RecordingProvided:
+        built.append(RecordingProvided(runner, audit, now))
+        return built[-1]
+
+    monkeypatch.setattr("agent_proxy.mcp.ProvidedCredentials", build)
+    return built
 
 
 def _client(*left_cages: mock.MagicMock) -> mock.MagicMock:
@@ -160,6 +193,47 @@ def test_start_from_a_config_naming_an_unstored_credential_warns_of_it(
     assert instance.warnings == (unset_message("github-token"),)
     assert reply.ok is True
     assert reply.warnings == (unset_message("github-token"),)
+
+
+def test_start_builds_one_provided_cache_over_the_runner_audit_and_utc_clock(
+    state_dir: Path,
+    tmp_path: Path,
+    egress: RecordingEgress,
+    provided: list[RecordingProvided],
+) -> None:
+    """The cache runs its providers through the cage runner and the audit log."""
+    instance = Instance.start(state_dir, _config(tmp_path, CONFIG), _client())
+    instance.close()
+
+    [cache] = provided
+    assert isinstance(cache.runner, runner.CageRunner)
+    assert isinstance(cache.audit, AuditWriter)
+    assert cache.now().tzinfo is UTC
+    assert cache.retained == []
+
+
+def test_a_reload_retains_the_cache_for_the_snapshot_it_put_in_force(
+    state_dir: Path,
+    tmp_path: Path,
+    egress: RecordingEgress,
+    provided: list[RecordingProvided],
+) -> None:
+    """A successful reload calls retain once; a refused one does not."""
+    path = _config(tmp_path, CONFIG)
+    socket_path = state_dir / CONTROL_SOCKET_NAME
+    instance = Instance.start(state_dir, path, _client())
+    try:
+        reloaded = request_reload(socket_path)
+        path.write_text("scopes: {}\n", encoding="utf-8")
+        refused = request_reload(socket_path)
+    finally:
+        instance.close()
+
+    assert reloaded.ok is True
+    assert refused.ok is False
+    [cache] = provided
+    [snapshot] = cache.retained
+    assert snapshot.config == load_config(_config(tmp_path, CONFIG))
 
 
 def test_close_removes_the_control_socket_and_stops_the_sweeper(

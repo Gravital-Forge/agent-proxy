@@ -50,17 +50,16 @@ converting text to an integer.
 
 The manifest has one member, `actions`. It is an object with at least one member. Each key is an
 action name, which matches `ACTION_NAME_PATTERN` in `config.py`. Each value is an action. An
-operator grants an action to a scope under the key `<plugin>.<action>`, where `<plugin>` is the name
-the config pins the image under. The reference gives the config under
+operator grants a command or script action to a scope under the key `<plugin>.<action>`, where
+`<plugin>` is the name the config pins the image under, and names a provider action under that key
+as a provided credential's `provider`. The reference gives the config under
 [The config file](reference.md#the-config-file).
 
 ### Every action
 
 Every action states each of these members. None has a default.
 
-- `kind` is `"command"` or `"script"`.
-- `input_schema` is a JSON Schema whose `type` is `"object"`, and it passes the draft 2020-12
-  meta-schema check.
+- `kind` is `"command"`, `"script"`, or `"provider"`.
 - `credentials` is an array, possibly empty, of the credentials the action expects. Each item is
   `{"env": NAME}`, with `NAME` matching `ENV_NAME_PATTERN` in `config.py`, or `{"file": PATH}`, with
   `PATH` an absolute path beneath `/run/credentials/` with no `..` segment. The reference gives how
@@ -68,7 +67,11 @@ Every action states each of these members. None has a default.
   [A scope's grants](reference.md#a-scopes-grants).
 - `timeout` is the action's default timeout, a duration string matching `DURATION_PATTERN` in
   `config.py`, such as `30s` or `5m`, whose count fits a Python `timedelta`. A grant's `timeout`
-  overrides it, as [A scope's grants](reference.md#a-scopes-grants) gives.
+  overrides it, as [A scope's grants](reference.md#a-scopes-grants) gives, and so does a provided
+  credential's.
+
+A command or script action also states `input_schema`, a JSON Schema whose `type` is `"object"`,
+which passes the draft 2020-12 meta-schema check.
 
 ### A command action
 
@@ -107,6 +110,38 @@ A script action runs an executable in the image. It states these members, and do
 [How an action runs](#how-an-action-runs) gives how a script receives its input and returns its
 output.
 
+### A provider action
+
+A provider action runs an executable in the image that prints the value of a provided credential, as
+[Provided credentials](architecture.md#provided-credentials) gives. It states one member beyond
+those of every action, and does not state `input_schema`, `output_schema`, `argv`, `parameters`, or
+`passthrough_args`:
+
+- `executable` is an absolute path in the image.
+
+Its inputs reach it through the cage alone: the stored credentials and the `env` of the provided
+credential's entry. The core owns the form of its output. No grant can name a provider action, so no
+agent sees it as a tool. `credentials` declares what the action expects, as for every action, and
+the provided credential's entry supplies each one, in the forms that
+[Provided credentials](reference.md#provided-credentials) gives.
+
+A run succeeds when it exits 0 and its stdout, within the output cap, is one UTF-8 JSON object with
+these members and no other:
+
+- `value` is the credential's value, a non-empty string that can be an environment value: it holds
+  no NUL, and encodes as UTF-8.
+- `expires_at` is optional. It is a string, an ISO 8601 date and time with a time zone, such as
+  `2026-11-24T15:04:05Z`: the moment the value stops working.
+
+The value expires at the earlier of `expires_at` and the start of the run plus the entry's
+`max_age`. A run that gives no `expires_at` fails when the entry sets no `max_age`, so give
+`expires_at` whenever the service states an expiry. A value that has already expired fails the run.
+The reference gives every failure under [A provider's failure](reference.md#a-providers-failure).
+
+On a failure, exit non-zero and write one line on stderr that says why. The start of stderr reaches
+the provider's audit line, and the refusal of a call that finds no unexpired value, so stderr must
+never hold the value or a secret input.
+
 ## How argv is formed
 
 A command action's argv is the `argv` prefix, then each parameter in the order `parameters` lists
@@ -136,6 +171,9 @@ and command:
 - A command action's entrypoint is the argv above.
 - A script action's entrypoint is its `executable`, with no arguments. The script reads its input on
   stdin as one compact UTF-8 JSON object, then end of file.
+- A provider action's entrypoint is its `executable`, with no arguments. It reads `{}` on stdin,
+  then end of file. Its cage has no roots, and its credentials, `env`, `domains`, and timeout come
+  from the provided credential's entry in place of a grant.
 
 The proxy's root verifier runs first in every cage, and then replaces itself with that entrypoint.
 So the action still runs as PID 1, with its argv, stdin, and environment unchanged. A bare
@@ -189,14 +227,11 @@ reaches Docker, what it prints, and how it exits under
 ## A working example
 
 `core/agent-proxy/tests/test-plugin/` is a working plugin. Its `Dockerfile` copies a `manifest.json`
-into the image, and a `describe` script onto the `PATH` that prints it. The manifest shows both
-action kinds. Among its actions are a command action with a flag and a positional parameter, and a
-script action whose executable the image also holds. `COPY` keeps each file's mode, so an executable
-must already be executable in the build context.
+into the image, and a `describe` script onto the `PATH` that prints it. The manifest shows each
+action kind. Among its actions are a command action with a flag and a positional parameter, a script
+action whose executable the image also holds, and a provider action, `issue_value`. `COPY` keeps
+each file's mode, so an executable must already be executable in the build context.
 
-`plugins/git/` is a full plugin: a uv package with its own tests, whose actions run git in the cage.
-Its [README](../plugins/git/README.md) gives what it offers and how it is built. `plugins/github/`
-is also a full plugin, whose actions run gh in a cage, and its [README](../plugins/github/README.md)
-gives what it offers. `plugins/hcp-terraform/` is a full plugin whose script actions call HCP
-Terraform's API with Python's standard library, and its [README](../plugins/hcp-terraform/README.md)
-gives what it offers.
+Each directory under `plugins/` is a full plugin, and its README gives what it offers.
+`plugins/git/` is one: a uv package with its own tests, whose actions run git in the cage. Its
+[README](../plugins/git/README.md) also gives how it is built.

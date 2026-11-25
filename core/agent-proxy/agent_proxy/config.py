@@ -16,6 +16,7 @@ from pydantic import (
     StrictInt,
     StringConstraints,
     ValidationError,
+    ValidationInfo,
     model_validator,
 )
 from pydantic_core import ErrorDetails
@@ -180,21 +181,22 @@ Domain = Annotated[str, StringConstraints(max_length=253, pattern=DOMAIN_PATTERN
 EnvName = Annotated[str, StringConstraints(pattern=ENV_NAME_PATTERN)]
 
 
-def _parse_timeout(value: object) -> timedelta:
-    """Return the timedelta a timeout string names.
+def _parse_duration_field(value: object, info: ValidationInfo) -> timedelta:
+    """Return the timedelta the duration string of a field names.
 
     Raises:
-        ValueError: value is not a string.
+        ValueError: value is not a string; the message names the field.
         DurationError: value is a string parse_duration refuses.
     """
     if not isinstance(value, str):
         raise ValueError(
-            f"timeout must be a duration string such as '120s', got {value!r}"
+            f"{info.field_name} must be a duration string such as '120s', got {value!r}"
         )
     return parse_duration(value)
 
 
-Timeout = Annotated[timedelta | None, BeforeValidator(_parse_timeout)]
+Duration = Annotated[timedelta, BeforeValidator(_parse_duration_field)]
+OptionalDuration = Annotated[timedelta | None, BeforeValidator(_parse_duration_field)]
 
 
 def _parse_memory(value: object) -> int:
@@ -249,7 +251,7 @@ class Grant(BaseModel):
     roots: list[Root]
     domains: list[Domain]
     credentials: dict[Name, EnvMount | FileMount]
-    timeout: Timeout = None
+    timeout: OptionalDuration = None
     memory: Memory = None
     env: dict[EnvName, str] = Field(default_factory=dict)
 
@@ -258,6 +260,20 @@ class Scope(BaseModel):
     model_config = _STRICT
 
     grants: dict[GrantKey, Grant]
+
+
+class ProvidedCredential(BaseModel):
+    """A credential whose value a provider action gives, and the provider's inputs."""
+
+    model_config = _STRICT
+
+    provider: GrantKey
+    credentials: dict[Name, EnvMount | FileMount]
+    env: dict[EnvName, str] = Field(default_factory=dict)
+    domains: list[Domain]
+    refresh_before: Duration
+    max_age: OptionalDuration = None
+    timeout: OptionalDuration = None
 
 
 class _RuleFailuresError(ValueError):
@@ -396,6 +412,7 @@ class InstanceConfig(BaseModel):
     max_cages: Annotated[StrictInt, Field(ge=1)]
     plugins: dict[PluginName, PinnedImage]
     scopes: dict[Name, Scope]
+    provided_credentials: dict[Name, ProvidedCredential] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _check_rules(self) -> Self:
@@ -423,6 +440,8 @@ class InstanceConfig(BaseModel):
                 yield from self._grant_failures(
                     f"scopes.{scope_name}.grants.{key}", key, grant
                 )
+        for name, entry in self.provided_credentials.items():
+            yield from self._provided_failures(f"provided_credentials.{name}", entry)
 
     def _grant_failures(self, where: str, key: str, grant: Grant) -> Iterator[str]:
         plugin = key.split(".", 1)[0]
@@ -436,6 +455,34 @@ class InstanceConfig(BaseModel):
         yield from _mount_failures(f"{where}.credentials", grant.credentials)
         yield from _reserved_env_failures(f"{where}.credentials", grant.credentials)
         yield from _grant_env_failures(where, grant.env, grant.credentials)
+        for name, mount in grant.credentials.items():
+            if name in self.provided_credentials and isinstance(mount, FileMount):
+                yield (
+                    f"{where}.credentials.{name}: provided credential {name!r} "
+                    f"must reach a cage as env, got file {mount.file!r}"
+                )
+
+    def _provided_failures(
+        self, where: str, entry: ProvidedCredential
+    ) -> Iterator[str]:
+        plugin = entry.provider.split(".", 1)[0]
+        if plugin not in self.plugins:
+            yield f"{where}.provider: plugin {plugin!r} is not in plugins"
+        for name in entry.credentials:
+            if name in self.provided_credentials:
+                yield (
+                    f"{where}.credentials.{name}: a provider takes only stored "
+                    f"credentials, got provided credential {name!r}"
+                )
+        yield from _duplicate_domain_failures(f"{where}.domains", entry.domains)
+        yield from _mount_failures(f"{where}.credentials", entry.credentials)
+        yield from _reserved_env_failures(f"{where}.credentials", entry.credentials)
+        yield from _grant_env_failures(where, entry.env, entry.credentials)
+        if entry.max_age is not None and entry.max_age <= entry.refresh_before:
+            yield (
+                f"{where}.max_age must be longer than refresh_before "
+                f"{entry.refresh_before}, got {entry.max_age}"
+            )
 
 
 def _error_messages(error: ErrorDetails) -> list[str]:

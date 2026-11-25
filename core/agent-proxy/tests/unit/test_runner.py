@@ -22,7 +22,14 @@ from agent_proxy.config import EnvMount, FileMount, Grant, Root
 from agent_proxy.credentials import CredentialStore, unset_message
 from agent_proxy.egress import CageNetwork
 from agent_proxy.errors import ProxyError
-from agent_proxy.plugins import CommandAction, Parameter, ScriptAction, parse_manifest
+from agent_proxy.plugins import (
+    STDERR_EXCERPT_LIMIT,
+    CommandAction,
+    Parameter,
+    ProviderAction,
+    ScriptAction,
+    parse_manifest,
+)
 from agent_proxy.results import OUTPUT_CAP_BYTES
 from agent_proxy.runner import (
     CAGE_LABEL,
@@ -52,6 +59,7 @@ from agent_proxy.runner import (
     RunnerError,
     cage_environment,
     cage_mounts,
+    check_environment_value,
     form_argv,
     hold_roots,
     script_stdin,
@@ -129,6 +137,12 @@ _SCRIPT = ScriptAction(
     executable="/plugin/run",
     output_schema={"type": "object"},
 )
+_PROVIDER = ProviderAction(
+    name="issue",
+    credentials=(),
+    timeout=timedelta(seconds=10),
+    executable="/plugin/issue",
+)
 
 
 @pytest.fixture
@@ -194,8 +208,19 @@ def _open_descriptors() -> int:
     return len(list(Path("/proc/self/fd").iterdir()))
 
 
+def _chunked_client(*, out: list[bytes], err: list[bytes]) -> MagicMock:
+    """Return a Docker client whose cage's log yields each stream in these chunks."""
+    client = _client()
+
+    def logs(*, stdout: bool, stderr: bool, stream: bool) -> Iterator[bytes]:
+        return iter(out if stdout else err)
+
+    _container(client).logs.side_effect = logs
+    return client
+
+
 def _cage_call(
-    action: CommandAction | ScriptAction,
+    action: CommandAction | ScriptAction | ProviderAction,
     arguments: Mapping[str, object],
     *,
     grant: Grant = _GRANT,
@@ -203,6 +228,7 @@ def _cage_call(
     call_id: str = CALL_ID,
     overflow_dir: str = "/overflow",
     max_cages: int = 2,
+    provided: Mapping[str, str] = types.MappingProxyType({}),
 ) -> CageCall:
     return CageCall(
         call_id=call_id,
@@ -213,6 +239,7 @@ def _cage_call(
         network=network,
         overflow_dir=overflow_dir,
         max_cages=max_cages,
+        provided=provided,
     )
 
 
@@ -546,7 +573,7 @@ def test_cage_environment_maps_each_env_credential_to_its_value(
         "deploy-key": FileMount(file="/run/credentials/deploy-key"),
     }
 
-    assert cage_environment(credentials, store) == {"API_TOKEN": "s3cret"}
+    assert cage_environment(credentials, store, {}) == {"API_TOKEN": "s3cret"}
 
 
 def test_cage_environment_refuses_a_value_that_is_not_utf8(
@@ -556,11 +583,11 @@ def test_cage_environment_refuses_a_value_that_is_not_utf8(
     store.set("api-token", b"\xff")
 
     with pytest.raises(CredentialError, match="'api-token'") as excinfo:
-        cage_environment({"api-token": EnvMount(env="API_TOKEN")}, store)
+        cage_environment({"api-token": EnvMount(env="API_TOKEN")}, store, {})
 
     assert "xff" not in str(excinfo.value)
     assert excinfo.value.__cause__ is None
-    assert excinfo.value.__suppress_context__
+    assert excinfo.value.__context__ is None
 
 
 def test_cage_environment_refuses_a_value_that_holds_a_nul(
@@ -570,7 +597,7 @@ def test_cage_environment_refuses_a_value_that_holds_a_nul(
     store.set("api-token", b"s3cret\x00tail")
 
     with pytest.raises(CredentialError, match="'api-token'") as excinfo:
-        cage_environment({"api-token": EnvMount(env="API_TOKEN")}, store)
+        cage_environment({"api-token": EnvMount(env="API_TOKEN")}, store, {})
 
     assert "s3cret" not in str(excinfo.value)
 
@@ -582,9 +609,107 @@ def test_cage_environment_refuses_an_unknown_credential(
     store.set("other-token", b"s3cret")
 
     with pytest.raises(CredentialError) as excinfo:
-        cage_environment({"api-token": EnvMount(env="API_TOKEN")}, store)
+        cage_environment({"api-token": EnvMount(env="API_TOKEN")}, store, {})
 
     assert str(excinfo.value) == unset_message("api-token")
+
+
+def test_check_environment_value_accepts_utf8_text_with_no_nul() -> None:
+    """A value that UTF-8 encodes and holds no NUL passes."""
+    check_environment_value("app-token", "ghs_é")
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        ("a\udc80b", "is not valid UTF-8,"),
+        ("s3cret\x00tail", "holds a NUL,"),
+    ],
+    ids=["lone-surrogate", "nul"],
+)
+def test_check_environment_value_refuses_by_name_without_the_value(
+    value: str, reason: str
+) -> None:
+    """A refusal names the credential and the reason, never the value."""
+    with pytest.raises(CredentialError) as excinfo:
+        check_environment_value("app-token", value)
+
+    message = str(excinfo.value)
+    assert message.startswith(f"credential 'app-token' {reason}")
+    assert value not in message
+    assert excinfo.value.__context__ is None
+
+
+def test_cage_environment_takes_a_provided_value_without_reading_the_store(
+    store: CredentialStore,
+) -> None:
+    """A provided name maps to its provided value; the store never holds it."""
+    credentials = {"app-token": EnvMount(env="GH_TOKEN")}
+
+    environment = cage_environment(credentials, store, {"app-token": "ghs_value"})
+
+    assert environment == {"GH_TOKEN": "ghs_value"}
+
+
+def test_cage_environment_prefers_a_provided_value_to_a_stored_one(
+    store: CredentialStore,
+) -> None:
+    """A name in provided takes its provided value, even when the store holds it."""
+    store.set("app-token", b"stale")
+
+    environment = cage_environment(
+        {"app-token": EnvMount(env="GH_TOKEN")}, store, {"app-token": "fresh"}
+    )
+
+    assert environment == {"GH_TOKEN": "fresh"}
+
+
+def test_cage_environment_places_provided_and_stored_values_side_by_side(
+    store: CredentialStore,
+) -> None:
+    """A stored env credential is read from the store beside a provided one."""
+    store.set("api-token", b"s3cret")
+    credentials = {
+        "api-token": EnvMount(env="API_TOKEN"),
+        "app-token": EnvMount(env="GH_TOKEN"),
+    }
+
+    environment = cage_environment(credentials, store, {"app-token": "ghs_value"})
+
+    assert environment == {"API_TOKEN": "s3cret", "GH_TOKEN": "ghs_value"}
+
+
+def test_cage_environment_refuses_a_provided_value_that_is_not_utf8(
+    store: CredentialStore,
+) -> None:
+    """A provided lone surrogate refuses, as a stored non-UTF-8 value does."""
+    with pytest.raises(CredentialError) as excinfo:
+        cage_environment(
+            {"app-token": EnvMount(env="GH_TOKEN")}, store, {"app-token": "a\ud800b"}
+        )
+
+    assert str(excinfo.value) == (
+        "credential 'app-token' is not valid UTF-8, "
+        "so it cannot be an environment value"
+    )
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__context__ is None
+
+
+def test_cage_environment_refuses_a_provided_value_that_holds_a_nul(
+    store: CredentialStore,
+) -> None:
+    """A provided value holding a NUL refuses without the value in the message."""
+    with pytest.raises(CredentialError) as excinfo:
+        cage_environment(
+            {"app-token": EnvMount(env="GH_TOKEN")},
+            store,
+            {"app-token": "s3cret\x00tail"},
+        )
+
+    assert str(excinfo.value) == (
+        "credential 'app-token' holds a NUL, so it cannot be an environment value"
+    )
 
 
 def test_cage_mounts_binds_each_root_at_its_own_path(store: CredentialStore) -> None:
@@ -987,6 +1112,232 @@ def test_run_spills_a_stream_over_the_cap_and_reports_it_truncated(
     assert outcome.truncated is True
     assert outcome.stdout_bytes == OUTPUT_CAP_BYTES + 1
     assert outcome.content["stdout_file"] == str(overflow / f"{CALL_ID}.stdout")
+
+
+def test_a_cage_call_holds_no_provided_value_unless_given_one() -> None:
+    """A call built without provided values carries an empty map of them."""
+    cage_call = CageCall(
+        call_id=CALL_ID,
+        image=IMAGE,
+        action=_echo(),
+        grant=_GRANT,
+        arguments={"text": "hi"},
+        network=NETWORK,
+        overflow_dir="/overflow",
+        max_cages=2,
+    )
+
+    assert cage_call.provided == {}
+
+
+def test_run_places_a_provided_value_in_the_cage_s_environment(
+    store: CredentialStore,
+) -> None:
+    """An env credential the call provides reaches the cage with no stored value."""
+    grant = Grant(
+        roots=[], domains=[], credentials={"app-token": EnvMount(env="GH_TOKEN")}
+    )
+    client = _client()
+
+    _run(
+        client,
+        store,
+        _cage_call(
+            _echo(), {"text": "hi"}, grant=grant, provided={"app-token": "ghs_value"}
+        ),
+    )
+
+    assert client.containers.create.call_args.kwargs["environment"] == {
+        "AGENT_PROXY_ROOTS": "[]",
+        "GH_TOKEN": "ghs_value",
+    }
+
+
+def test_run_never_takes_a_file_credential_from_the_provided_values(
+    store: CredentialStore,
+) -> None:
+    """A file credential is read from the store only, so a provided one is unset."""
+    grant = Grant(
+        roots=[],
+        domains=[],
+        credentials={"app-token": FileMount(file="/run/credentials/app-token")},
+    )
+    client = _client()
+
+    with pytest.raises(CredentialError) as excinfo:
+        _run(
+            client,
+            store,
+            _cage_call(
+                _echo(),
+                {"text": "hi"},
+                grant=grant,
+                provided={"app-token": "ghs_value"},
+            ),
+        )
+
+    assert str(excinfo.value) == unset_message("app-token")
+    client.containers.create.assert_not_called()
+
+
+def test_run_creates_a_provider_cage_whose_verifier_runs_its_executable(
+    store: CredentialStore, nonce: str
+) -> None:
+    """A provider's cage runs its executable behind the verifier, with stdin open."""
+    client = _client(out=b"{}")
+
+    _run(client, store, _cage_call(_PROVIDER, {}))
+
+    kwargs = client.containers.create.call_args.kwargs
+    assert kwargs["entrypoint"] == [VERIFIER_PATH, nonce, "--", "/plugin/issue"]
+    assert kwargs["stdin_open"] is True
+
+
+def test_run_sends_a_provider_an_empty_object_and_checks_no_input(
+    store: CredentialStore,
+) -> None:
+    """A provider has no input schema: its arguments go unchecked and unsent."""
+    client = _client(out=b"{}")
+
+    _run(client, store, _cage_call(_PROVIDER, {"path": 5}))
+
+    _stdin(client).sendall.assert_called_once_with(b"{}")
+
+
+def test_run_returns_a_provider_s_stdout_as_bytes_and_its_stderr_as_text(
+    store: CredentialStore,
+) -> None:
+    """A provider's result holds its exit code, its raw stdout, and its stderr."""
+    client = _client(out=b'{"value":"v"}', err="warn é".encode(), status=0)
+
+    outcome = _run(client, store, _cage_call(_PROVIDER, {}))
+
+    assert outcome == Outcome(
+        content={"exit_code": 0, "stdout": b'{"value":"v"}', "stderr": "warn é"},
+        exit_code=0,
+        duration_ms=outcome.duration_ms,
+        stdout_bytes=13,
+        stderr_bytes=7,
+        truncated=False,
+    )
+
+
+def test_run_returns_a_failed_provider_s_exit_code_and_stderr(
+    store: CredentialStore,
+) -> None:
+    """A provider that exits non-zero keeps the provider shape, not a command's."""
+    client = _client(err=b"refused", status=1)
+
+    outcome = _run(client, store, _cage_call(_PROVIDER, {}))
+
+    assert outcome.content == {"exit_code": 1, "stdout": b"", "stderr": "refused"}
+
+
+def test_run_holds_a_provider_s_stdout_of_exactly_the_cap_whole(
+    tmp_path: Path, store: CredentialStore
+) -> None:
+    """A provider's stdout at the cap, in several chunks, is held whole."""
+    overflow = tmp_path / "overflow"
+    overflow.mkdir()
+    half = OUTPUT_CAP_BYTES // 2
+    client = _chunked_client(
+        out=[b"a" * half, b"b" * (OUTPUT_CAP_BYTES - half)], err=[]
+    )
+
+    outcome = _run(client, store, _cage_call(_PROVIDER, {}, overflow_dir=str(overflow)))
+
+    assert outcome.content["stdout"] == b"a" * half + b"b" * (OUTPUT_CAP_BYTES - half)
+    assert outcome.stdout_bytes == OUTPUT_CAP_BYTES
+    assert outcome.truncated is False
+
+
+def test_run_drops_a_provider_s_stdout_past_the_cap_and_writes_no_file(
+    tmp_path: Path, store: CredentialStore
+) -> None:
+    """Stdout past the cap is no result and no overflow file; its size is counted."""
+    overflow = tmp_path / "overflow"
+    overflow.mkdir()
+    client = _chunked_client(out=[b"x" * OUTPUT_CAP_BYTES, b"y", b"z" * 99], err=[b"e"])
+
+    outcome = _run(client, store, _cage_call(_PROVIDER, {}, overflow_dir=str(overflow)))
+
+    assert outcome.content == {"exit_code": 0, "stdout": None, "stderr": "e"}
+    assert outcome.stdout_bytes == OUTPUT_CAP_BYTES + 100
+    assert outcome.truncated is True
+    assert list(overflow.iterdir()) == []
+
+
+def test_run_cuts_a_provider_s_stderr_to_the_excerpt_and_counts_it_whole(
+    store: CredentialStore,
+) -> None:
+    """Stderr past the excerpt limit keeps its head; its size counts every byte."""
+    client = _chunked_client(out=[b"{}"], err=[b"e" * 700, b"f" * 700, b"g" * 700])
+
+    outcome = _run(client, store, _cage_call(_PROVIDER, {}))
+
+    assert outcome.content["stderr"] == ("e" * 700 + "f" * 700)[:STDERR_EXCERPT_LIMIT]
+    assert outcome.stderr_bytes == 2100
+    assert outcome.truncated is False
+
+
+def test_run_replaces_a_utf8_character_the_stderr_excerpt_cuts(
+    store: CredentialStore,
+) -> None:
+    """A two-byte character split by the excerpt's end decodes as a replacement."""
+    client = _client(err=b"e" * (STDERR_EXCERPT_LIMIT - 1) + "é".encode())
+
+    outcome = _run(client, store, _cage_call(_PROVIDER, {}))
+
+    assert outcome.content["stderr"] == "e" * (STDERR_EXCERPT_LIMIT - 1) + "�"
+
+
+def test_run_waits_at_most_a_provider_s_own_timeout_when_the_grant_sets_none(
+    store: CredentialStore,
+) -> None:
+    """With no grant timeout, a provider's wait is bounded by its manifest's."""
+    client = _client(out=b"{}")
+
+    _run(client, store, _cage_call(_PROVIDER, {}))
+
+    seconds = _container(client).wait.call_args.kwargs["timeout"]
+    assert 0 < seconds <= 10
+
+
+def test_run_waits_at_most_the_grant_s_timeout_for_a_provider_when_it_sets_one(
+    store: CredentialStore,
+) -> None:
+    """A grant timeout replaces a provider's manifest timeout."""
+    client = _client(out=b"{}")
+    grant = Grant.model_validate(
+        {"roots": [], "domains": [], "credentials": {}, "timeout": "300s"}
+    )
+
+    _run(client, store, _cage_call(_PROVIDER, {}, grant=grant))
+
+    seconds = _container(client).wait.call_args.kwargs["timeout"]
+    assert 10 < seconds <= 300
+
+
+@pytest.mark.parametrize("failing", ["stdout", "stderr"])
+def test_run_fails_a_provider_cage_whose_log_cannot_be_read(
+    store: CredentialStore, failing: str
+) -> None:
+    """A failed logs call fails the cage, naming the action and the stream."""
+    client = _client()
+
+    def logs(*, stdout: bool, stderr: bool, stream: bool) -> Iterator[bytes]:
+        if (stdout and failing == "stdout") or (stderr and failing == "stderr"):
+            raise docker.errors.APIError("logs failed")
+        return iter([b"{}"])
+
+    _container(client).logs.side_effect = logs
+
+    with pytest.raises(
+        CageFailedError, match=f"'issue': the cage's {failing} could not be read"
+    ):
+        _run(client, store, _cage_call(_PROVIDER, {}))
+
+    _container(client).remove.assert_called_once_with(force=True)
 
 
 def test_run_waits_at_most_the_action_s_timeout_when_the_grant_sets_none(

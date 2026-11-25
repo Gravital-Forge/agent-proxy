@@ -48,9 +48,17 @@ MANIFEST_ACTIONS = {
     "lfs_status",
     "lfs_fetch",
     "lfs_pull",
+    "clone",
 }
 REPO = Parameter(name="repo", placement="flag", flag="--repo")
 REPO_PROPERTY = {"type": "string", "pattern": "^/"}
+# The github plugin manifest's repo property: owner/name.
+GITHUB_REPO_PROPERTY = {
+    "type": "string",
+    "pattern": (
+        "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*$"
+    ),
+}
 REF = Parameter(name="ref", placement="positional", flag=None)
 REF_PROPERTY = {"type": "string", "minLength": 1}
 # Each read-only action's argv, and its parameters after repo.
@@ -226,10 +234,18 @@ SCRIPT_ACTIONS: dict[str, tuple[dict[str, dict[str, object]], set[str]]] = {
         {"repo": REPO_PROPERTY, "key": {"type": "string", "minLength": 1}},
         {"repo", "key"},
     ),
+    "clone": (
+        {
+            "repo": GITHUB_REPO_PROPERTY,
+            "path": {"type": "string", "minLength": 1, "pattern": "^/"},
+        },
+        {"repo", "path"},
+    ),
 }
 # A script action's credentials and timeout, where they are not none and a minute.
 SCRIPT_LIMITS: dict[str, tuple[tuple[EnvMount, ...], timedelta]] = {
     "push": ((GH_TOKEN,), timedelta(minutes=11)),
+    "clone": ((GH_TOKEN,), timedelta(minutes=10)),
 }
 
 
@@ -327,12 +343,19 @@ def test_every_command_action_passes_repo_first_as_a_flag(manifest: Manifest) ->
 
 
 def test_every_action_requires_repo_as_an_absolute_path(manifest: Manifest) -> None:
-    """Every action requires repo, a string that begins with '/'."""
+    """Every action but clone requires repo, a string that begins with '/'.
+
+    clone's repo names a GitHub repository; test_script_action_states_its_input
+    states it.
+    """
     offenders = [
         name
         for name, action in manifest.actions.items()
-        if _properties(action).get("repo") != REPO_PROPERTY
-        or "repo" not in _required(action)
+        if name != "clone"
+        and (
+            _properties(action).get("repo") != REPO_PROPERTY
+            or "repo" not in _required(action)
+        )
     ]
 
     assert offenders == []
@@ -569,6 +592,14 @@ def test_script_action_states_its_input(manifest: Manifest, name: str) -> None:
         ("worktree", {"action": "add", "path": "/wt", "branch": "-b"}),
         ("worktree", {"action": "add", "path": "/wt", "branch": "--detach"}),
         ("worktree", {"action": "add", "path": "/wt", "create_branch": "no"}),
+        ("clone", {"path": "/w"}),
+        ("clone", {"repo": "octo/hello"}),
+        ("clone", {"repo": "octo", "path": "/w"}),
+        ("clone", {"repo": "-octo/hello", "path": "/w"}),
+        ("clone", {"repo": "octo/..", "path": "/w"}),
+        ("clone", {"repo": "octo/hello/x", "path": "/w"}),
+        ("clone", {"repo": "octo/hello", "path": "w"}),
+        ("clone", {"repo": "octo/hello", "path": "/w", "depth": 1}),
     ],
 )
 def test_script_action_refuses_an_input_outside_its_schema(
@@ -591,6 +622,7 @@ def test_script_action_refuses_an_input_outside_its_schema(
         ("commit", {"message": "m"}),
         ("push", {}),
         ("checkout", {"target": "task/c", "create": True}),
+        ("clone", {"repo": "octo-org/hello.world_2", "path": "/w"}),
         ("worktree", {"action": "list"}),
         ("worktree", {"action": "remove", "path": "/wt"}),
         (
@@ -612,7 +644,7 @@ def test_script_action_accepts_an_input_inside_its_schema(
 
 
 def test_manifest_declares_every_action(manifest: Manifest) -> None:
-    """The manifest declares the 29 git actions and no other."""
+    """The manifest declares the 30 git actions and no other."""
     assert set(manifest.actions) == MANIFEST_ACTIONS
 
 

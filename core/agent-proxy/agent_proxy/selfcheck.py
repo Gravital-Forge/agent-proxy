@@ -1,7 +1,7 @@
 """The self-check: one scope's local wiring, checked against the config in force."""
 
 import dataclasses
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator, Mapping, Set
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import timedelta
@@ -10,7 +10,7 @@ from typing import Literal
 
 from docker import DockerClient
 
-from agent_proxy.config import Grant, InstanceConfig, Root
+from agent_proxy.config import Grant, InstanceConfig, ProvidedCredential, Root
 from agent_proxy.credentials import CredentialStore, unset_message
 from agent_proxy.egress import (
     CageNetwork,
@@ -89,26 +89,36 @@ class SelfCheck:
         """Return the report of scope_name, a scope snapshot.config defines.
 
         Each kind's subjects come once each, in the order the scope's grants
-        first name them. A failed check is an entry, never an error.
+        first name them. A provided credential the grants name is checked by
+        its provider's stored inputs, and its provider's domain list follows
+        the grants' lists; no provider runs. A failed check is an entry,
+        never an error.
         """
         config = snapshot.config
         grants = config.scopes[scope_name].grants
+        provided = _named_provided(config, grants)
         checks = (
-            *self._credential_checks(grants),
+            *self._credential_checks(grants, provided),
             *_root_checks(grants),
             _overflow_dir_check(config.overflow_dir),
-            *self._egress_checks(grants),
+            *self._egress_checks(grants, provided),
             *self._plugin_checks(config, grants),
         )
         return CheckReport(scope=scope_name, checks=checks)
 
-    def _credential_checks(self, grants: Mapping[str, Grant]) -> Iterator[CheckEntry]:
+    def _credential_checks(
+        self,
+        grants: Mapping[str, Grant],
+        provided: Mapping[str, ProvidedCredential],
+    ) -> Iterator[CheckEntry]:
         names = dict.fromkeys(
             name for grant in grants.values() for name in grant.credentials
         )
         stored = self._credentials.names()
         for name in names:
-            if name in stored:
+            if name in provided:
+                yield _provided_check(name, provided[name], stored)
+            elif name in stored:
                 yield CheckEntry(
                     check="credential", subject=name, ok=True, detail="stored"
                 )
@@ -120,10 +130,16 @@ class SelfCheck:
                     detail=unset_message(name),
                 )
 
-    def _egress_checks(self, grants: Mapping[str, Grant]) -> Iterator[CheckEntry]:
-        lists = dict.fromkeys(
-            tuple(sorted(grant.domains)) for grant in grants.values() if grant.domains
+    def _egress_checks(
+        self,
+        grants: Mapping[str, Grant],
+        provided: Mapping[str, ProvidedCredential],
+    ) -> Iterator[CheckEntry]:
+        named = (
+            *(grant.domains for grant in grants.values()),
+            *(entry.domains for entry in provided.values()),
         )
+        lists = dict.fromkeys(tuple(sorted(domains)) for domains in named if domains)
         for domains in lists:
             yield self._egress_check(domains)
 
@@ -188,6 +204,41 @@ class SelfCheck:
             ok=True,
             detail="describe ran in a cage and exited 0",
         )
+
+
+def _named_provided(
+    config: InstanceConfig, grants: Mapping[str, Grant]
+) -> dict[str, ProvidedCredential]:
+    """Return each provided credential grants name, in the order first named."""
+    return {
+        name: config.provided_credentials[name]
+        for grant in grants.values()
+        for name in grant.credentials
+        if name in config.provided_credentials
+    }
+
+
+def _provided_check(
+    name: str, entry: ProvidedCredential, stored: Set[str]
+) -> CheckEntry:
+    """Check that every stored credential name's provider takes is stored."""
+    missing = [
+        unset_message(taken) for taken in entry.credentials if taken not in stored
+    ]
+    if missing:
+        return CheckEntry(
+            check="credential",
+            subject=name,
+            ok=False,
+            detail="; ".join((f"provided by {entry.provider!r}", *missing)),
+        )
+    return CheckEntry(
+        check="credential",
+        subject=name,
+        ok=True,
+        detail=f"provided by {entry.provider!r}; every stored credential it takes"
+        " is stored",
+    )
 
 
 def _root_checks(grants: Mapping[str, Grant]) -> Iterator[CheckEntry]:

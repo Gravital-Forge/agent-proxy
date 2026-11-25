@@ -1,5 +1,6 @@
 """What the git plugin's integration tests share with their fixtures."""
 
+import hashlib
 import os
 import shlex
 import subprocess
@@ -58,6 +59,23 @@ class RemotePair:
     remote: Path
     work: Path
     peer: Path
+
+
+@dataclass(frozen=True)
+class GitHubRemote:
+    """The bare repository a git server serves, and the LFS pointer it commits."""
+
+    repository: Path
+    pointer: str
+
+
+def lfs_pointer(content: bytes) -> str:
+    """Return the text of git LFS's pointer to content."""
+    return (
+        "version https://git-lfs.github.com/spec/v1\n"
+        f"oid sha256:{hashlib.sha256(content).hexdigest()}\n"
+        f"size {len(content)}\n"
+    )
 
 
 def host_git(repo: Path, *args: str) -> str:

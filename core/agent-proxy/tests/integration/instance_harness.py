@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import json
 import socket
 import subprocess
 import time
@@ -13,6 +14,7 @@ import pytest
 from conftest import remove_bridge
 from docker import DockerClient
 from fastmcp import Client
+from fastmcp.client.client import CallToolResult
 from fastmcp.client.transports import StreamableHttpTransport
 
 START_SCRIPT = Path(__file__).parents[3] / "docker" / "start-instance.sh"
@@ -22,7 +24,9 @@ UNMINTED_TOKEN = "apx_" + "x" * 43
 SERVE_SECONDS = 60
 SERVE_POLL_SECONDS = 0.5
 CLIENT_TIMEOUT_SECONDS = 5
+CALL_TIMEOUT_SECONDS = 120
 LOG_TAIL_LINES = 50
+AUDIT_LINES = "50"
 
 
 def free_port() -> int:
@@ -86,6 +90,47 @@ def docker_exec(
         text=True,
         check=False,
     )
+
+
+def exec_ok(name: str, command: Sequence[str], stdin: str | None = None) -> str:
+    """Return the stdout of command in container name, which must exit 0."""
+    completed = docker_exec(name, command, stdin)
+    assert completed.returncode == 0, completed.stderr
+    return completed.stdout
+
+
+def call_tool(
+    url: str, token: str, tool: str, arguments: dict[str, object]
+) -> CallToolResult:
+    """Call tool with arguments as token, after listing the tools."""
+
+    async def calling() -> CallToolResult:
+        transport = StreamableHttpTransport(url, auth=token)
+        async with Client(transport, timeout=CALL_TIMEOUT_SECONDS) as client:
+            await client.list_tools()
+            return await client.call_tool(tool, arguments, raise_on_error=False)
+
+    return asyncio.run(calling())
+
+
+def tool_content(result: CallToolResult) -> dict[str, object]:
+    """Return the structured content of a result that is not an error result."""
+    assert result.is_error is False, result.content
+    assert result.structured_content is not None, result.content
+    return result.structured_content
+
+
+def tool_refusal(result: CallToolResult) -> str:
+    """Return the text of an error result."""
+    assert result.is_error is True, result.content
+    [text] = result.content
+    return text.text
+
+
+def read_audit_lines(name: str) -> list[dict[str, object]]:
+    """Return the last AUDIT_LINES audit lines of instance name, oldest first."""
+    tailed = exec_ok(name, ["agent-proxy", "audit", "tail", "-n", AUDIT_LINES])
+    return [json.loads(line) for line in tailed.splitlines()]
 
 
 @contextlib.contextmanager

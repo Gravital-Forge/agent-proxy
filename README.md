@@ -72,6 +72,7 @@ Each plugin is an image whose actions run in a cage. The repository holds these 
 | [git](plugins/git/README.md)                     | git and git LFS                               |
 | [github](plugins/github/README.md)               | gh, the GitHub CLI                            |
 | [hcp-terraform](plugins/hcp-terraform/README.md) | Scripts that read HCP Terraform runs and logs |
+| [github-app](plugins/github-app/README.md)       | A provider of GitHub App installation tokens  |
 
 [Writing a plugin](docs/writing-a-plugin.md) tells a plugin author how to add one.
 

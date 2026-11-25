@@ -1,0 +1,12 @@
+#!/bin/sh
+# A provider: it issues the seed credential's content as the value, which
+# expires ISSUE_LIFETIME_SECONDS from now.
+set -eu
+if [ -n "${ISSUE_FAIL:-}" ]; then
+    echo "issue-value: ISSUE_FAIL is set, so no value is issued" >&2
+    exit 4
+fi
+value=$(cat /run/credentials/seed)
+expiry=$(($(date +%s) + ISSUE_LIFETIME_SECONDS))
+expires_at=$(date -u -d "@$expiry" +%Y-%m-%dT%H:%M:%SZ)
+printf '{"value": "%s", "expires_at": "%s"}\n' "$value" "$expires_at"

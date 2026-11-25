@@ -279,3 +279,51 @@ README.
        owning group's entry with `setfacl -m g::<group permissions> <home>`.
 
     The check passes when each output is as given.
+
+14. **A provided token from a real GitHub App.** This check shows that the github-app provider mints
+    an installation token from a real App, that a call's cage receives it, and that a second call
+    takes it from the cache. Take a GitHub App installed on an account, its private key file,
+    `<key file>` below, its App ID, and the installation's ID. Take a private repository that the
+    installation reaches with read access to its contents, `<repo>` below, as `owner/name`, and a
+    checkout of it below the tree whose `origin` is that repository.
+
+    Store the key as the credential `github-app-key`, as
+    [The first start](deployment.md#the-first-start) gives. In the config, pin the github-app
+    plugin's image, and give a `provided_credentials` entry shaped like the one in
+    `examples/instance.yaml`, with the App's ID and the installation's ID.
+    [A provided credential](../plugins/github-app/README.md#a-provided-credential) gives the entry.
+    Give a `git.fetch` grant whose `roots` name the checkout with mode `rw`, whose `domains` name
+    `github.com`, whose `credentials` give that provided credential as `GH_TOKEN`, and whose
+    `GITHUB_REPOS` names `<repo>`. Put the config in force as
+    [Changing the config](deployment.md#changing-the-config) gives.
+
+    1. Run `docker exec agent-proxy agent-proxy check`. The `credential` row of the provided
+       credential passes, and its detail begins `provided by 'github-app.installation_token'`.
+    2. Through the agent's MCP client, call `git_fetch` on the checkout. The result's `exit_code` is
+       0.
+    3. Run `docker exec agent-proxy agent-proxy audit tail -n 2`. The first line's `action` is
+       `github-app_installation_token`, its `credential` names the provided credential, its
+       `exit_code` is 0, and its `refusal` is `null`. The second line's `action` is `git_fetch`.
+    4. Call `git_fetch` on the checkout again. The result's `exit_code` is 0. Run
+       `docker exec agent-proxy agent-proxy audit tail -n 2` again. Its last line is the new
+       `git_fetch` line, and the line before it is the first `git_fetch` line, so no provider ran.
+
+    The check passes when each result is as given.
+
+15. **A clone of a private repository with a provided token.** This check shows that the git
+    plugin's `clone` makes a working checkout of a private repository with the token of check 14,
+    and that later git actions accept that checkout. Take the config of check 14, and as the agent,
+    make an empty directory below the tree, `<clone dir>` below. Give a `git.clone` grant shaped
+    like the one in `examples/instance.yaml`, whose `roots` name `<clone dir>` with mode `rw` and
+    whose `GITHUB_REPOS` names `<repo>`, as [`clone`](../plugins/git/README.md#clone) gives. Give a
+    `git.status` grant whose `roots` name `<clone dir>` with mode `rw`. Put the config in force as
+    [Changing the config](deployment.md#changing-the-config) gives.
+
+    1. Through the agent's MCP client, call `git_clone` with `repo` set to `<repo>` and `path` set
+       to `<clone dir>`. The result's `exit_code` is 0.
+    2. Call `git_status` with `repo` set to `<clone dir>`. The result's `exit_code` is 0, and its
+       `stdout` says the branch is the repository's default branch and is up to date with origin's
+       branch of that name.
+
+    The check passes when each result is as given. Afterwards, remove `<clone dir>`, as the agent,
+    with `rm -rf <clone dir>`.

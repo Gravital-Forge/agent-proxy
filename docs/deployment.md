@@ -78,6 +78,10 @@ Copy `examples/instance.yaml`, and edit the copy:
    its grants need: [git](../plugins/git/README.md#a-grant),
    [github](../plugins/github/README.md#a-grant), and
    [hcp-terraform](../plugins/hcp-terraform/README.md#a-grant).
+5. Under `provided_credentials`, give each credential that a provider fetches in place of a stored
+   value, and name it in the grants that use it. The github-app plugin's
+   [A provided credential](../plugins/github-app/README.md#a-provided-credential) gives an entry
+   that mints GitHub App installation tokens. Leave the section out when no grant needs one.
 
 The reference gives every field and every rule a config must satisfy under
 [The config file](reference.md#the-config-file).
@@ -91,7 +95,7 @@ sudo core/docker/provision-instance.sh [--release <version>] [--tree <path>] age
 ```
 
 `<port>` is the loopback port the instance serves on, and `<config-file>` is the config to install.
-The config may name credentials that the operator has not stored yet;
+The config may name stored credentials that are not in the store yet;
 [The first start](#the-first-start) stores them.
 
 The options come before the positional arguments, in any order:
@@ -231,13 +235,13 @@ These phrases stand for the way the script reaches the service user and the agen
 ## The first start
 
 Provision with the full config. The instance starts even though its credential store is still empty.
-It logs one warning for each credential that a grant names and the store lacks, and each warning
-gives the command that the operator stores the credential with. It also warns when the service
-user's daemon cannot enforce a cage's memory or process limit, as
+It logs one warning for each stored credential that a grant or a provided credential names and the
+store lacks, and each warning gives the command that the operator stores the credential with. It
+also warns when the service user's daemon cannot enforce a cage's memory or process limit, as
 [Failures and warnings](reference.md#failures-and-warnings) gives. `docker logs agent-proxy` shows
 the warnings. Then:
 
-1. Store each credential the config names. The command reads the value from stdin:
+1. Store each stored credential the config names. The command reads the value from stdin:
 
    ```sh
    docker exec -i agent-proxy agent-proxy credential set <name>
@@ -246,6 +250,15 @@ the warnings. Then:
    [Credentials](architecture.md#credentials) gives when a stored credential takes effect. Until the
    operator stores it, a call under a grant that names it is refused, and the refusal gives the
    warning's text.
+
+   A provided credential is never stored. Store each stored credential its entry names instead, such
+   as a GitHub App's private key, which the command takes from a file the same way:
+
+   ```sh
+   docker exec -i agent-proxy agent-proxy credential set github-app-key < <key file>
+   ```
+
+   The provider runs on the first call that needs its value, not at start.
 2. Mint a token for the agent with
    `docker exec agent-proxy agent-proxy token mint --name <name> --scope <scope>`. The token prints
    once; give it to the agent's MCP client. The `token mint` verb under [Verbs](reference.md#verbs)
@@ -258,9 +271,9 @@ The reference gives every verb under [The operator command](reference.md#the-ope
 
 Run the self-check on every scope with `docker exec agent-proxy agent-proxy check`. Add
 `--scope <scope>` to check one scope. Each row is one check, and a `fail` row's detail says what is
-wrong, such as a credential that is not stored, a root that the instance cannot open, or an egress
-proxy that does not run. Fix each one, then run the check again, until every row passes. The agent
-can run the same check on its own scope through the tool `agent-proxy_self_check`.
+wrong, such as a stored credential that is not in the store, a root that the instance cannot open,
+or an egress proxy that does not run. Fix each one, then run the check again, until every row
+passes. The agent can run the same check on its own scope through the tool `agent-proxy_self_check`.
 
 The reference gives the rows and the exit status under the `check` verb of
 [The operator command](reference.md#the-operator-command), and the report under

@@ -233,7 +233,11 @@ def _mint_token(args: argparse.Namespace) -> None:
             f" defined scopes are {sorted(config.scopes)!r}"
         )
     _report_warnings(
-        unset_warnings(config.scopes.values(), _credential_store().names())
+        unset_warnings(
+            config.scopes.values(),
+            config.provided_credentials,
+            _credential_store().names(),
+        )
     )
     print(_token_store().mint(args.name, args.scope, expires_in))
 

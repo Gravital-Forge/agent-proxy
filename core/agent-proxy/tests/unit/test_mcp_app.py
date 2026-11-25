@@ -26,6 +26,7 @@ from agent_proxy.config import InstanceConfig
 from agent_proxy.errors import ProxyError
 from agent_proxy.mcp import REFUSAL_PREFIX, CallGateway, build_app
 from agent_proxy.plugins import Manifest, parse_manifest
+from agent_proxy.providers import ProvidedCredentials
 from agent_proxy.reload import LiveConfig, Snapshot
 from agent_proxy.runner import CageCall, CageTimeoutError, InputError, Outcome
 from agent_proxy.selfcheck import SELF_CHECK_TOOL, CheckEntry, CheckReport
@@ -211,6 +212,7 @@ def served(tmp_path: Path) -> Iterator[Served]:
         store,
         LiveConfig(SNAPSHOT, RecordingEgress()),
         runner,
+        ProvidedCredentials(runner, audit, lambda: datetime.now(UTC)),
         FakeSelfCheck(),
         audit,
         lambda: datetime.now(UTC),
