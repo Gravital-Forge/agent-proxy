@@ -190,6 +190,11 @@ class AuditWriter:
             self._latched = True
 
 
+def audit_refusal(call_id: str) -> str:
+    """Return the refusal of call call_id, whose audit line could not be written."""
+    return f"the audit log could not record call {call_id}, so its result is withheld"
+
+
 def tail(directory: Path, count: int) -> list[str]:
     """Return the last count audit lines in write order.
 

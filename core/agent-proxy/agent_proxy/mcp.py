@@ -24,7 +24,7 @@ from fastmcp.utilities.versions import VersionSpec
 from pydantic import PrivateAttr
 
 from agent_proxy import plugins
-from agent_proxy.audit import AuditError, AuditRecord, AuditWriter
+from agent_proxy.audit import AuditError, AuditRecord, AuditWriter, audit_refusal
 from agent_proxy.auth import TokenRecord, TokenStore, TokenStoreError
 from agent_proxy.credentials import CredentialStore
 from agent_proxy.egress import EgressProxies, cage_network
@@ -221,7 +221,7 @@ class CallGateway:
         """
         call = self._start(tool, arguments)
         if not self._audit.available:
-            raise CallRefusedError(_audit_refusal(call.call_id))
+            raise CallRefusedError(audit_refusal(call.call_id))
         try:
             token = self._authenticate(authorization)
         except CallRefusedError as error:
@@ -424,7 +424,7 @@ class CallGateway:
         try:
             self._audit.write(line)
         except AuditError as error:
-            raise CallRefusedError(_audit_refusal(line.call_id)) from error
+            raise CallRefusedError(audit_refusal(line.call_id)) from error
 
     def _write_ran(self, line: AuditRecord) -> None:
         """Write the line of a call whose cage ran to the audit log.
@@ -447,10 +447,6 @@ def _bearer_token(authorization: str | None) -> str | None:
     if not space or scheme.lower() != _BEARER_SCHEME:
         return None
     return token
-
-
-def _audit_refusal(call_id: str) -> str:
-    return f"the audit log could not record call {call_id}, so its result is withheld"
 
 
 def _ran_audit_refusal(call_id: str) -> str:

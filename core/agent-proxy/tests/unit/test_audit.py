@@ -19,6 +19,7 @@ from agent_proxy.audit import (
     AuditError,
     AuditRecord,
     AuditWriter,
+    audit_refusal,
     tail,
 )
 
@@ -83,6 +84,13 @@ def _log_lines(directory: Path) -> list[str]:
 
 def _call_ids(lines: list[str]) -> list[str]:
     return [json.loads(line)["call_id"] for line in lines]
+
+
+def test_the_audit_refusal_names_the_call_and_withholds_its_result() -> None:
+    """The gateway and the provider cache refuse an unwritten line in one text."""
+    assert audit_refusal("0" * 32) == (
+        f"the audit log could not record call {'0' * 32}, so its result is withheld"
+    )
 
 
 def test_each_line_is_json_with_exactly_the_fourteen_keys(directory: Path) -> None:
