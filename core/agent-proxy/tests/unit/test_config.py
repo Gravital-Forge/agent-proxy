@@ -14,6 +14,7 @@ from agent_proxy.config import (
     EnvMount,
     FileMount,
     InstanceConfig,
+    ProvidedCredential,
     Root,
     load_config,
 )
@@ -754,3 +755,245 @@ def test_load_config_accepts_a_plugin_name_that_extends_the_reserved_one(
     document = _config(plugins={"git": IMAGE, "agent-proxy-x": IMAGE})
 
     assert set(_load(tmp_path, document).plugins) == {"git", "agent-proxy-x"}
+
+
+APP_IMAGE = "ghcr.io/example/github-app@sha256:" + "b" * 64
+PROVIDED = "provided_credentials.app-token"
+FILE_PATH = "/run/credentials/t"
+
+
+def _provided(**overrides: object) -> dict[str, object]:
+    """Return a valid provided credential with overrides applied; OMIT drops a field."""
+    fields: dict[str, object] = {
+        "provider": "github-app.installation_token",
+        "credentials": {"app-key": {"file": "/run/credentials/github-app-key"}},
+        "env": {"GITHUB_APP_ID": "1", "GITHUB_INSTALLATION_ID": "2"},
+        "domains": ["api.github.com"],
+        "refresh_before": "10m",
+    } | overrides
+    return {key: value for key, value in fields.items() if value is not OMIT}
+
+
+def _with_provided(
+    grants: dict[str, object] | None = None, **overrides: object
+) -> dict[str, object]:
+    """Return a valid config with one provided credential, app-token."""
+    return _config(
+        plugins={"git": IMAGE, "github-app": APP_IMAGE},
+        provided_credentials={"app-token": _provided(**overrides)},
+        **({} if grants is None else {"scopes": _scopes(grants)}),
+    )
+
+
+def _errors(tmp_path: Path, *messages: str) -> tuple[str, ...]:
+    """Return messages as load_config prefixes them with the file."""
+    source = f"config file {str(tmp_path / 'config.yaml')!r}"
+    return tuple(f"{source}: {message}" for message in messages)
+
+
+def test_load_config_returns_a_provided_credential(tmp_path: Path) -> None:
+    """An entry loads with its fields, refresh_before parsed, and no max_age."""
+    config = _load(tmp_path, _with_provided())
+
+    (entry,) = config.provided_credentials.values()
+    assert isinstance(entry, ProvidedCredential)
+    assert set(config.provided_credentials) == {"app-token"}
+    assert entry.provider == "github-app.installation_token"
+    assert entry.credentials == {
+        "app-key": FileMount(file="/run/credentials/github-app-key")
+    }
+    assert entry.env == {"GITHUB_APP_ID": "1", "GITHUB_INSTALLATION_ID": "2"}
+    assert entry.domains == ["api.github.com"]
+    assert entry.refresh_before == timedelta(minutes=10)
+    assert entry.max_age is None
+    assert entry.timeout is None
+
+
+def test_load_config_parses_a_provided_credential_s_max_age_and_timeout(
+    tmp_path: Path,
+) -> None:
+    """max_age and timeout load as durations."""
+    config = _load(tmp_path, _with_provided(max_age="1h", timeout="30s"))
+
+    entry = config.provided_credentials["app-token"]
+    assert entry.max_age == timedelta(hours=1)
+    assert entry.timeout == timedelta(seconds=30)
+
+
+def test_load_config_leaves_provided_credentials_empty_when_omitted(
+    tmp_path: Path,
+) -> None:
+    """A config without provided_credentials loads with none."""
+    assert _load(tmp_path, _config()).provided_credentials == {}
+
+
+def test_load_config_leaves_a_provided_credential_s_omitted_env_empty(
+    tmp_path: Path,
+) -> None:
+    """An entry without env loads with an empty env."""
+    config = _load(tmp_path, _with_provided(env=OMIT))
+
+    assert config.provided_credentials["app-token"].env == {}
+
+
+def test_load_config_accepts_a_grant_passing_a_provided_credential_as_env(
+    tmp_path: Path,
+) -> None:
+    """A grant names a provided credential as it names a stored one."""
+    grant = _grant(credentials={"app-token": {"env": "GH_TOKEN"}})
+
+    config = _load(tmp_path, _with_provided({"git.clone": grant}))
+
+    assert config.scopes["dev"].grants["git.clone"].credentials == {
+        "app-token": EnvMount(env="GH_TOKEN")
+    }
+
+
+PROVIDED_REFUSALS = [
+    pytest.param(
+        _with_provided(retries=3),
+        f"{PROVIDED}.retries: Extra inputs are not permitted, got 3",
+        id="unknown-field",
+    ),
+    *(
+        pytest.param(
+            _with_provided(**{field: OMIT}),
+            f"{PROVIDED}.{field}: Field required",
+            id=f"{field}-required",
+        )
+        for field in ("provider", "credentials", "domains", "refresh_before")
+    ),
+    pytest.param(
+        _config(provided_credentials={"App": _provided()}),
+        "provided_credentials.App.[key]: String should match pattern "
+        "'^[a-z0-9][a-z0-9-]{0,63}$', got 'App'",
+        id="name-pattern",
+    ),
+    pytest.param(
+        _with_provided(provider="github-app"),
+        f"{PROVIDED}.provider: String should match pattern "
+        f"'{GRANT_KEY_PATTERN}', got 'github-app'",
+        id="provider-not-a-key",
+    ),
+    pytest.param(
+        _config(provided_credentials={"app-token": _provided()}),
+        f"{PROVIDED}.provider: plugin 'github-app' is not in plugins",
+        id="provider-plugin-not-in-plugins",
+    ),
+    pytest.param(
+        _with_provided(refresh_before=600),
+        f"{PROVIDED}.refresh_before: refresh_before must be a duration string "
+        "such as '120s', got 600",
+        id="refresh-before-integer",
+    ),
+    pytest.param(
+        _with_provided(refresh_before="0m"),
+        f"{PROVIDED}.refresh_before: duration must match "
+        "'^[1-9][0-9]*[smhd]$', got '0m'",
+        id="refresh-before-zero",
+    ),
+    pytest.param(
+        _with_provided(max_age="10m"),
+        f"{PROVIDED}.max_age must be longer than refresh_before 0:10:00, got 0:10:00",
+        id="max-age-equal-to-refresh-before",
+    ),
+    pytest.param(
+        _with_provided(max_age="5m"),
+        f"{PROVIDED}.max_age must be longer than refresh_before 0:10:00, got 0:05:00",
+        id="max-age-shorter-than-refresh-before",
+    ),
+    pytest.param(
+        _with_provided(timeout=30),
+        f"{PROVIDED}.timeout: timeout must be a duration string such as '120s', got 30",
+        id="timeout-integer",
+    ),
+    pytest.param(
+        _with_provided(credentials={"app-key": {"file": "/etc/github-app-key"}}),
+        f"{PROVIDED}.credentials.app-key.file must be an absolute path beneath "
+        "'/run/credentials/' with no '..' segment, got '/etc/github-app-key'",
+        id="file-outside-run-credentials",
+    ),
+    pytest.param(
+        _with_provided(
+            credentials={"app-id": {"env": "KEY"}, "app-key": {"env": "KEY"}},
+        ),
+        f"{PROVIDED}.credentials: 'app-id' and 'app-key' share env 'KEY'",
+        id="credentials-share-env",
+    ),
+    pytest.param(
+        _with_provided(credentials={"app-key": {"env": "HTTPS_PROXY"}}),
+        f"{PROVIDED}.credentials.app-key.env must not be 'HTTPS_PROXY', "
+        "which the egress proxy sets",
+        id="credential-env-reserved",
+    ),
+    pytest.param(
+        _with_provided(env={"AGENT_PROXY_ROOTS": "[]"}),
+        f"{PROVIDED}.env must not name 'AGENT_PROXY_ROOTS', which the core sets",
+        id="env-reserved",
+    ),
+    pytest.param(
+        _with_provided(
+            credentials={"app-key": {"env": "APP_KEY"}}, env={"APP_KEY": "x"}
+        ),
+        f"{PROVIDED}.env must not name 'APP_KEY', which credential 'app-key' takes",
+        id="env-names-a-credential-env",
+    ),
+    pytest.param(
+        _with_provided(env={"GITHUB_APP_ID": "1\x002"}),
+        f"{PROVIDED}.env.GITHUB_APP_ID must not hold a NUL",
+        id="env-value-nul",
+    ),
+    pytest.param(
+        _with_provided(domains=["api.github.com", "api.github.com"]),
+        f"{PROVIDED}.domains: 'api.github.com' is named more than once",
+        id="domain-named-twice",
+    ),
+    pytest.param(
+        _config(
+            plugins={"git": IMAGE, "github-app": APP_IMAGE},
+            provided_credentials={
+                "app-token": _provided(),
+                "other-token": _provided(
+                    credentials={"app-token": {"env": "GH_TOKEN"}}
+                ),
+            },
+        ),
+        "provided_credentials.other-token.credentials.app-token: a provider takes "
+        "only stored credentials, got provided credential 'app-token'",
+        id="input-is-a-provided-credential",
+    ),
+    pytest.param(
+        _with_provided(
+            {"git.clone": _grant(credentials={"app-token": {"file": FILE_PATH}})}
+        ),
+        "scopes.dev.grants.git.clone.credentials.app-token: provided credential "
+        "'app-token' must reach a cage as env, got file '/run/credentials/t'",
+        id="grant-passes-a-provided-credential-as-a-file",
+    ),
+]
+
+
+@pytest.mark.parametrize(("document", "expected"), PROVIDED_REFUSALS)
+def test_load_config_refuses_a_bad_provided_credential(
+    tmp_path: Path, document: object, expected: str
+) -> None:
+    """Each broken provided-credential rule is one failure, naming its location."""
+    assert _refusal(tmp_path, document).errors == _errors(tmp_path, expected)
+
+
+def test_load_config_reports_every_provided_credential_failure_together(
+    tmp_path: Path,
+) -> None:
+    """An unknown provider plugin, a short max_age, and a repeated domain all fail."""
+    document = _config(
+        provided_credentials={
+            "app-token": _provided(max_age="1m", domains=["a.io", "a.io"])
+        }
+    )
+
+    assert _refusal(tmp_path, document).errors == _errors(
+        tmp_path,
+        f"{PROVIDED}.provider: plugin 'github-app' is not in plugins",
+        f"{PROVIDED}.domains: 'a.io' is named more than once",
+        f"{PROVIDED}.max_age must be longer than refresh_before 0:10:00, got 0:01:00",
+    )

@@ -23,6 +23,7 @@ from agent_proxy.plugins import (
     Manifest,
     ManifestError,
     Parameter,
+    ProviderAction,
     ScriptAction,
     parse_manifest,
     schema_validator,
@@ -31,6 +32,7 @@ from agent_proxy.plugins import (
 OMIT = object()
 ECHO = "$.actions.echo"
 REPORT = "$.actions.report"
+ISSUE = "$.actions.issue"
 ECHO_PROPERTIES = {"loud": {"type": "boolean"}, "message": {"type": "string"}}
 ECHO_INPUT_SCHEMA = {
     "type": "object",
@@ -61,6 +63,7 @@ SCRIPT_MEMBERS = (
     "executable",
     "output_schema",
 )
+PROVIDER_MEMBERS = ("credentials", "timeout", "executable")
 
 
 def _command(**overrides: object) -> dict[str, object]:
@@ -90,6 +93,17 @@ def _script(**overrides: object) -> dict[str, object]:
     return {key: value for key, value in members.items() if value is not OMIT}
 
 
+def _provider(**overrides: object) -> dict[str, object]:
+    """Return a valid provider action with overrides applied; OMIT drops a member."""
+    members: dict[str, object] = {
+        "kind": "provider",
+        "credentials": [{"file": "/run/credentials/app-key"}],
+        "timeout": "30s",
+        "executable": "/plugin/bin/issue",
+    } | overrides
+    return {key: value for key, value in members.items() if value is not OMIT}
+
+
 def _echo_input(**properties: object) -> dict[str, object]:
     """Return echo's input schema with properties added or replaced."""
     return ECHO_INPUT_SCHEMA | {"properties": ECHO_PROPERTIES | properties}
@@ -112,6 +126,11 @@ def _echo(**overrides: object) -> dict[str, object]:
 def _report(**overrides: object) -> dict[str, object]:
     """Return a manifest whose one action, report, is a script action."""
     return {"actions": {"report": _script(**overrides)}}
+
+
+def _issue(**overrides: object) -> dict[str, object]:
+    """Return a manifest whose one action, issue, is a provider action."""
+    return {"actions": {"issue": _provider(**overrides)}}
 
 
 def _encode(document: object) -> bytes:
@@ -200,6 +219,36 @@ def test_parse_manifest_returns_each_action_as_a_typed_object() -> None:
     )
 
 
+def test_parse_manifest_returns_a_provider_action_as_a_typed_object() -> None:
+    """A provider action parses to its name, credentials, timeout, and executable."""
+    manifest = parse_manifest(_encode(_issue(credentials=[{"env": "VAULT_TOKEN"}])))
+
+    assert manifest == Manifest(
+        actions={
+            "issue": ProviderAction(
+                name="issue",
+                credentials=(EnvMount(env="VAULT_TOKEN"),),
+                timeout=timedelta(seconds=30),
+                executable="/plugin/bin/issue",
+            )
+        }
+    )
+
+
+def test_manifest_tools_hold_every_action_but_the_providers() -> None:
+    """The tools map each command and script action by name, and no provider."""
+    document = {
+        "actions": {"echo": _command(), "issue": _provider(), "report": _script()}
+    }
+
+    manifest = parse_manifest(_encode(document))
+
+    assert dict(manifest.tools) == {
+        "echo": manifest.actions["echo"],
+        "report": manifest.actions["report"],
+    }
+
+
 def test_parsed_manifest_is_frozen() -> None:
     """Neither the manifest nor an action it holds takes a new field value."""
     manifest = parse_manifest(_encode(_echo()))
@@ -244,8 +293,46 @@ SCHEMA_RULE_CASES = [
     ),
     pytest.param(
         _echo(kind="shell"),
-        f"{ECHO}.kind: 'shell' is not one of ['command', 'script']",
+        f"{ECHO}.kind: 'shell' is not one of ['command', 'script', 'provider']",
         id="kind-value",
+    ),
+    *(
+        pytest.param(
+            _issue(**{member: OMIT}),
+            f"{ISSUE}: {member!r} is a required property",
+            id=f"provider-{member}-required",
+        )
+        for member in PROVIDER_MEMBERS
+    ),
+    *(
+        pytest.param(
+            _issue(**{member: value}),
+            f"{ISSUE}: Additional properties are not allowed"
+            f" ({member!r} was unexpected)",
+            id=f"provider-forbids-{member}",
+        )
+        for member, value in (
+            ("input_schema", {"type": "object"}),
+            ("output_schema", {"type": "object"}),
+            ("argv", ["issue"]),
+            ("retries", 3),
+        )
+    ),
+    pytest.param(
+        _issue(executable="issue"),
+        f"{ISSUE}.executable: 'issue' does not match '^/'",
+        id="provider-executable-absolute",
+    ),
+    pytest.param(
+        _issue(credentials=[{"file": "/etc/app-key"}]),
+        f"{ISSUE}.credentials[0].file: '/etc/app-key' does not match"
+        " '^/run/credentials/'",
+        id="provider-credential-file-pattern",
+    ),
+    pytest.param(
+        _issue(timeout="30"),
+        f"{ISSUE}.timeout: '30' does not match {DURATION_PATTERN!r}",
+        id="provider-timeout-pattern",
     ),
     *(
         pytest.param(
@@ -555,6 +642,23 @@ RULE_CASES = [
         id="file-credentials-directory",
     ),
     pytest.param(
+        _issue(credentials=[{"env": "VAULT_TOKEN\n"}]),
+        f"{ISSUE}.credentials[0].env: env must match {ENV_NAME_PATTERN!r},"
+        " got 'VAULT_TOKEN\\n'",
+        id="provider-env-trailing-newline",
+    ),
+    pytest.param(
+        _issue(credentials=[{"file": "/run/credentials/../etc/passwd"}]),
+        f"{ISSUE}.credentials[0].file: file {FILE_RULE},"
+        " got '/run/credentials/../etc/passwd'",
+        id="provider-file-parent-segment",
+    ),
+    pytest.param(
+        _issue(timeout="30s\n"),
+        f"{ISSUE}.timeout: duration must match {DURATION_PATTERN!r}, got '30s\\n'",
+        id="provider-timeout-trailing-newline",
+    ),
+    pytest.param(
         _echo(input_schema=_echo_input(message={"type": "strin"})),
         f"{ECHO}.input_schema.properties.message.type:"
         " 'strin' is not valid under any of the given schemas",
@@ -802,7 +906,9 @@ def test_manifest_warns_once_per_action_declaring_pass_through_args() -> None:
 
 def test_manifest_without_pass_through_args_has_no_warnings() -> None:
     """A manifest with no action declaring pass-through args warns of nothing."""
-    document = {"actions": {"echo": _command(), "report": _script()}}
+    document = {
+        "actions": {"echo": _command(), "issue": _provider(), "report": _script()}
+    }
 
     assert parse_manifest(_encode(document)).warnings() == ()
 

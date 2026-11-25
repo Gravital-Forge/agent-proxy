@@ -204,7 +204,7 @@ class CallGateway:
         if scope is not None:
             for key in scope.grants:
                 plugin, action = key.split(".", 1)
-                schema = snapshot.manifests[plugin].actions[action].input_schema
+                schema = snapshot.manifests[plugin].tools[action].input_schema
                 specs.append(ToolSpec(f"{plugin}_{action}", schema))
         return sorted(specs, key=lambda spec: spec.name)
 
@@ -365,7 +365,7 @@ class CallGateway:
                 CageCall(
                     call_id=call.call_id,
                     image=snapshot.config.plugins[plugin],
-                    action=snapshot.manifests[plugin].actions[action],
+                    action=snapshot.manifests[plugin].tools[action],
                     grant=grant,
                     arguments=call.arguments,
                     network=cage_network(grant.domains),

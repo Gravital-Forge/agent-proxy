@@ -147,8 +147,15 @@ def _failing_reload(client: mock.MagicMock, error: Exception) -> None:
     _container(client).reload.side_effect = error
 
 
-def _instance_config(scopes: dict[str, dict[str, list[str]]]) -> InstanceConfig:
-    """Return a config whose scopes map each grant key to its domains."""
+def _instance_config(
+    scopes: dict[str, dict[str, list[str]]],
+    provided: dict[str, list[str]] | None = None,
+) -> InstanceConfig:
+    """Return a config whose scopes map each grant key to its domains.
+
+    provided maps each provided credential, whose provider is git.issue, to
+    its domains.
+    """
     return InstanceConfig.model_validate(
         {
             "agent_tree": "/srv/agents/alpha",
@@ -163,6 +170,15 @@ def _instance_config(scopes: dict[str, dict[str, list[str]]]) -> InstanceConfig:
                     }
                 }
                 for scope, grants in scopes.items()
+            },
+            "provided_credentials": {
+                name: {
+                    "provider": "git.issue",
+                    "credentials": {},
+                    "domains": domains,
+                    "refresh_before": "10m",
+                }
+                for name, domains in (provided or {}).items()
             },
         }
     )
@@ -370,6 +386,16 @@ def test_domain_lists_leaves_out_the_empty_list_when_no_grant_names_it() -> None
     config = _instance_config({"dev": {"git.clone": ["a.io"]}})
 
     assert domain_lists(config) == {("a.io",)}
+
+
+def test_domain_lists_holds_each_provided_credential_s_sorted_list() -> None:
+    """A provider entry's domains join the grants' lists, sorted, counted once."""
+    config = _instance_config(
+        {"dev": {"git.clone": ["a.io"]}},
+        {"first": ["d.io", "c.io"], "second": ["c.io", "d.io"], "third": ["a.io"]},
+    )
+
+    assert domain_lists(config) == {("a.io",), ("c.io", "d.io")}
 
 
 def test_proxy_status_returns_the_status_of_the_list_s_proxy() -> None:

@@ -6,7 +6,7 @@ from unittest import mock
 
 import pytest
 
-from agent_proxy.config import InvalidNameError, Scope
+from agent_proxy.config import InvalidNameError, ProvidedCredential, Scope
 from agent_proxy.credentials import (
     CredentialEntry,
     CredentialStore,
@@ -268,7 +268,7 @@ def test_unset_warnings_name_each_unset_credential_once_in_first_named_order() -
         )
     )
 
-    assert unset_warnings([first, second], frozenset()) == (
+    assert unset_warnings([first, second], {}, frozenset()) == (
         unset_message("ssh-key"),
         unset_message("github-token"),
         unset_message("npm-token"),
@@ -284,7 +284,7 @@ def test_unset_warnings_skip_a_stored_credential() -> None:
         )
     )
 
-    assert unset_warnings([scope], frozenset({"github-token"})) == (
+    assert unset_warnings([scope], {}, frozenset({"github-token"})) == (
         unset_message("npm-token"),
     )
 
@@ -293,4 +293,42 @@ def test_unset_warnings_are_empty_when_every_credential_is_stored() -> None:
     """A store holding every granted credential yields no warning."""
     scope = _scope(("github.pr_view", {"github-token": {"env": "GH_TOKEN"}}))
 
-    assert unset_warnings([scope], frozenset({"github-token"})) == ()
+    assert unset_warnings([scope], {}, frozenset({"github-token"})) == ()
+
+
+def _provided(**credentials: dict[str, str]) -> ProvidedCredential:
+    """Return a provided credential whose provider takes the credentials given."""
+    return ProvidedCredential.model_validate(
+        {
+            "provider": "github-app.installation_token",
+            "credentials": credentials,
+            "domains": ["api.github.com"],
+            "refresh_before": "10m",
+        }
+    )
+
+
+def test_unset_warnings_skip_a_provided_credential_a_grant_names() -> None:
+    """A granted name the config provides is never looked up in the store."""
+    scope = _scope(("git.clone", {"app-token": {"env": "GH_TOKEN"}}))
+    provided = {"app-token": _provided(**{"app-key": {"file": "/run/credentials/k"}})}
+
+    assert unset_warnings([scope], provided, frozenset({"app-key"})) == ()
+
+
+def test_unset_warnings_name_each_unset_provider_input_after_the_grants() -> None:
+    """A provider's unstored input warns once, after the grants' own warnings."""
+    scope = _scope(
+        ("git.clone", {"app-token": {"env": "GH_TOKEN"}, "npm-token": {"env": "NPM"}})
+    )
+    provided = {
+        "app-token": _provided(
+            **{"app-key": {"file": "/run/credentials/k"}, "npm-token": {"env": "NPM"}}
+        ),
+        "vault-secret": _provided(**{"app-key": {"env": "KEY"}}),
+    }
+
+    assert unset_warnings([scope], provided, frozenset()) == (
+        unset_message("npm-token"),
+        unset_message("app-key"),
+    )

@@ -19,6 +19,7 @@ from agent_proxy.plugins import (
     Manifest,
     ManifestError,
     PluginImageError,
+    ProviderAction,
 )
 from agent_proxy.reload import LiveConfig, Snapshot, build_snapshot
 
@@ -271,6 +272,119 @@ def test_an_unstored_credential_warns_after_the_manifest_warnings(
         "plugins.git.actions.run: declares pass-through args",
         unset_message("npm-token"),
     )
+
+
+ISSUE = ProviderAction(
+    name="issue",
+    credentials=(),
+    timeout=timedelta(seconds=30),
+    executable="/plugin/bin/issue",
+)
+LOAD_WITH_PROVIDER = _loader(
+    {
+        GIT_IMAGE: Manifest(actions=GIT_MANIFEST.actions | {"issue": ISSUE}),
+        FS_IMAGE: FS_MANIFEST,
+    }
+)
+
+
+def _provided(provider: str, **credentials: dict[str, str]) -> dict[str, object]:
+    return {
+        "provider": provider,
+        "credentials": credentials,
+        "domains": [],
+        "refresh_before": "10m",
+    }
+
+
+def _provided_config(
+    grants: dict[str, object], **provided: dict[str, object]
+) -> dict[str, object]:
+    return _config(grants) | {"provided_credentials": provided}
+
+
+def test_a_snapshot_holds_a_provided_credential_whose_provider_is_declared(
+    tmp_path: Path,
+) -> None:
+    """An entry naming a provider action its plugin declares builds a snapshot."""
+    grant = _grant() | {"credentials": {"app-token": {"env": "GH_TOKEN"}}}
+    document = _provided_config(
+        {"git.clone": grant}, **{"app-token": _provided("git.issue")}
+    )
+    path = _write(tmp_path, document)
+
+    snapshot = build_snapshot(path, CREDENTIAL_NAMES, LOAD_WITH_PROVIDER)
+
+    assert set(snapshot.config.provided_credentials) == {"app-token"}
+    assert snapshot.warnings == ()
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [
+        pytest.param(
+            "git.mint",
+            "provided_credentials.app-token.provider: "
+            "action 'mint' is not declared by plugin 'git'",
+            id="undeclared",
+        ),
+        pytest.param(
+            "git.clone",
+            "provided_credentials.app-token.provider: "
+            "action 'clone' of plugin 'git' is not a provider action",
+            id="not-a-provider",
+        ),
+    ],
+)
+def test_a_provided_credential_needs_a_declared_provider_action(
+    tmp_path: Path, provider: str, expected: str
+) -> None:
+    """An entry's provider must be an action of kind provider its plugin declares."""
+    document = _provided_config(
+        {"git.clone": _grant()}, **{"app-token": _provided(provider)}
+    )
+    path = _write(tmp_path, document)
+
+    assert _failures(path, LOAD_WITH_PROVIDER) == (f"{_source(path)}: {expected}",)
+
+
+def test_a_grant_naming_a_provider_action_is_refused(tmp_path: Path) -> None:
+    """No grant can name a provider action, so no token can call one."""
+    path = _write(tmp_path, _config({"git.issue": _grant()}))
+
+    assert _failures(path, LOAD_WITH_PROVIDER) == (
+        f"{_source(path)}: scopes.dev.grants.git.issue: "
+        "action 'issue' of plugin 'git' is a provider action, which no grant can name",
+    )
+
+
+def test_the_provided_credentials_of_a_plugin_that_failed_to_load_are_not_reported(
+    tmp_path: Path,
+) -> None:
+    """With no manifest to check an entry against, only the plugin's failure shows."""
+    document = _provided_config(
+        {"fs.read": _grant()}, **{"app-token": _provided("git.mint")}
+    )
+    path = _write(tmp_path, document)
+    load_manifest = _loader({GIT_IMAGE: GIT_PULL_FAILURE, FS_IMAGE: FS_MANIFEST})
+
+    assert _failures(path, load_manifest) == (
+        f"{_source(path)}: plugins.git: {GIT_PULL_FAILURE}",
+    )
+
+
+def test_a_provider_s_unstored_input_warns_and_a_provided_name_does_not(
+    tmp_path: Path,
+) -> None:
+    """The grant's provided name is never looked up; the provider's input is."""
+    grant = _grant() | {"credentials": {"app-token": {"env": "GH_TOKEN"}}}
+    entry = _provided("git.issue", **{"app-key": {"file": "/run/credentials/key"}})
+    document = _provided_config({"git.clone": grant}, **{"app-token": entry})
+    path = _write(tmp_path, document)
+
+    snapshot = build_snapshot(path, CREDENTIAL_NAMES, LOAD_WITH_PROVIDER)
+
+    assert snapshot.warnings == (unset_message("app-key"),)
 
 
 def test_current_is_the_snapshot_live_config_was_given(tmp_path: Path) -> None:

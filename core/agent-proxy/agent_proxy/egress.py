@@ -88,12 +88,16 @@ def cage_network(domains: Collection[str]) -> CageNetwork:
 
 
 def domain_lists(config: InstanceConfig) -> set[tuple[str, ...]]:
-    """Return each distinct sorted domain list the grants of every scope name."""
-    return {
+    """Return each distinct sorted domain list the grants and the providers name."""
+    granted = {
         tuple(sorted(grant.domains))
         for scope in config.scopes.values()
         for grant in scope.grants.values()
     }
+    provided = {
+        tuple(sorted(entry.domains)) for entry in config.provided_credentials.values()
+    }
+    return granted | provided
 
 
 def render_config(domains: Collection[str]) -> bytes:

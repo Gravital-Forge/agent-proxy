@@ -3,12 +3,13 @@
 import os
 import re
 import secrets
-from collections.abc import Iterable, Set
+from collections.abc import Iterable, Mapping, Set
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from itertools import chain
 from pathlib import Path
 
-from agent_proxy.config import NAME_PATTERN, Scope, check_name
+from agent_proxy.config import NAME_PATTERN, ProvidedCredential, Scope, check_name
 from agent_proxy.errors import ProxyError
 
 
@@ -20,19 +21,27 @@ def unset_message(name: str) -> str:
     )
 
 
-def unset_warnings(scopes: Iterable[Scope], stored: Set[str]) -> tuple[str, ...]:
-    """Return unset_message of each credential the scopes grant and stored lacks.
+def unset_warnings(
+    scopes: Iterable[Scope],
+    provided: Mapping[str, ProvidedCredential],
+    stored: Set[str],
+) -> tuple[str, ...]:
+    """Return unset_message of each stored credential named that stored lacks.
 
-    Each name appears once, in the order the scopes and their grants first
-    name it.
+    The names are those the scopes' grants name, other than the provided
+    ones, then those each provided credential's provider takes. Each name
+    appears once, in the order first named.
     """
-    granted = dict.fromkeys(
+    granted = (
         name
         for scope in scopes
         for grant in scope.grants.values()
         for name in grant.credentials
+        if name not in provided
     )
-    return tuple(unset_message(name) for name in granted if name not in stored)
+    inputs = (name for entry in provided.values() for name in entry.credentials)
+    named = dict.fromkeys(chain(granted, inputs))
+    return tuple(unset_message(name) for name in named if name not in stored)
 
 
 class EmptyCredentialError(ProxyError):

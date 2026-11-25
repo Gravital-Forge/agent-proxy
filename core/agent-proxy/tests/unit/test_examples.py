@@ -70,7 +70,9 @@ def test_example_config_warns_of_each_credential_an_empty_store_lacks() -> None:
     """The example loads, and an empty store lacks github-token, then hcp-terraform."""
     config = load_config(EXAMPLE_CONFIG)
 
-    assert unset_warnings(config.scopes.values(), frozenset()) == (
+    assert unset_warnings(
+        config.scopes.values(), config.provided_credentials, frozenset()
+    ) == (
         unset_message("github-token"),
         unset_message("hcp-terraform-token"),
     )

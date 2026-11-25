@@ -15,7 +15,7 @@ from agent_proxy.config import ConfigError, InstanceConfig, load_config
 from agent_proxy.credentials import unset_warnings
 from agent_proxy.egress import domain_lists
 from agent_proxy.errors import ProxyError
-from agent_proxy.plugins import Manifest
+from agent_proxy.plugins import Manifest, ProviderAction
 
 CONTROL_SOCKET_NAME = "control.sock"
 # A reload may pull plugin images, and a check runs a cage per plugin, so the
@@ -38,8 +38,8 @@ _CHECK_REPLY_FORM = (
 class Snapshot:
     """A config, the manifest of each of its plugins, and their warnings.
 
-    The warnings are the manifests' warnings, then one per credential a grant
-    names that the credential store lacked.
+    The warnings are the manifests' warnings, then one per stored credential
+    a grant or a provider names that the credential store lacked.
     """
 
     config: InstanceConfig
@@ -56,21 +56,25 @@ def build_snapshot(
 
     Args:
         path: the config file.
-        credential_names: the names the credential store holds; each
-            credential a grant names that is not among them adds a warning,
-            after the manifest warnings.
+        credential_names: the names the credential store holds; each stored
+            credential a grant or a provider names that is not among them
+            adds a warning, after the manifest warnings, as unset_warnings
+            gives.
         load_manifest: returns the manifest of the image at a pinned
             reference, making the image present first.
 
     Raises:
         ConfigError: load_config refuses the file, and its error propagates
-            unchanged with no plugin loaded; or a plugin fails to load, or a
-            grant names an action its plugin's manifest does not declare. It
+            unchanged with no plugin loaded; or a plugin fails to load; or a
+            grant names an action its plugin's manifest does not declare, or
+            a provider action; or a provided credential's provider is an
+            action its plugin does not declare, or not a provider action. It
             holds one message per failure.
     """
     config = load_config(path)
     manifests, failures = _load_manifests(config, load_manifest)
     failures.extend(_undeclared_action_failures(config, manifests))
+    failures.extend(_provider_failures(config, manifests))
     if failures:
         source = f"config file {str(path)!r}"
         raise ConfigError(*(f"{source}: {failure}" for failure in failures))
@@ -79,7 +83,9 @@ def build_snapshot(
         manifests=MappingProxyType(manifests),
         warnings=(
             *_manifest_warnings(manifests),
-            *unset_warnings(config.scopes.values(), credential_names),
+            *unset_warnings(
+                config.scopes.values(), config.provided_credentials, credential_names
+            ),
         ),
     )
 
@@ -108,11 +114,37 @@ def _undeclared_action_failures(
             plugin, action = key.split(".", 1)
             # A plugin that failed to load is already reported, with no
             # manifest to check its grants against.
-            if plugin in manifests and action not in manifests[plugin].actions:
+            if plugin not in manifests:
+                continue
+            declared = manifests[plugin].actions
+            where = f"scopes.{scope_name}.grants.{key}"
+            if action not in declared:
                 yield (
-                    f"scopes.{scope_name}.grants.{key}: action {action!r} "
-                    f"is not declared by plugin {plugin!r}"
+                    f"{where}: action {action!r} is not declared by plugin {plugin!r}"
                 )
+            elif isinstance(declared[action], ProviderAction):
+                yield (
+                    f"{where}: action {action!r} of plugin {plugin!r} is a "
+                    "provider action, which no grant can name"
+                )
+
+
+def _provider_failures(
+    config: InstanceConfig, manifests: Mapping[str, Manifest]
+) -> Iterator[str]:
+    for name, entry in config.provided_credentials.items():
+        plugin, action = entry.provider.split(".", 1)
+        if plugin not in manifests:
+            continue
+        declared = manifests[plugin].actions
+        where = f"provided_credentials.{name}.provider"
+        if action not in declared:
+            yield f"{where}: action {action!r} is not declared by plugin {plugin!r}"
+        elif not isinstance(declared[action], ProviderAction):
+            yield (
+                f"{where}: action {action!r} of plugin {plugin!r} "
+                "is not a provider action"
+            )
 
 
 def _manifest_warnings(manifests: Mapping[str, Manifest]) -> Iterator[str]:
