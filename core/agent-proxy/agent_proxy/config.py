@@ -36,6 +36,9 @@ DOMAIN_PATTERN = (
 )
 PROXY_ENV_NAME = "HTTPS_PROXY"
 ROOTS_ENV_NAME = "AGENT_PROXY_ROOTS"
+MEMORY_PATTERN = r"^[1-9][0-9]*[mg]$"
+# A cage's /tmp is a 64 MiB tmpfs, whose pages count against the cage's memory.
+MEMORY_FLOOR_BYTES = 64 * 2**20
 
 _DURATION_UNITS = {
     "s": timedelta(seconds=1),
@@ -43,6 +46,7 @@ _DURATION_UNITS = {
     "h": timedelta(hours=1),
     "d": timedelta(days=1),
 }
+_MEMORY_UNITS = {"m": 2**20, "g": 2**30}
 
 _RESERVED_ENV_SETTERS = {
     PROXY_ENV_NAME: "the egress proxy",
@@ -193,6 +197,33 @@ def _parse_timeout(value: object) -> timedelta:
 Timeout = Annotated[timedelta | None, BeforeValidator(_parse_timeout)]
 
 
+def _parse_memory(value: object) -> int:
+    """Return the bytes a memory string such as '8g' names.
+
+    Raises:
+        ValueError: value is not a string of MEMORY_PATTERN, or names less
+            than MEMORY_FLOOR_BYTES.
+    """
+    refusal = ValueError(
+        f"memory must match {MEMORY_PATTERN!r}, a count of MiB or GiB such as "
+        f"'8g', and be at least {MEMORY_FLOOR_BYTES // 2**20}m, "
+        f"got {value!r}"
+    )
+    if not isinstance(value, str) or re.fullmatch(MEMORY_PATTERN, value) is None:
+        raise refusal
+    try:
+        memory_bytes = int(value[:-1]) * _MEMORY_UNITS[value[-1]]
+    # int() raises ValueError past the interpreter's digit limit for str conversion.
+    except ValueError:
+        raise refusal from None
+    if memory_bytes < MEMORY_FLOOR_BYTES:
+        raise refusal
+    return memory_bytes
+
+
+Memory = Annotated[int | None, BeforeValidator(_parse_memory)]
+
+
 class Root(BaseModel):
     model_config = _STRICT
 
@@ -219,6 +250,7 @@ class Grant(BaseModel):
     domains: list[Domain]
     credentials: dict[Name, EnvMount | FileMount]
     timeout: Timeout = None
+    memory: Memory = None
     env: dict[EnvName, str] = Field(default_factory=dict)
 
 

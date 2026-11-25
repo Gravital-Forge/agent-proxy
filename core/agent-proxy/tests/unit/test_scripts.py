@@ -591,3 +591,246 @@ def test_step_changes_the_agent_tree_only_as_the_agent(
 
     assert TREE_COMMAND.search(body)
     assert unguarded == []
+
+
+HOME = "/home/agent-01"
+AGENT_PASSWD = "agent-01:x:1000:1000::/home/agent-01:/bin/bash"
+SERVICE_PASSWD = "agentproxy-agent-01:x:1001:1001::/svc:/usr/sbin/nologin"
+AGENT_GROUP = "agent-01:x:1000:"
+
+HOME_STUBS = (
+    'getfacl() { printf "%s" "$ACL"; }; '
+    'stat() { echo "$HOME_GROUP"; }; '
+    'getent() { case "$1" in '
+    'group) [[ "$2" == "$HOME_GROUP" && -n "$GROUP_ENTRY" ]] '
+    '&& echo "$GROUP_ENTRY" ;; '
+    'passwd) printf "%s\\n" "$PASSWD" ;; esac; }; '
+)
+
+
+def run_warn_open_home(
+    tmp_path: Path,
+    acl: list[str],
+    group_entry: str = AGENT_GROUP,
+    passwd: tuple[str, ...] = (AGENT_PASSWD, SERVICE_PASSWD),
+) -> subprocess.CompletedProcess[str]:
+    """Run provisioning's warn_open_home on a home whose getfacl -pc prints acl.
+
+    The home's owning group is agent-01, and getent answers group_entry for it and
+    passwd for the user list. Recording stubs catch any chmod or setfacl call.
+    """
+    body = (
+        HOME_STUBS
+        + recording_stub("chmod")
+        + recording_stub("setfacl")
+        + f"agent=agent-01 service_user=agentproxy-agent-01 agent_home={HOME}; "
+        + "warn_open_home; echo next step"
+    )
+    return run_sourced(
+        "provision-instance.sh",
+        body,
+        {
+            "ACL": "".join(f"{line}\n" for line in [*acl, ""]),
+            "HOME_GROUP": "agent-01",
+            "GROUP_ENTRY": group_entry,
+            "PASSWD": "\n".join(passwd),
+            "STUB_LOG": str(tmp_path / "stub.log"),
+        },
+    )
+
+
+def open_home_warning(who: str, command: str) -> str:
+    """Return the line warn_open_home prints on stderr for who, closed by command."""
+    return (
+        f"provision-instance.sh: warning: {who} can traverse {HOME}; "
+        f"only agent-01 and agentproxy-agent-01 may; close it with '{command}'"
+    )
+
+
+CLOSED_HOME_REPORT = (
+    f"checked that only agent-01 and agentproxy-agent-01 can traverse {HOME}"
+)
+SERVICE_ENTRY = "user:agentproxy-agent-01:--x"
+
+
+@pytest.mark.parametrize(
+    ("acl", "group_entry", "passwd"),
+    [
+        pytest.param(
+            ["user::rwx", SERVICE_ENTRY, "group::---", "mask::--x", "other::---"],
+            AGENT_GROUP,
+            (AGENT_PASSWD, SERVICE_PASSWD),
+            id="mode 700",
+        ),
+        pytest.param(
+            ["user::rwx", SERVICE_ENTRY, "group::r-x", "mask::r-x", "other::---"],
+            AGENT_GROUP,
+            (AGENT_PASSWD, SERVICE_PASSWD),
+            id="mode 750, the group has no other member",
+        ),
+        pytest.param(
+            [
+                "user::rwx",
+                SERVICE_ENTRY,
+                "group::---",
+                "group:staff:r-x\t#effective:r--",
+                "mask::r--",
+                "other::---",
+            ],
+            AGENT_GROUP,
+            (AGENT_PASSWD, SERVICE_PASSWD),
+            id="a named group whose x the mask removes",
+        ),
+        pytest.param(
+            [
+                "user::rwx",
+                SERVICE_ENTRY,
+                "user:agent-01:rwx",
+                "group::---",
+                "mask::rwx",
+                "other::---",
+            ],
+            AGENT_GROUP,
+            (AGENT_PASSWD, SERVICE_PASSWD),
+            id="a named entry for the agent",
+        ),
+        pytest.param(
+            [
+                "user::rwx",
+                SERVICE_ENTRY,
+                "group::---",
+                "mask::--x",
+                "other::---",
+                "default:user::rwx",
+                "default:user:bob:r-x",
+                "default:group::r-x",
+                "default:group:staff:r-x",
+                "default:mask::r-x",
+                "default:other::r-x",
+            ],
+            "agent-01:x:1000:bob",
+            (AGENT_PASSWD, SERVICE_PASSWD),
+            id="open default entries",
+        ),
+    ],
+)
+def test_warn_open_home_reports_a_closed_home(
+    tmp_path: Path, acl: list[str], group_entry: str, passwd: tuple[str, ...]
+) -> None:
+    """A home only the agent and the service user can traverse gets no warning."""
+    result = run_warn_open_home(tmp_path, acl, group_entry, passwd)
+
+    assert (result.returncode, result.stderr) == (0, "")
+    assert result.stdout == f"{CLOSED_HOME_REPORT}\nnext step\n"
+    assert stub_calls(tmp_path / "stub.log") == []
+
+
+@pytest.mark.parametrize(
+    ("acl", "group_entry", "passwd", "who", "command"),
+    [
+        pytest.param(
+            ["user::rwx", SERVICE_ENTRY, "group::r-x", "mask::r-x", "other::---"],
+            "agent-01:x:1000:agent-01,bob",
+            (AGENT_PASSWD, SERVICE_PASSWD),
+            "owning group agent-01",
+            f"setfacl -m g::r-- {HOME}",
+            id="mode 750, the group lists another member",
+        ),
+        pytest.param(
+            ["user::rwx", SERVICE_ENTRY, "group::r-x", "mask::r-x", "other::---"],
+            AGENT_GROUP,
+            (AGENT_PASSWD, SERVICE_PASSWD, "carol:x:1002:1000::/home/carol:/bin/sh"),
+            "owning group agent-01",
+            f"setfacl -m g::r-- {HOME}",
+            id="mode 750, the group is another user's primary group",
+        ),
+        pytest.param(
+            ["user::rwx", SERVICE_ENTRY, "group::r-x", "mask::r-x", "other::---"],
+            "",
+            (AGENT_PASSWD, SERVICE_PASSWD),
+            "owning group agent-01",
+            f"setfacl -m g::r-- {HOME}",
+            id="mode 750, getent knows no such group",
+        ),
+        pytest.param(
+            ["user::rwx", SERVICE_ENTRY, "group::---", "mask::--x", "other::--x"],
+            AGENT_GROUP,
+            (AGENT_PASSWD, SERVICE_PASSWD),
+            "any other user",
+            f"chmod o-x {HOME}",
+            id="an open other",
+        ),
+        pytest.param(
+            [
+                "user::rwx",
+                SERVICE_ENTRY,
+                "user:bob:r-x",
+                "group::---",
+                "mask::r-x",
+                "other::---",
+            ],
+            AGENT_GROUP,
+            (AGENT_PASSWD, SERVICE_PASSWD),
+            "user bob",
+            f"setfacl -x u:bob {HOME}",
+            id="a named user",
+        ),
+        pytest.param(
+            [
+                "user::rwx",
+                SERVICE_ENTRY,
+                "group::---",
+                "group:staff:r-x",
+                "mask::r-x",
+                "other::---",
+            ],
+            AGENT_GROUP,
+            (AGENT_PASSWD, SERVICE_PASSWD),
+            "group staff",
+            f"setfacl -x g:staff {HOME}",
+            id="a named group",
+        ),
+    ],
+)
+def test_warn_open_home_warns_for_each_entry_that_can_traverse(
+    tmp_path: Path,
+    acl: list[str],
+    group_entry: str,
+    passwd: tuple[str, ...],
+    who: str,
+    command: str,
+) -> None:
+    """An entry that lets someone else traverse warns on stderr and changes nothing."""
+    result = run_warn_open_home(tmp_path, acl, group_entry, passwd)
+
+    assert result.returncode == 0
+    assert result.stderr == f"{open_home_warning(who, command)}\n"
+    assert result.stdout == "next step\n"
+    assert stub_calls(tmp_path / "stub.log") == []
+
+
+def test_warn_open_home_warns_once_for_each_open_entry(tmp_path: Path) -> None:
+    """Two open entries give two warnings, in the order getfacl lists them."""
+    acl = [
+        "user::rwx",
+        SERVICE_ENTRY,
+        "user:bob:--x",
+        "group::---",
+        "mask::--x",
+        "other::r-x",
+    ]
+
+    result = run_warn_open_home(tmp_path, acl)
+
+    assert (result.returncode, result.stdout) == (0, "next step\n")
+    assert result.stderr.splitlines() == [
+        open_home_warning("user bob", f"setfacl -x u:bob {HOME}"),
+        open_home_warning("any other user", f"chmod o-x {HOME}"),
+    ]
+
+
+def test_provisioning_checks_the_home_right_after_it_grants_traverse() -> None:
+    """Provisioning runs warn_open_home as the step after grant_home_traverse."""
+    assert "    grant_home_traverse\n    warn_open_home\n" in function_body(
+        "provision-instance.sh", "main"
+    )

@@ -159,6 +159,70 @@ def test_load_config_leaves_an_omitted_timeout_unset(tmp_path: Path) -> None:
     assert config.scopes["dev"].grants["git.clone"].timeout is None
 
 
+@pytest.mark.parametrize(
+    ("memory", "expected_bytes"),
+    [
+        pytest.param("64m", 64 * 2**20, id="floor-in-mib"),
+        pytest.param("1024m", 2**30, id="mib"),
+        pytest.param("8g", 8 * 2**30, id="gib"),
+    ],
+)
+def test_load_config_reads_a_grant_s_memory_in_bytes(
+    tmp_path: Path, memory: str, expected_bytes: int
+) -> None:
+    """A grant's memory counts MiB for 'm' and GiB for 'g', and loads as bytes."""
+    config = _load(tmp_path, _with_grant(memory=memory))
+
+    assert config.scopes["dev"].grants["git.clone"].memory == expected_bytes
+
+
+def test_load_config_leaves_an_omitted_memory_unset(tmp_path: Path) -> None:
+    """A grant without a memory loads with memory None."""
+    config = _load(tmp_path, _config())
+
+    assert config.scopes["dev"].grants["git.clone"].memory is None
+
+
+@pytest.mark.parametrize(
+    "memory",
+    [
+        pytest.param("63m", id="under-the-floor"),
+        pytest.param("0g", id="zero"),
+        pytest.param("08g", id="leading-zero"),
+        pytest.param("8G", id="upper-case-unit"),
+        pytest.param("8gb", id="two-letter-unit"),
+        pytest.param("8k", id="kib-unit"),
+        pytest.param("8", id="no-unit"),
+        pytest.param("1.5g", id="fraction"),
+        pytest.param(" 8g", id="leading-space"),
+        pytest.param("1" * 5000 + "g", id="past-the-int-digit-limit"),
+        pytest.param(8, id="integer"),
+    ],
+)
+def test_load_config_refuses_a_bad_memory_naming_the_form_and_the_floor(
+    tmp_path: Path, memory: object
+) -> None:
+    """A memory off the form or under 64 MiB fails the load with one message."""
+    error = _refusal(tmp_path, _with_grant(memory=memory))
+
+    assert len(error.errors) == 1
+    assert "scopes.dev.grants.git.clone.memory: " in error.errors[0]
+    assert repr(r"^[1-9][0-9]*[mg]$") in error.errors[0]
+    assert "at least 64m" in error.errors[0]
+
+
+def test_load_config_names_a_refused_memory_once(tmp_path: Path) -> None:
+    """The refusal of a memory is the field, the form, the floor, and the value."""
+    error = _refusal(tmp_path, _with_grant(memory="32m"))
+
+    assert error.errors == (
+        f"config file {str(tmp_path / 'config.yaml')!r}: "
+        "scopes.dev.grants.git.clone.memory: memory must match "
+        "'^[1-9][0-9]*[mg]$', a count of MiB or GiB such as '8g', "
+        "and be at least 64m, got '32m'",
+    )
+
+
 def test_load_config_returns_a_grant_s_env(tmp_path: Path) -> None:
     """A grant's env loads as the file states it."""
     config = _load(tmp_path, _with_grant(env={"GIT_AUTHOR_NAME": "Agent One"}))

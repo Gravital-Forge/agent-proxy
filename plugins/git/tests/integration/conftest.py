@@ -1,5 +1,6 @@
 import secrets
 import shlex
+import shutil
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -42,7 +43,9 @@ MAX_CAGES = 4
 ROOT_USER = "0:0"
 OTHER_USER = "1000:1000"
 AUTH_SERVER_PATH = Path(__file__).with_name("auth_server.py")
-AUTH_ALIAS = "auth"
+AUTH_ALIASES = ["github.com", "auth"]
+SERVER_CERTIFICATE_NAME = "server-certificate.pem"
+SERVER_KEY_NAME = "server-key.pem"
 GIT_DAEMON_ALIAS = "git-remote"
 SERVER_START_SECONDS = 30
 COMMIT_CREATING_ACTIONS = frozenset({"commit", "merge", "pull", "stash"})
@@ -425,22 +428,91 @@ def lfs_remote_pair(
         yield pair
 
 
+@pytest.fixture(scope="session")
+def server_tls_dir(
+    docker_client: DockerClient,
+    fixture_image: str,
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Path:
+    """A directory that holds the auth server's self-signed certificate and its key.
+
+    The certificate names each of AUTH_ALIASES as a subject alternative name,
+    so it is its own trust anchor for both.
+    """
+    tls_dir = tmp_path_factory.mktemp("server-tls")
+    names = ",".join(f"DNS:{alias}" for alias in AUTH_ALIASES)
+    command = [
+        "openssl",
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-noenc",
+        "-days",
+        "1",
+        "-subj",
+        f"/CN={AUTH_ALIASES[0]}",
+        "-addext",
+        f"subjectAltName={names}",
+        "-keyout",
+        str(tls_dir / SERVER_KEY_NAME),
+        "-out",
+        str(tls_dir / SERVER_CERTIFICATE_NAME),
+    ]
+    _run_fixture(docker_client, fixture_image, tls_dir, ROOT_USER, shlex.join(command))
+    return tls_dir
+
+
+@pytest.fixture
+def trust_auth_server(server_tls_dir: Path) -> Callable[[Path], dict[str, str]]:
+    """A function that puts the auth server's certificate in root, for a cage to trust.
+
+    It returns the grant env that names the copy in GIT_SSL_CAINFO, which git
+    and git LFS both read. The copy lies under root, so a cage granted root
+    reads it.
+    """
+
+    def trust(root: Path) -> dict[str, str]:
+        certificate = root / SERVER_CERTIFICATE_NAME
+        shutil.copyfile(server_tls_dir / SERVER_CERTIFICATE_NAME, certificate)
+        return {"GIT_SSL_CAINFO": str(certificate)}
+
+    return trust
+
+
 @pytest.fixture
 def auth_server(
-    docker_client: DockerClient, plugin_manifest: Manifest, cage_network: str
+    docker_client: DockerClient,
+    plugin_manifest: Manifest,
+    cage_network: str,
+    server_tls_dir: Path,
 ) -> Iterator[Container]:
-    """A server that answers 401 until the credential arrives, reached as auth:8080.
+    """A server that answers 401 until the credential arrives, over TLS on port 443.
 
     It runs from the plugin image, which plugin_manifest builds, on the network
-    every cage joins.
+    every cage joins, reached under each of AUTH_ALIASES. A cage trusts its
+    certificate through trust_auth_server.
     """
+    tls_dir = str(server_tls_dir)
     container = docker_client.containers.run(
         PLUGIN_IMAGE_TAG,
-        ["python3", "-u", "-c", AUTH_SERVER_PATH.read_text()],
+        [
+            "python3",
+            "-u",
+            "-c",
+            AUTH_SERVER_PATH.read_text(),
+            str(server_tls_dir / SERVER_CERTIFICATE_NAME),
+            str(server_tls_dir / SERVER_KEY_NAME),
+        ],
         detach=True,
+        mounts=[
+            docker.types.Mount(
+                target=tls_dir, source=tls_dir, type="bind", read_only=True
+            )
+        ],
         network=cage_network,
         networking_config={
-            cage_network: docker_client.api.create_endpoint_config(aliases=[AUTH_ALIAS])
+            cage_network: docker_client.api.create_endpoint_config(aliases=AUTH_ALIASES)
         },
         labels=TEST_LABELS,
     )

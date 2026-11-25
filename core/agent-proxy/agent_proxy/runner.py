@@ -16,11 +16,12 @@ from datetime import timedelta
 from pathlib import PurePosixPath
 from typing import cast
 
+import docker.errors
 import docker.types
 from docker import DockerClient
 from docker.models.containers import Container
-from jsonschema import Draft202012Validator
 
+from agent_proxy.cage_seccomp import cage_profile_json
 from agent_proxy.config import (
     PINNED_IMAGE_PATTERN,
     ROOTS_ENV_NAME,
@@ -42,6 +43,7 @@ from agent_proxy.plugins import (
     CommandAction,
     ScriptAction,
     ensure_image,
+    schema_validator,
 )
 from agent_proxy.results import (
     CALL_ID_PATTERN,
@@ -53,10 +55,19 @@ from agent_proxy.results import (
 )
 
 CONTAINER_LABELS: Mapping[str, str] = types.MappingProxyType({})
+CAGE_LABEL = "agent-proxy.cage"
 TMPFS_PATH = "/tmp"  # noqa: S108 - the path is inside the cage, on its own tmpfs
 TMPFS_OPTIONS = "rw,size=64m"
 CONTAINER_USER = "0:0"
 LOG_DRIVER = "json-file"
+LOG_OPTIONS: Mapping[str, str] = types.MappingProxyType(
+    {"max-size": "512m", "max-file": "2"}
+)
+CAGE_PIDS_LIMIT = 1024
+CAGE_MEMORY_BYTES = 4 * 2**30
+_DAEMON_LIMITS: Mapping[str, str] = types.MappingProxyType(
+    {"MemoryLimit": "memory limit", "PidsLimit": "process limit"}
+)
 VERIFIER_IMAGE_VARIABLE = "AGENT_PROXY_VERIFIER_IMAGE"
 SOURCE_VERIFIER_IMAGE = "agent-proxy-verifier:1"
 
@@ -113,7 +124,11 @@ class CageTimeoutError(RunnerError):
 
 
 class CageFailedError(RunnerError):
-    """A cage failed after it was created, other than by timing out."""
+    """A cage failed after it was created, other than by timing out.
+
+    The start also raises it when it cannot list the cages an earlier
+    instance left.
+    """
 
 
 def validate_input(
@@ -124,7 +139,7 @@ def validate_input(
     Raises:
         InputError: arguments break the schema; one message per violation.
     """
-    validator = Draft202012Validator(action.input_schema)
+    validator = schema_validator(action.input_schema)
     # The schema's object check accepts only a dict, not any Mapping.
     violations = [
         f"{error.json_path}: {error.message}"
@@ -372,6 +387,82 @@ def ensure_verifier(client: DockerClient) -> None:
         ensure_image(client, VERIFIER_IMAGE)
 
 
+def limit_warnings(client: DockerClient) -> tuple[str, ...]:
+    """Return one warning for each cage limit the daemon cannot enforce.
+
+    Docker drops a limit its daemon cannot enforce and still runs the cage.
+
+    Raises:
+        RunnerError: the daemon's info cannot be read.
+    """
+    try:
+        info = client.info()
+    except DOCKER_FAILURES as exc:
+        raise RunnerError(
+            f"the Docker daemon's info could not be read, so the cage limits "
+            f"cannot be checked: {exc}"
+        ) from exc
+    return tuple(
+        f"the Docker daemon cannot enforce a cage's {limit}, "
+        "so each cage runs without one"
+        for field, limit in _DAEMON_LIMITS.items()
+        if not info.get(field)
+    )
+
+
+@dataclass(frozen=True)
+class LeftCageRemoval:
+    """The name of each left cage removed, and one warning per cage that was not.
+
+    A cage already gone at its removal is in neither.
+    """
+
+    removed: tuple[str, ...]
+    warnings: tuple[str, ...]
+
+
+def remove_left_cages(client: DockerClient) -> LeftCageRemoval:
+    """Force-remove every cage on the daemon, naming each removal and each failure.
+
+    One instance owns its daemon, so a cage there at start is one an earlier
+    instance left behind, and it may still hold credentials.
+
+    Raises:
+        CageFailedError: the cages cannot be listed.
+    """
+    try:
+        cages = client.containers.list(
+            all=True, filters=_cage_filters(), ignore_removed=True
+        )
+    except DOCKER_FAILURES as exc:
+        raise CageFailedError(f"the left cages could not be listed: {exc}") from exc
+    removed = []
+    warnings = []
+    for cage in cages:
+        try:
+            cage.remove(force=True)
+        except docker.errors.NotFound:
+            continue
+        except DOCKER_FAILURES as exc:
+            warnings.append(f"the left cage {cage.name!r} could not be removed: {exc}")
+            continue
+        removed.append(cage.name)
+    return LeftCageRemoval(removed=tuple(removed), warnings=tuple(warnings))
+
+
+def _cage_filters() -> dict[str, list[str]]:
+    """Return the label filter that finds cages.
+
+    Docker matches a container only when it carries every label in the list.
+    """
+    return {
+        "label": [
+            CAGE_LABEL,
+            *(f"{name}={value}" for name, value in CONTAINER_LABELS.items()),
+        ]
+    }
+
+
 @dataclass(frozen=True)
 class CageCall:
     """One action call, and what the instance's config gives it."""
@@ -555,6 +646,7 @@ def _create(client: DockerClient, call: CageCall, setup: _CageSetup) -> Containe
         CageStartError: Docker refuses the create, an absent action or verifier
             image included.
     """
+    memory_bytes = call.grant.memory or CAGE_MEMORY_BYTES
     try:
         return client.containers.create(
             call.image,
@@ -563,7 +655,7 @@ def _create(client: DockerClient, call: CageCall, setup: _CageSetup) -> Containe
             user=CONTAINER_USER,
             read_only=True,
             cap_drop=["ALL"],
-            security_opt=["no-new-privileges"],
+            security_opt=["no-new-privileges", f"seccomp={cage_profile_json()}"],
             tmpfs={TMPFS_PATH: TMPFS_OPTIONS},
             mounts=[
                 *setup.mounts,
@@ -577,8 +669,14 @@ def _create(client: DockerClient, call: CageCall, setup: _CageSetup) -> Containe
             ],
             environment={**call.network.environment, **setup.environment},
             network=call.network.name,
-            labels=dict(CONTAINER_LABELS),
-            log_config=docker.types.LogConfig(type=LOG_DRIVER, config={}),
+            labels={CAGE_LABEL: "1", **CONTAINER_LABELS},
+            pids_limit=CAGE_PIDS_LIMIT,
+            mem_limit=memory_bytes,
+            # A swap limit equal to the memory limit gives the cage no swap.
+            memswap_limit=memory_bytes,
+            log_config=docker.types.LogConfig(
+                type=LOG_DRIVER, config=dict(LOG_OPTIONS)
+            ),
         )
     except DOCKER_FAILURES as exc:
         raise CageStartError(

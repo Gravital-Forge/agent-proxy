@@ -94,7 +94,9 @@ README.
       example with `git -C <checkout> lfs track '*.bin'`, then a commit of `.gitattributes` and a
       new `.bin` file. Call `git_push` with `repo` set to the `<listed>` checkout. The result's
       `exit_code` is 0. This shows that a real GitHub LFS upload and verify never ask the credential
-      helper about a path outside the list.
+      helper about a path outside the list. It also shows that they ask the helper only for `https`
+      and `github.com`, the one protocol and host it answers, as the git plugin's
+      [The credential helper](../plugins/git/README.md#the-credential-helper) gives.
    4. Call `git_push` with `repo` set to the `<unlisted>` checkout. The result's `exit_code` is not
       0, and its `stderr` holds
       `git plugin refused: repository '<unlisted>' is not in GITHUB_REPOS`.
@@ -230,3 +232,50 @@ README.
     token grants through the agent's MCP client. The check passes when that `inspect` prints a list
     that holds `<reference>`, and the call succeeds.
     [The root verifier](architecture.md#the-root-verifier) gives the verifier's pin.
+
+13. **The open-home warning on a real home.** This check shows that the provisioning step
+    `warn_open_home` reads the real output of `getfacl -pc` and the host's real group lookups. The
+    step's tests give it fixed output, so only a real home shows this.
+    [Provisioning](deployment.md#provisioning) gives the step and its two outputs.
+
+    Take a host where the step found the agent's home closed at provisioning, and where the home's
+    owning group has no member but the agent. `stat -c %G <home>` prints that group, `<group>`
+    below. Take a second user, `<second user>` below, who is neither the agent nor the service user.
+    Each step below runs the provisioning step alone, as root, with this command:
+
+    ```sh
+    bash -c 'source "$1"; agent=agent-01 service_user=agentproxy-agent-01 agent_home=<home>; warn_open_home' _ <checkout>/core/docker/provision-instance.sh
+    ```
+
+    The script runs none of its own steps when it is sourced, so the command runs `warn_open_home`
+    and nothing else. In each step below, the command exits 0.
+
+    1. Run the command on the home as provisioning left it. It prints nothing on stderr, and this
+       line on stdout:
+
+       ```text
+       checked that only agent-01 and agentproxy-agent-01 can traverse <home>
+       ```
+
+    2. Give the second user traverse with `setfacl -m u:<second user>:x <home>`. Run the command. It
+       prints nothing on stdout, and this line on stderr:
+
+       ```text
+       provision-instance.sh: warning: user <second user> can traverse <home>; only agent-01 and agentproxy-agent-01 may; close it with 'setfacl -x u:<second user> <home>'
+       ```
+
+       Close the entry with the command that the warning names.
+    3. Note the owning group's entry, the `group::` line that `getfacl -p <home>` prints, as
+       `<group permissions>`. Give the owning group traverse with `setfacl -m g::--x <home>`, and
+       run the command. It prints the line of step 1, because the group has no member but the agent.
+       Add the second user to the group with `gpasswd -a <second user> <group>`, and run the command
+       again. It prints nothing on stdout, and this line on stderr:
+
+       ```text
+       provision-instance.sh: warning: owning group <group> can traverse <home>; only agent-01 and agentproxy-agent-01 may; close it with 'setfacl -m g::--- <home>'
+       ```
+
+       Remove the second user from the group with `gpasswd -d <second user> <group>`. Put back the
+       owning group's entry with `setfacl -m g::<group permissions> <home>`.
+
+    The check passes when each output is as given.

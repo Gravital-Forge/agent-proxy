@@ -1,7 +1,6 @@
 """Audit records written as rotating JSON lines, and the tail reader."""
 
 import contextlib
-import dataclasses
 import json
 import os
 import stat
@@ -16,10 +15,14 @@ from agent_proxy.errors import ProxyError
 
 AUDIT_MAX_BYTES = 10 * 1024 * 1024
 AUDIT_BACKUP_COUNT = 5
+ARGUMENTS_CAP_CHARACTERS = 16_384
+ACTION_CAP_CHARACTERS = 256
+REFUSAL_CAP_CHARACTERS = 4_096
 _LOG_NAME = "audit.log"
 _LOG_FLAGS = os.O_WRONLY | os.O_APPEND | os.O_CREAT
 _LOG_MODE = 0o600
 _SCAN_CHUNK = 4096
+_CUT_MARKER = " [cut]"
 
 
 class AuditError(ProxyError):
@@ -33,7 +36,7 @@ class AuditRecord:
     token_name: str | None
     scope: str | None
     action: str
-    arguments: Mapping[str, object]
+    arguments: Mapping[str, object] | None
     exit_code: int | None
     duration_ms: int
     stdout_bytes: int | None
@@ -202,12 +205,52 @@ def tail(directory: Path, count: int) -> list[str]:
 
 
 def _render_line(record: AuditRecord) -> str:
+    """Render record as compact JSON, its caller-chosen fields capped."""
+    arguments, arguments_cut = _capped_arguments(record.arguments)
     fields: dict[str, object] = {
-        field.name: getattr(record, field.name) for field in dataclasses.fields(record)
+        "timestamp": record.timestamp.isoformat(),
+        "call_id": record.call_id,
+        "token_name": record.token_name,
+        "scope": record.scope,
+        "action": _capped(record.action, ACTION_CAP_CHARACTERS),
+        "arguments": arguments,
+        "arguments_cut": arguments_cut,
+        "exit_code": record.exit_code,
+        "duration_ms": record.duration_ms,
+        "stdout_bytes": record.stdout_bytes,
+        "stderr_bytes": record.stderr_bytes,
+        "truncated": record.truncated,
+        "refusal": (
+            None
+            if record.refusal is None
+            else _capped(record.refusal, REFUSAL_CAP_CHARACTERS)
+        ),
     }
-    fields["timestamp"] = record.timestamp.isoformat()
-    fields["arguments"] = dict(record.arguments)
-    return json.dumps(fields, separators=(",", ":"))
+    return _compact_json(fields)
+
+
+def _capped_arguments(
+    arguments: Mapping[str, object] | None,
+) -> tuple[dict[str, object] | None, dict[str, object] | None]:
+    """Return the line's arguments and arguments_cut fields for arguments.
+
+    Arguments whose compact JSON passes the cap are replaced by that JSON's
+    UTF-8 size and its first ARGUMENTS_CAP_CHARACTERS characters.
+    """
+    if arguments is None:
+        return None, None
+    text = _compact_json(arguments)
+    if len(text) <= ARGUMENTS_CAP_CHARACTERS:
+        return dict(arguments), None
+    return None, {"bytes": len(text.encode()), "head": text[:ARGUMENTS_CAP_CHARACTERS]}
+
+
+def _capped(text: str, cap: int) -> str:
+    return text if len(text) <= cap else f"{text[:cap]}{_CUT_MARKER}"
+
+
+def _compact_json(value: Mapping[str, object]) -> str:
+    return json.dumps(value, separators=(",", ":"))
 
 
 def _log_files_newest_first(directory: Path) -> Iterator[Path]:

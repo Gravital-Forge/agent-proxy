@@ -799,6 +799,70 @@ def test_job_log_location_refuses_an_empty_gh_token(
     assert api.seen == []
 
 
+@pytest.mark.parametrize("token", [" ", "\n", " \t\r\n"])
+def test_job_log_location_refuses_a_gh_token_of_whitespace_alone(
+    api: FakeApi, monkeypatch: pytest.MonkeyPatch, token: str
+) -> None:
+    """GH_TOKEN that strips to nothing is refused as unset, before any request."""
+    monkeypatch.setenv("GH_TOKEN", token)
+
+    with pytest.raises(scripts.RefusalError, match="^GH_TOKEN is not set$"):
+        scripts.job_log_location("o/n", 1)
+
+    assert api.seen == []
+
+
+@pytest.mark.parametrize(
+    "token",
+    [f"{TOKEN}\n{TOKEN}", f"{TOKEN} x", f"{TOKEN}\x7f", f"{TOKEN}\x1b", f"{TOKEN}é"],
+    ids=["inner-newline", "inner-space", "delete", "escape", "non-ascii"],
+)
+def test_job_log_location_refuses_a_gh_token_outside_visible_ascii(
+    api: FakeApi, monkeypatch: pytest.MonkeyPatch, token: str
+) -> None:
+    """A character that is not visible ASCII is refused before any request, unquoted."""
+    monkeypatch.setenv("GH_TOKEN", token)
+
+    with pytest.raises(scripts.RefusalError) as raised:
+        scripts.job_log_location("o/n", 1)
+
+    assert str(raised.value) == "GH_TOKEN holds a character that is not visible ASCII"
+    assert api.seen == []
+
+
+def test_job_log_url_sends_a_gh_token_without_its_trailing_newline(
+    api: FakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GH_TOKEN with a trailing newline is sent stripped, and the call succeeds."""
+    monkeypatch.setenv("GH_TOKEN", f"{TOKEN}\n")
+    url = api.redirect(1)
+
+    result = scripts.job_log_url({"repo": "o/n", "job_id": 1})
+
+    [(_, headers)] = api.seen
+    assert headers["Authorization"] == f"Bearer {TOKEN}"
+    assert result == {"exit_code": 0, "stdout": f"{url}\n", "stderr": ""}
+
+
+def test_job_log_url_with_an_inner_newline_in_gh_token_returns_the_refusal(
+    api: FakeApi, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """GH_TOKEN with an inner newline is the refusal, and no stream holds the token."""
+    monkeypatch.setenv("GH_TOKEN", f"{TOKEN}\n{TOKEN}")
+    stdin = json.dumps({"repo": "o/n", "job_id": 1}).encode()
+
+    result = scripts.run_script("job_log_url", stdin)
+
+    assert result == {
+        "exit_code": 2,
+        "stdout": "",
+        "stderr": "github plugin refused: "
+        "GH_TOKEN holds a character that is not visible ASCII\n",
+    }
+    assert TOKEN not in result["stdout"] + result["stderr"]
+    assert api.seen == []
+
+
 def test_job_log_url_returns_the_url_as_its_stdout(api: FakeApi) -> None:
     """The job_log_url action prints the URL and a newline, and exits 0."""
     url = api.redirect(1)

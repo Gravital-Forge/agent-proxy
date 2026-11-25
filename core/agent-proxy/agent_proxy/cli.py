@@ -317,10 +317,16 @@ def _check(args: argparse.Namespace) -> None:
 def _serve(args: argparse.Namespace) -> None:
     instance = Instance.start(_state_dir(), _config_path(), _docker_client())
     try:
+        _report_removed_cages(instance.removed_cages)
         _report_warnings(instance.warnings)
         _Server(uvicorn.Config(instance.app, host=args.host, port=args.port)).run()
     finally:
         instance.close()
+
+
+def _report_removed_cages(names: Iterable[str]) -> None:
+    for name in names:
+        print(f"agent-proxy: removed the left cage {name!r}", file=sys.stderr)
 
 
 def _state_dir() -> Path:

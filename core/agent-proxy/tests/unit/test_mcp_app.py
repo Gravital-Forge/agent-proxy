@@ -37,8 +37,10 @@ OTHER_IMAGE = "ghcr.io/example/other@sha256:" + "b" * 64
 UNKNOWN_TOKEN = "apx_" + "x" * 43
 TOKEN_REFUSAL = "the bearer token is missing, unknown, revoked, or expired"
 TOKEN_STORE_REFUSAL = "the token store could not be read"
-AUDIT_REFUSAL = re.compile(
-    r"the audit log could not record call [0-9a-f]{32}, so its result is withheld"
+RAN_AUDIT_REFUSAL = re.compile(
+    r"the action ran and may have taken effect, but the audit log could not record"
+    r" call [0-9a-f]{32}, so its result is withheld; check what it changed before"
+    r" a retry"
 )
 NOT_SQLITE = b"this file is not a SQLite database\n" * 8
 ECHO_SCHEMA = {
@@ -386,7 +388,7 @@ def test_an_unreadable_token_store_reaches_the_client_as_a_prefixed_tool_error(
 def test_a_failed_audit_write_reaches_the_client_as_a_prefixed_tool_error(
     served: Served, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A call whose audit line cannot be written is refused, its result withheld."""
+    """A ran call whose audit line cannot be written is refused, its result withheld."""
 
     def fail(record: AuditRecord) -> None:
         raise AuditError("the audit log cannot take the line")
@@ -398,7 +400,7 @@ def test_a_failed_audit_write_reaches_the_client_as_a_prefixed_tool_error(
 
     message = str(caught.value)
     assert message.startswith(REFUSAL_PREFIX)
-    assert AUDIT_REFUSAL.fullmatch(message.removeprefix(REFUSAL_PREFIX))
+    assert RAN_AUDIT_REFUSAL.fullmatch(message.removeprefix(REFUSAL_PREFIX))
 
 
 def test_a_failed_script_is_a_normal_result_carrying_its_content(

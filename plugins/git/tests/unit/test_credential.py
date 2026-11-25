@@ -16,14 +16,15 @@ NO_PATH = (
 )
 
 
-def _request(path: str | None, host: str = "github.com") -> io.StringIO:
-    """Return git's request on stdin, with every key git sends, path if given."""
-    lines = [
-        "capability[]=authtype",
-        "capability[]=state",
-        "protocol=https",
-        f"host={host}",
-    ]
+def _request(
+    path: str | None, protocol: str | None = "https", host: str | None = "github.com"
+) -> io.StringIO:
+    """Return git's request on stdin, with every key git sends; None leaves one out."""
+    lines = ["capability[]=authtype", "capability[]=state"]
+    if protocol is not None:
+        lines.append(f"protocol={protocol}")
+    if host is not None:
+        lines.append(f"host={host}")
     if path is not None:
         lines.append(f"path={path}")
     lines.append('wwwauth[]=Basic realm="GitHub"')
@@ -70,11 +71,50 @@ def test_get_answers_the_token_for_any_repository_of_a_listed_owner(
     assert answer == (0, GRANTED, "")
 
 
-def test_get_ignores_the_host(capsys: pytest.CaptureFixture[str]) -> None:
-    """The host plays no part in the answer: the grant's domains bound it."""
-    request = _request("octo/hello.git", host="example.invalid")
+@pytest.mark.parametrize(
+    ("protocol", "host"),
+    [
+        ("http", "github.com"),
+        ("https", "example.invalid"),
+        ("https", "github.com:443"),
+        ("https", "GitHub.com"),
+        (None, "github.com"),
+        ("https", None),
+    ],
+    ids=[
+        "http",
+        "another-host",
+        "a-host-with-a-port",
+        "the-host-in-another-case",
+        "no-protocol",
+        "no-host",
+    ],
+)
+def test_get_refuses_any_protocol_and_host_but_https_github_com(
+    capsys: pytest.CaptureFixture[str], protocol: str | None, host: str | None
+) -> None:
+    """The reason names the protocol and the host, and the token stays out of it."""
+    request = _request("octo/hello.git", protocol=protocol, host=host)
 
-    assert _answer(capsys, "get", request, LISTED) == (0, GRANTED, "")
+    answer = _answer(capsys, "get", request, LISTED)
+
+    reason = (
+        f"credential request names protocol {protocol!r} and host {host!r}; "
+        "the git plugin answers only protocol 'https' and host 'github.com'"
+    )
+    assert answer == (0, QUIT, f"{PREFIX}{reason}\n")
+
+
+def test_get_checks_the_protocol_and_host_before_the_path(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A request for another host is refused for its host, whatever its path."""
+    request = _request("other/hello.git", host="example.invalid")
+
+    _, _, stderr = _answer(capsys, "get", request, LISTED)
+
+    assert "host 'example.invalid'" in stderr
+    assert "GITHUB_REPOS" not in stderr
 
 
 @pytest.mark.parametrize(

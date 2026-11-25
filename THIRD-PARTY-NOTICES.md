@@ -1,8 +1,9 @@
 # Third-party notices
 
-`LICENSE` covers the source in this repository. Each published image also holds third-party
-software, and that software keeps its own licence. This notice names where each image's third-party
-software comes from.
+`LICENSE` covers the source in this repository, except the vendored seccomp profile and its licence
+text, which [The instance image](#the-instance-image) names. Each published image also holds
+third-party software, and that software keeps its own licence. This notice names where each image's
+third-party software comes from.
 
 ## The verifier image
 
@@ -15,6 +16,12 @@ the Go toolchain. The executable carries the Go standard library, under the BSD-
 names. That image holds Python and the operating system packages it is built from, each under its
 own licence. The instance image also installs the dependencies that `core/agent-proxy/uv.lock`
 locks, without its dev group, each under its own licence.
+
+The instance image also ships Docker's default seccomp profile, verbatim, as the core package's
+`agent_proxy/seccomp/default.json`, from `core/agent-proxy/agent_proxy/seccomp/default.json`. The
+file comes from `github.com/moby/profiles/seccomp` v0.2.4, the version that Docker 29.9.2 builds in,
+under the Apache License 2.0. The licence's text ships beside the profile, as
+`agent_proxy/seccomp/LICENSE`, from `core/agent-proxy/agent_proxy/seccomp/LICENSE`.
 
 ## The plugin images
 

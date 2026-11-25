@@ -56,7 +56,8 @@ each agent's instance:
   agent cannot start a container that skips its grants, and container root maps to the service user,
   never to the host's root.
 - **The ACLs on the agent's tree** let the instance and the agent read and write each other's files
-  there, while the agent's home stays mode `700` and keeps every other agent out.
+  there. Only the agent and the service user may traverse the agent's home, and provisioning warns
+  when anyone else can, as [The agent's tree](docs/architecture.md#the-agents-tree) gives.
 
 [Why each part is needed](docs/deployment.md#why-each-part-is-needed) gives what breaks without each
 part. [The deployment guide](docs/deployment.md) takes the operator through provisioning, the first

@@ -95,7 +95,7 @@
         "type": "object",
         "properties": {
           "repo": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]*[A-Za-z0-9_-][A-Za-z0-9_.-]*$"},
-          "pr": {"type": "string", "pattern": "^[^-]"},
+          "pr": {"type": "string", "pattern": "^(?!-)(?![Hh][Tt][Tt][Pp][Ss]?:)(?![\\s\\S]*://)[\\s\\S]"},
           "fields": {"type": "string"}
         },
         "required": ["repo", "pr"],

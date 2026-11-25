@@ -13,9 +13,9 @@ refused, and so is a merge key (`<<`), because an explicit key overrides a merge
 trace. The top level is a mapping, and every mapping the format defines refuses a field it does not
 name.
 
-No field has a default except a grant's `timeout` and `env`. There are no scope-level defaults and
-no layering between files. Each grant states its own fields, so a grant reads correctly on its own,
-and repetition across grants and across instances is accepted.
+No field has a default except a grant's `timeout`, `memory`, and `env`. There are no scope-level
+defaults and no layering between files. Each grant states its own fields, so a grant reads correctly
+on its own, and repetition across grants and across instances is accepted.
 
 ### Top-level fields
 
@@ -58,6 +58,10 @@ A grant has these fields:
   its grant's credentials.
 - `timeout` is optional. It overrides the action's default timeout. It is a duration: a positive
   count with no leading zero, then a unit of `s`, `m`, `h`, or `d`, such as `120s`.
+- `memory` is optional. It sets the memory limit of every cage under the grant, which is 4 GiB
+  without it. It is a string: a positive count with no leading zero, then `m` for MiB or `g` for
+  GiB, such as `8g`. It is at least `64m`, the size of the cage's `/tmp`, whose pages count against
+  the limit. [The cage](architecture.md#the-cage) gives the cage's limits.
 - `env` is optional, and defaults to an empty map. It maps each name to a string that every cage
   under the grant receives as an environment variable. A name begins with an upper-case letter or
   `_`, and holds only upper-case letters, digits, and `_`. It is neither `HTTPS_PROXY`,
@@ -103,6 +107,27 @@ effect, and `token mint` mints.
   `reload`, and at `token mint`. Its text is the text of the refusal that a call under that grant
   gets, as [Refusals](#refusals) gives. So the operator can start the instance and mint tokens
   before storing the credentials.
+
+The start also gives warnings of its own, which `serve` prints with the config's. None of them stops
+the start:
+
+- `the Docker daemon cannot enforce a cage's memory limit, so each cage runs without one`, when the
+  daemon's info does not report that it enforces a memory limit.
+- `the Docker daemon cannot enforce a cage's process limit, so each cage runs without one`, when the
+  daemon's info does not report that it enforces a process limit.
+- `the left cage '<name>' could not be removed: <Docker's error>`, for each cage that a killed
+  instance left and the start cannot remove. [The instance](architecture.md#the-instance) gives the
+  removal.
+
+Before any warning, `serve` prints one report line on stderr for each left cage that the start
+removes: `agent-proxy: removed the left cage '<name>'`. A report is not a warning, and it stops
+nothing.
+
+Two failures of Docker stop the start:
+
+- `the Docker daemon's info could not be read, so the cage limits cannot be checked: <Docker's error>`,
+  when the start cannot read the daemon's info.
+- `the left cages could not be listed: <Docker's error>`, when the start cannot list the left cages.
 
 ## The operator command
 
@@ -156,9 +181,9 @@ docker exec -i agent-proxy agent-proxy credential set github-token
   `agent-proxy: FAILED of TOTAL checks failed` and exits 1. It refuses a scope that the config in
   force does not define, and names the defined scopes.
 - `serve --host HOST --port PORT` is the instance image's process; the operator does not run it by
-  hand. `PORT` is an integer from 1 to 65535. It prints the warnings of the start, which the
-  container's log shows, then serves the MCP surface at `/mcp` on that address. On SIGINT or SIGTERM
-  it stops and exits 0.
+  hand. `PORT` is an integer from 1 to 65535. It prints the reports and the warnings of the start,
+  which the container's log shows, then serves the MCP surface at `/mcp` on that address. On SIGINT
+  or SIGTERM it stops and exits 0.
 
 [Reload](architecture.md#reload) gives how `reload` and `check` reach the instance. Each waits at
 most 600 seconds for the reply. A socket with nothing listening, no reply in time, and a reply of
@@ -208,11 +233,14 @@ script receives.
 
 ### Output past the cap
 
-The output cap is 256 KiB (262,144 bytes) for each stream. A stream over the cap goes, in full, to a
-new file in `overflow_dir`, named for the call: `<call-id>.stdout` or `<call-id>.stderr`, where the
-call ID is 32 lower-case hex digits. The result holds the file's path and the stream's size in place
-of the stream, and `truncated: true`. It holds no part of the stream, so the agent decides how to
-read the file. For example:
+The output cap is 256 KiB (262,144 bytes) for each stream. A stream over the cap goes to a new file
+in `overflow_dir`, named for the call: `<call-id>.stdout` or `<call-id>.stderr`, where the call ID
+is 32 lower-case hex digits. The instance reads each stream back from the cage's log, and that log
+has a size cap of its own. So the file holds the stream as the log kept it, and a call whose output
+passes the log's cap loses the start of it, as [Known limits](architecture.md#known-limits) gives.
+The result holds the file's path and the stream's size in place of the stream, and
+`truncated: true`. It holds no part of the stream, so the agent decides how to read the file. For
+example:
 
 ```json
 {"exit_code": 0, "stdout_file": "/home/agent-01/Projects/.agent-proxy-overflow/0123456789abcdef0123456789abcdef.stdout", "stdout_bytes": 4194304, "stderr": "", "truncated": true}
@@ -278,5 +306,14 @@ The proxy refuses a call when:
 - the cage fails after it starts;
 - an overflow file cannot be created or written;
 - the audit log cannot record the call, and the result is withheld.
+
+When the audit log cannot record an action's call whose cage started, the refusal also says that the
+action ran, because the action may have changed something before the cage ended:
+
+```text
+agent-proxy refused: the action ran and may have taken effect, but the audit log could not record call <call-id>, so its result is withheld; check what it changed before a retry
+```
+
+[Audit](architecture.md#audit) gives which calls get this refusal.
 
 The detail of any other error is masked.

@@ -27,7 +27,7 @@ These terms carry one meaning each through the code and the documents.
   list of grants a token holding it may use.
 - **Token** — a bearer secret that names exactly one scope. It carries no policy of its own.
 - **Grant** — one entry in a scope: an action, plus that action's roots, domains, and credentials,
-  an optional timeout override, and an optional `env`.
+  an optional timeout override, an optional memory limit, and an optional `env`.
 - **Action** — one operation a plugin offers, of one of two kinds:
   - a **command** action runs a fixed argv prefix at subcommand granularity (`gh pr create`, never
     bare `gh`), extended by typed parameters;
@@ -104,7 +104,23 @@ inside the instance's process (`core/agent-proxy/agent_proxy/runner.py`).
   as a read-only file mounted from the credential store, and no other.
 - **Hardening:** the cage runs as container root, which the rootless daemon maps to the instance's
   service user. It drops every capability, sets `no-new-privileges`, and has a read-only root
-  filesystem with a 64 MiB tmpfs at `/tmp` for scratch.
+  filesystem with a 64 MiB tmpfs at `/tmp` for scratch. It runs under a seccomp profile that refuses
+  the setuid and setgid bits, as [The seccomp profile](#the-seccomp-profile) gives.
+- **Limits:** the cage may run at most 1024 processes, `CAGE_PIDS_LIMIT` in `runner.py`. Its memory
+  limit is the grant's `memory`, or 4 GiB, `CAGE_MEMORY_BYTES`, when the grant gives none. The swap
+  limit equals the memory limit, so the cage gets no swap. The pages of `/tmp` count against the
+  memory limit. The instance warns at start when its daemon cannot enforce either limit, as
+  [The instance](#the-instance) gives, because Docker then drops the limit and still runs the cage.
+- **Log:** the cage's output reaches the instance through the cage's log, which keeps at most two
+  files of 512 MiB each, `LOG_OPTIONS` in `runner.py`. So one call cannot fill the service user's
+  disk. The cap bounds the log's encoded size, not the output's. Docker's `json-file` log driver
+  writes each line of output as a JSON object that also holds the line's stream and time, with the
+  line's text escaped, and the one log holds stdout and stderr together. So a call can pass the cap
+  with well under 1 GiB of output, and soonest when its output comes in short lines.
+  [Known limits](#known-limits) gives what a call past the cap returns.
+- **Label:** every cage carries the label `agent-proxy.cage=1`, and no other container does. The
+  start finds the cages a killed instance left by that label, as [The instance](#the-instance)
+  gives.
 - **Concurrency:** the config's `max_cages` caps the cages that run at one time. A call over the cap
   waits, with no bound, for a cage to end. Every call and every self-check of an instance shares one
   count, so calls that started under different configs still count together.
@@ -113,9 +129,9 @@ inside the instance's process (`core/agent-proxy/agent_proxy/runner.py`).
 
 The instance removes each cage by force whatever the call's outcome, and the cage holds its place
 under the cap until it is removed. A kill of the instance's process while calls run leaves their
-cages, as [Known limits](#known-limits) gives. Files the agent owns belong to a uid that the cage's
-user namespace does not map, so the cage writes them through the ACL but cannot change their mode or
-owner.
+cages until the next start, as [Known limits](#known-limits) gives. Files the agent owns belong to a
+uid that the cage's user namespace does not map, so the cage writes them through the ACL but cannot
+change their mode or owner.
 
 Before it creates a cage, the instance opens each root's directory one path component at a time from
 `/`, and follows no symbolic link anywhere in the path. A root that is a symbolic link, is not a
@@ -162,6 +178,33 @@ call; a missing image fails the cage's start. The instance image names its verif
 `AGENT_PROXY_VERIFIER_IMAGE`. A reference pinned by digest, as a published instance image carries,
 is pulled at the instance's start when the daemon lacks it. A tag reference, such as the source
 build's `agent-proxy-verifier:1`, must already be on the daemon.
+
+### The seccomp profile
+
+The rootless daemon maps the cage's root to the service user, so a file a cage creates in a root of
+mode `rw` belongs to the service user on the host. With the setuid bit, such a file would run as the
+service user for whoever runs it. With the setgid bit, it would run with the service user's group,
+which reaches parts of the service user's home on a host whose homes are mode `750`. Neither the
+dropped capabilities nor `no-new-privileges` stops a cage from setting either bit. So every cage
+runs under a seccomp profile that refuses both bits
+(`core/agent-proxy/agent_proxy/cage_seccomp.py`).
+
+The profile is Docker's default profile with one change. The default ships verbatim in
+`core/agent-proxy/agent_proxy/seccomp/default.json`, and the instance derives the cage's profile
+from it once per process:
+
+- `chmod`, `fchmod`, `fchmodat`, `fchmodat2`, `creat`, `mknod`, and `mknodat` are allowed only when
+  the mode argument holds neither bit.
+- `open` and `openat` are allowed when the mode holds neither bit, or when the flags hold neither
+  `O_CREAT` nor `O_TMPFILE`, because the kernel reads the mode only with one of those flags. The
+  flag values are those of `amd64`, the one platform the images are built for.
+- `openat2` fails with `ENOSYS`, because seccomp cannot read the mode inside its struct. A caller
+  that gets `ENOSYS` falls back to `openat`.
+
+Every other call keeps the default profile's rule. The default already refuses `io_uring`, which
+could otherwise pass a mode that seccomp never sees. A refused call fails with `EPERM`, so a `chmod`
+that keeps a directory's setgid bit fails too, as
+[How an action runs](writing-a-plugin.md#how-an-action-runs) gives.
 
 ## Egress
 
@@ -213,8 +256,11 @@ recognize a leaked token (`core/agent-proxy/agent_proxy/auth.py`).
 The instance stores the SHA-256 of each token, never the token, with its name, scope, created time,
 last-used time, and optional expiry, in `tokens.sqlite3`. The operator sees a token once, when it is
 minted, and the store cannot produce it again. A presented token's digest is compared with every
-stored digest in constant time. An expired token does not verify. A call writes the token's
-last-used time in the same transaction as the match.
+stored digest in constant time. An expired token does not verify. A call matches its token with a
+read that takes no write lock, so a token that matches nothing never waits for another call's write.
+A match records the token's last-used time in a transaction of its own, which updates the row only
+while it still holds the matched digest. A token revoked between the match and that update does not
+verify.
 
 Only the operator manages tokens, with the `token` verbs of
 [The operator command](reference.md#the-operator-command). Agents cannot mint, narrow, or refresh a
@@ -242,10 +288,30 @@ never consults the store: a credential that a grant names and the store lacks is
 ## Audit
 
 The instance writes one JSON line per call to `audit/audit.log` in the state directory
-(`core/agent-proxy/agent_proxy/audit.py`). A line holds `timestamp`, `call_id`, `token_name`,
-`scope`, `action`, the full input `arguments`, `exit_code`, `duration_ms`, `stdout_bytes`,
-`stderr_bytes`, `truncated`, and, for a refused call, the `refusal` without its MCP prefix. A line
-never holds a credential's value or any output's content.
+(`core/agent-proxy/agent_proxy/audit.py`), except for the calls with no verified token that the
+60-second rule below holds back. A line holds `timestamp`, `call_id`, `token_name`, `scope`,
+`action`, `arguments`, `arguments_cut`, `exit_code`, `duration_ms`, `stdout_bytes`, `stderr_bytes`,
+`truncated`, and, for a refused call, the `refusal` without its MCP prefix. A line never holds a
+credential's value or any output's content.
+
+The caller chooses the arguments, the tool name, and any input that a refusal quotes, so the line
+caps each of them where it is rendered:
+
+- When the compact JSON of the input arguments holds at most 16,384 characters,
+  `ARGUMENTS_CAP_CHARACTERS`, `arguments` is the input object and `arguments_cut` is `null`.
+- When it holds more, `arguments` is `null`, and `arguments_cut` is
+  `{"bytes": <the UTF-8 size of the whole JSON>, "head": "<its first 16,384 characters>"}`.
+- When the call has no verified token, both are `null`.
+- An `action` longer than 256 characters, `ACTION_CAP_CHARACTERS`, becomes its first 256 characters,
+  a space, and the marker `[cut]`. A `refusal` longer than 4,096 characters,
+  `REFUSAL_CAP_CHARACTERS`, is cut the same way. The refusal that the caller receives is never cut.
+
+Anyone who reaches the instance's port can make a call with no verified token, so the gateway bounds
+how often such calls write a line (`core/agent-proxy/agent_proxy/mcp.py`). A call with no verified
+token, or one that meets a token store that cannot be read, writes a line only when no such line was
+written yet or 60 seconds, `TOKENLESS_LINE_INTERVAL`, have passed since the last one. Every such
+call still gets its refusal. The next such line counts the calls that wrote none: its `refusal` ends
+with `; <n> more calls with no verified token were refused since the last such line`.
 
 The log rotates at 10 MiB and keeps five rotated files, `audit.log.1` onward. Only the operator
 reads it, with `audit tail` from [The operator command](reference.md#the-operator-command).
@@ -256,7 +322,12 @@ later call is refused before its token is checked, and writes no line. When the 
 cuts a log that ends in a fragment back to its last whole line.
 
 A call whose audit line cannot be written is refused, and its result is withheld. So every result an
-agent receives has its line.
+agent receives has its line. Once a call's cage has started, its action may already have changed
+something, such as a pushed branch or an edited pull request. So when the line of an action's call
+whose cage started cannot be written, the refusal says that the action ran and may have taken
+effect, and that the caller must check what it changed before a retry. That holds whether the cage
+exited, timed out, or failed, and when its output passed the cap and the overflow file could not be
+written. [Refusals](reference.md#refusals) gives the text.
 
 Each self-check writes one line, with `agent-proxy_self_check` as its action, and with no exit code
 and no output sizes, because no single cage's output is the result. The line of a tool call names
@@ -301,11 +372,28 @@ stage made. The image's process is `agent-proxy serve` on container port 8000. T
 `/etc/agent-proxy/config.yaml`, and `AGENT_PROXY_VERIFIER_IMAGE` to the build argument
 `VERIFIER_IMAGE`, which defaults to `agent-proxy-verifier:1`.
 
-At start the instance opens its stores and its audit log, makes the verifier present, loads the
-config and starts its egress, then serves the control socket and starts the daily sweep of old
-overflow files. A step that fails stops the start, and the steps before it are undone, except that
-the egress proxies stay for the next start to keep or remove. On SIGINT or SIGTERM the instance
-stops, and its egress proxies stay too.
+At start the instance opens its stores and its audit log, makes the verifier present, reads which
+cage limits its daemon enforces, removes the cages that a killed instance left, loads the config and
+starts its egress, then serves the control socket and starts the daily sweep of old overflow files.
+A step that fails stops the start, and the steps before it are undone, except that the egress
+proxies stay for the next start to keep or remove. On SIGINT or SIGTERM the instance stops, and its
+egress proxies stay too.
+
+One instance owns its daemon, so every cage on the daemon at start is one that a killed instance
+left. The start removes by force each container that carries the cage label, running or stopped,
+before the instance serves (`remove_left_cages` in `runner.py`). The start reports each cage it
+removes on stderr, by name. A left cage can be a call that the killed instance never finished, and
+such a call never got its audit line, so the report keeps a record of it in the instance's log. A
+removal that fails gives a warning that names the container, and the start goes on. A container that
+is already gone when the start removes it is no failure, and gives neither a report nor a warning. A
+listing that fails stops the start.
+
+The start reads the daemon's info, and gives a warning for each cage limit that the daemon cannot
+enforce, as [Failures and warnings](reference.md#failures-and-warnings) gives. A daemon that does
+not report a limit counts as one that cannot enforce it. An info call that fails stops the start.
+`serve` prints the start's reports and warnings, as the `serve` verb under
+[Verbs](reference.md#verbs) gives: first the removal reports, then the limit warnings, then the
+removal warnings, then the config's own.
 
 `core/docker/start-instance.sh` holds the run line. It takes the image, the container name, the host
 port, the config directory, the state directory, and the agent tree, and passes any further
@@ -424,20 +512,27 @@ The agent's tree carries three things, and provisioning applies each:
   service user to a group, the agent's group included. Setgid is the only thing that groups cage
   files to the agent, and the instance never relies on a cage to fix a file's group.
 
-The agent's home stays mode `700`, and gains only traverse (`x`) for `agentproxy-<agent>`.
+Only the agent and `agentproxy-<agent>` may traverse the agent's home. Provisioning gives
+`agentproxy-<agent>` traverse (`x`) on the home, and changes nothing else there. It then reads the
+home's ACL, and warns about each entry that lets anyone else traverse the home: `other`, a named
+user, a named group, and the owning group when that group has a member other than the agent. A group
+that provisioning cannot look up counts as having another member. Each warning gives the command
+that closes its entry, and provisioning goes on, as [Provisioning](deployment.md#provisioning)
+gives. A home of mode `700` draws no warning, and neither does a home of mode `750` whose group
+holds the agent alone.
 
 So files the instance creates in the agent's tree are owned by `agentproxy-<agent>`, grouped to the
 agent, and read-write for the agent; files the agent creates are read-write for the instance.
-Another agent is `other` on every such file, and cannot traverse the home.
+Another agent is `other` on every such file, and cannot traverse a home that draws no warning.
 
 ### The tree inside the home
 
 The tree's realpath lies strictly inside the realpath of the agent's home, and the service user
 gains traverse on each directory between the home and the tree. That keeps the home's guard: the
-home stays mode `700` with traverse alone, so another agent cannot traverse it. A tree outside the
-home loses that guard, and a tree equal to the home would put the service user's ACL on the whole
-home. Teardown applies the same rule, because it removes ACL entries recursively, as root, from the
-tree it is given.
+service user gains traverse alone on the home, so another agent still cannot traverse it. A tree
+outside the home loses that guard, and a tree equal to the home would put the service user's ACL on
+the whole home. Teardown applies the same rule, because it removes ACL entries recursively, as root,
+from the tree it is given.
 
 ## Known limits
 
@@ -455,10 +550,9 @@ tree it is given.
 - The github plugin's `run_view` with `log_failed` works only under a grant that names each storage
   host, as [Egress](../plugins/github/README.md#egress) in the plugin's README gives.
 - Credentials are not encrypted at rest: each is a plain file protected by the service user's uid.
-- A call's cage outlives the instance when the instance's process is killed while the call runs.
-  Nothing but that process removes a cage on its own: when the call ends, or when the process stops
-  on SIGINT or SIGTERM, which waits for its running calls to end. These kill the process while a
-  call runs:
+- A call's cage outlives the instance when the instance's process is killed while the call runs. The
+  process removes each cage when its call ends, and a stop on SIGINT or SIGTERM waits for the
+  running calls to end. These kill the process while a call runs:
   - `docker rm --force` or `docker kill` on the instance container;
   - `docker stop` when a call outlasts Docker's stop grace period, 10 seconds by default, after
     which Docker kills the instance;
@@ -466,27 +560,33 @@ tree it is given.
   - a stop or restart of the service user's Docker daemon, which sends the instance SIGTERM and
     kills it after the same grace period.
 
-  A cage that has started runs until its command ends or the daemon stops, with no timeout, because
-  the instance holds the timeout. It then stays on the service user's daemon as a stopped container.
-  A cage stays there as a created container when the instance was killed between creating the cage
+  While no instance is up, a cage that has started runs until its action ends or the daemon stops,
+  with no timeout, because the instance holds the timeout. It then stays on the daemon as a stopped
+  container. A cage stays as a created container when the instance was killed between creating it
   and starting it. The container config of each such cage still holds the value of every credential
   that its grant passes as an environment variable, and `docker inspect` shows it. A file credential
-  leaves only its mount. The next start removes none of these cages. The operator finds them with
-  the first command below, which matches the mount of [the root verifier](#the-root-verifier) that
-  every cage carries and no other container does. The operator removes them with the second, while
-  the instance container is stopped or removed and before its next start: the filter also matches a
-  running instance's cages, and removing one ends its call. After an out-of-memory kill, or a stop
-  or restart of the daemon, the restart policy `unless-stopped` starts the instance again as soon as
-  the daemon runs, with no operator at hand. The operator then stops it with
-  `docker stop agent-proxy` when no call runs, removes the cages with the second command, and starts
-  it with `docker start agent-proxy`. Each `docker` command in this entry runs on the service user's
-  daemon, as every `docker` command in [the deployment guide](deployment.md) does.
+  leaves only its mount. The next start removes every such cage before the instance serves, as
+  [The instance](#the-instance) gives. After an out-of-memory kill, or a stop or restart of the
+  daemon, the restart policy `unless-stopped` makes that start as soon as the daemon runs. The
+  operator finds the cages sooner with the first command below, and removes them with the second.
+  The label filter also matches a running instance's cages, so the second command also ends that
+  instance's calls. Both commands run on the service user's daemon, as every `docker` command in
+  [the deployment guide](deployment.md) does.
 
   ```sh
-  docker ps -a --filter volume=/.agent-proxy
-  docker ps -aq --filter volume=/.agent-proxy | xargs -r docker rm --force
+  docker ps -a --filter label=agent-proxy.cage
+  docker ps -aq --filter label=agent-proxy.cage | xargs -r docker rm --force
   ```
 
+- A token holder can push old lines out of the audit log by making many calls. Each of those calls
+  writes a line under its token's name, and the caps of [Audit](#audit) bound each line.
+- A cage's log keeps two files of 512 MiB each. A call whose log passes that size returns only the
+  last part of its output, with nothing to mark the loss. The cap bounds the log's encoded size, so
+  the loss can begin well under 1 GiB of output, most of all for output in short lines, as
+  [The cage](#the-cage) gives.
+- A cage has no CPU limit, so one call can take every CPU the service user's daemon reaches. A
+  rootless daemon enforces a CPU limit only after the host delegates the `cpu` cgroup controller to
+  the service user, which provisioning does not do.
 - The egress proxy neither masks credentials nor intercepts TLS. It allows or refuses a host by
   name, so a cage can send its credential to any host its grant names.
 - A call's output returns when the call ends, never as it streams.

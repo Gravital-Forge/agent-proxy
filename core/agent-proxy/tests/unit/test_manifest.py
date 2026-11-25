@@ -1,10 +1,13 @@
 import json
 from dataclasses import FrozenInstanceError
 from datetime import timedelta
+from http.client import HTTPConnection
 from importlib.resources import files
 
 import pytest
 from jsonschema import Draft202012Validator
+from referencing.exceptions import Unresolvable
+from schema_server import serving_schema
 
 from agent_proxy.config import (
     ACTION_NAME_PATTERN,
@@ -22,6 +25,7 @@ from agent_proxy.plugins import (
     Parameter,
     ScriptAction,
     parse_manifest,
+    schema_validator,
 )
 
 OMIT = object()
@@ -879,3 +883,260 @@ def test_parse_manifest_refuses_a_top_level_that_is_not_an_object(
     assert _refusal(data).errors == (
         f"manifest must be a JSON object at the top level, got {found}",
     )
+
+
+REMOTE_REF = "https://schemas.example.test/remote.json"
+
+
+def _unresolved(at: str, reference: str) -> str:
+    return f"{at}: reference must resolve inside the schema, got {reference!r}"
+
+
+def _object_with(**properties: object) -> dict[str, object]:
+    return {"type": "object", "properties": properties}
+
+
+def _report_input(schema: dict[str, object]) -> dict[str, object]:
+    """Return the report manifest with schema, made an object schema, as its input."""
+    return _report(input_schema={"type": "object"} | schema)
+
+
+UNRESOLVED_REFERENCE_CASES = [
+    pytest.param(
+        _report(input_schema=_object_with(a={"$ref": REMOTE_REF})),
+        _unresolved(f"{REPORT}.input_schema.properties.a.$ref", REMOTE_REF),
+        id="script-input-remote",
+    ),
+    pytest.param(
+        _report(output_schema=_object_with(a={"$ref": REMOTE_REF})),
+        _unresolved(f"{REPORT}.output_schema.properties.a.$ref", REMOTE_REF),
+        id="script-output-remote",
+    ),
+    pytest.param(
+        _echo(input_schema=_echo_input(message={"$ref": REMOTE_REF})),
+        _unresolved(f"{ECHO}.input_schema.properties.message.$ref", REMOTE_REF),
+        id="command-input-remote",
+    ),
+    pytest.param(
+        _report_input({"$ref": "other.json"}),
+        _unresolved(f"{REPORT}.input_schema.$ref", "other.json"),
+        id="relative-uri",
+    ),
+    pytest.param(
+        _report_input({"$ref": "#/$defs/missing"}),
+        _unresolved(f"{REPORT}.input_schema.$ref", "#/$defs/missing"),
+        id="pointer-to-nowhere",
+    ),
+    pytest.param(
+        _report_input({"$ref": "#missing"}),
+        _unresolved(f"{REPORT}.input_schema.$ref", "#missing"),
+        id="no-such-anchor",
+    ),
+    pytest.param(
+        _report_input({"$dynamicRef": REMOTE_REF}),
+        _unresolved(f"{REPORT}.input_schema.$dynamicRef", REMOTE_REF),
+        id="dynamic-ref-remote",
+    ),
+    pytest.param(
+        _report_input({"$dynamicRef": "#missing"}),
+        _unresolved(f"{REPORT}.input_schema.$dynamicRef", "#missing"),
+        id="dynamic-ref-no-such-anchor",
+    ),
+    pytest.param(
+        _report_input({"prefixItems": [{}], "items": {"$ref": "#/prefixItems/a"}}),
+        _unresolved(f"{REPORT}.input_schema.items.$ref", "#/prefixItems/a"),
+        id="pointer-index-not-a-number",
+    ),
+    pytest.param(
+        _report_input({"prefixItems": [{}], "items": {"$ref": "#/prefixItems/5"}}),
+        _unresolved(f"{REPORT}.input_schema.items.$ref", "#/prefixItems/5"),
+        id="pointer-index-past-the-end",
+    ),
+    pytest.param(
+        _report_input({"$defs": {"t": True}, "$ref": "#/$defs/t/x"}),
+        _unresolved(f"{REPORT}.input_schema.$ref", "#/$defs/t/x"),
+        id="pointer-through-a-boolean",
+    ),
+    pytest.param(
+        _report_input({"anyOf": [{}, {"$ref": REMOTE_REF}]}),
+        _unresolved(f"{REPORT}.input_schema.anyOf[1].$ref", REMOTE_REF),
+        id="inside-an-array",
+    ),
+    pytest.param(
+        _report_input({"x-note": {"$ref": REMOTE_REF}}),
+        _unresolved(f"{REPORT}.input_schema.x-note.$ref", REMOTE_REF),
+        id="under-an-unknown-keyword",
+    ),
+    pytest.param(
+        _report(input_schema=_object_with(const={"$ref": REMOTE_REF})),
+        _unresolved(f"{REPORT}.input_schema.properties.const.$ref", REMOTE_REF),
+        id="property-named-const",
+    ),
+    pytest.param(
+        _report_input({"$defs": {"examples": {"$ref": REMOTE_REF}}}),
+        _unresolved(f"{REPORT}.input_schema.$defs.examples.$ref", REMOTE_REF),
+        id="definition-named-examples",
+    ),
+    pytest.param(
+        _report_input(
+            {
+                "$id": "https://a.example.test/root.json",
+                "$defs": {
+                    "sub": {"$id": "sub.json", "$ref": "#/$defs/sibling"},
+                    "sibling": {},
+                },
+            }
+        ),
+        _unresolved(f"{REPORT}.input_schema.$defs.sub.$ref", "#/$defs/sibling"),
+        id="pointer-against-a-nested-id",
+    ),
+    pytest.param(
+        _report_input({"$ref": "#/default", "default": {"$ref": REMOTE_REF}}),
+        _unresolved(f"{REPORT}.input_schema.$ref", "#/default"),
+        id="pointer-to-a-default-value",
+    ),
+    pytest.param(
+        _report_input({"$ref": "#/const/a", "const": {"a": {"$ref": "#/nowhere"}}}),
+        _unresolved(f"{REPORT}.input_schema.$ref", "#/const/a"),
+        id="pointer-into-a-const-value",
+    ),
+    pytest.param(
+        _report_input({"$ref": "#/enum/0", "enum": [{"$ref": REMOTE_REF}]}),
+        _unresolved(f"{REPORT}.input_schema.$ref", "#/enum/0"),
+        id="pointer-into-an-enum-value",
+    ),
+    pytest.param(
+        _report_input({"$ref": "#/examples", "examples": [{}]}),
+        _unresolved(f"{REPORT}.input_schema.$ref", "#/examples"),
+        id="pointer-to-an-examples-value",
+    ),
+]
+
+
+@pytest.mark.parametrize(("document", "expected"), UNRESOLVED_REFERENCE_CASES)
+def test_parse_manifest_refuses_a_reference_that_does_not_resolve_inside_the_schema(
+    document: object, expected: str
+) -> None:
+    """A $ref or $dynamicRef that the schema alone cannot resolve is refused."""
+    assert _refusal(_encode(document)).errors == (expected,)
+
+
+def test_parse_manifest_reports_each_unresolved_reference_in_document_order() -> None:
+    """Every unresolved reference in one schema is its own message, in order."""
+    schema = {
+        "properties": {"a": {"$ref": "#/b"}, "c": {"items": {"$ref": REMOTE_REF}}},
+        "$ref": "#nowhere",
+    }
+
+    assert _refusal(_encode(_report_input(schema))).errors == (
+        _unresolved(f"{REPORT}.input_schema.properties.a.$ref", "#/b"),
+        _unresolved(f"{REPORT}.input_schema.properties.c.items.$ref", REMOTE_REF),
+        _unresolved(f"{REPORT}.input_schema.$ref", "#nowhere"),
+    )
+
+
+def test_parse_manifest_walks_an_unknown_keyword_as_deep_as_the_decoder_reads() -> None:
+    """The checker skips an unknown keyword, so the walk alone meets its depth."""
+    deep: list[object] = []
+    for _ in range(2000):
+        deep = [deep]
+    schema = {"x-deep": deep, "$ref": "#/nowhere"}
+
+    assert _refusal(_encode(_report_input(schema))).errors == (
+        _unresolved(f"{REPORT}.input_schema.$ref", "#/nowhere"),
+    )
+
+
+RESOLVED_REFERENCE_SCHEMAS = [
+    pytest.param({"$ref": "#"}, id="root"),
+    pytest.param(
+        _object_with(a={"$ref": "#/$defs/name"}) | {"$defs": {"name": {}}},
+        id="pointer",
+    ),
+    pytest.param({"$defs": {"~/": {}}, "$ref": "#/$defs/~0~1"}, id="escaped-pointer"),
+    pytest.param({"$defs": {"n": {"$anchor": "n"}}, "$ref": "#n"}, id="anchor"),
+    pytest.param(
+        {"$dynamicAnchor": "node", "items": {"$dynamicRef": "#node"}},
+        id="dynamic-anchor",
+    ),
+    pytest.param(
+        {
+            "$id": "https://a.example.test/root.json",
+            "$defs": {"sub": {"$id": "sub.json"}},
+            "$ref": "sub.json",
+        },
+        id="nested-id",
+    ),
+    pytest.param(
+        {
+            "$id": "https://a.example.test/root.json",
+            "$defs": {
+                "sub": {
+                    "$id": "sub.json",
+                    "$ref": "#/$defs/inner",
+                    "$defs": {"inner": {}},
+                }
+            },
+        },
+        id="pointer-against-a-nested-id",
+    ),
+    pytest.param(
+        {
+            "const": {"$ref": REMOTE_REF},
+            "enum": [{"$ref": REMOTE_REF}],
+            "default": {"$ref": REMOTE_REF},
+            "examples": [{"$dynamicRef": REMOTE_REF}],
+        },
+        id="references-held-as-values",
+    ),
+    pytest.param(_object_with(**{"$ref": {"type": "string"}}), id="property-named-ref"),
+]
+
+
+@pytest.mark.parametrize("schema", RESOLVED_REFERENCE_SCHEMAS)
+def test_parse_manifest_accepts_references_that_resolve_inside_the_schema(
+    schema: dict[str, object],
+) -> None:
+    """A schema whose references all resolve inside it loads as written."""
+    manifest = parse_manifest(_encode(_report_input(schema)))
+
+    assert manifest.actions["report"].input_schema == {"type": "object"} | schema
+
+
+def test_schema_validator_validates_against_a_local_reference() -> None:
+    """A validator from schema_validator follows a # pointer inside its schema."""
+    validator = schema_validator(
+        {"$defs": {"name": {"type": "string"}}, "items": {"$ref": "#/$defs/name"}}
+    )
+
+    assert validator.is_valid(["a"])
+    assert not validator.is_valid([1])
+
+
+def test_schema_validator_builds_a_draft_2020_12_validator() -> None:
+    """Under draft 2020-12, items applies only after prefixItems."""
+    validator = schema_validator({"prefixItems": [{"type": "string"}], "items": False})
+
+    assert isinstance(validator, Draft202012Validator)
+    assert validator.is_valid(["a"])
+    assert not validator.is_valid(["a", "b"])
+
+
+def test_a_remote_reference_makes_no_request() -> None:
+    """The manifest check refuses a remote $ref, and a validator never fetches it."""
+    with serving_schema() as server:
+        reference = f"{server.url}/remote.json"
+        schema = {"type": "object", "$ref": reference}
+
+        refusal = _refusal(_encode(_report(input_schema=schema)))
+        with pytest.raises(Unresolvable):
+            schema_validator(schema).is_valid({})
+        requested_before_probe = list(server.requested_paths)
+        connection = HTTPConnection(server.url.removeprefix("http://"))
+        connection.request("GET", "/probe")
+        connection.getresponse().read()
+        connection.close()
+
+    assert refusal.errors == (_unresolved(f"{REPORT}.input_schema.$ref", reference),)
+    assert requested_before_probe == []
+    assert server.requested_paths == ["/probe"]

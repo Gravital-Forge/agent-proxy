@@ -37,7 +37,31 @@ MANIFEST = parse_manifest(
 )
 ECHO = MANIFEST.actions["echo"]
 COUNT = MANIFEST.actions["count"]
+SETID_PROBE = MANIFEST.actions["setid_probe"]
 ECHO_HELLO = {"exit_code": 0, "stdout": "hello\n", "stderr": ""}
+SETID_ROUTES = (
+    "chmod",
+    "fchmod",
+    "fchmodat",
+    "fchmodat2",
+    "creat",
+    "mknod",
+    "mknodat",
+    "open",
+    "openat",
+    "openat-tmpfile",
+    "openat2",
+)
+SETID_MODES = ("4755", "2755")
+SETID_CONTROLS = (
+    "create 0755 ok",
+    "chmod 0755 ok",
+    "mkdir 0755 ok",
+    "read - ok",
+    # A read with either bit in its unread mode passes on its flags alone.
+    "openat-read 4755 ok",
+)
+SETID_BITS = 0o6000
 DEFAULT_MAX_CAGES = 4
 # Probes whether the root filesystem and /tmp take a write, and reads the
 # effective capabilities and the no_new_privs flag.
@@ -50,6 +74,10 @@ HARDEN_PROBE = (
     '/^CapEff:/ {print "capeff=" $2} '
     '/^NoNewPrivs:/ {print "nonewprivs=" $2}'
     "' /proc/self/status"
+)
+CGROUP_LIMITS_PROBE = (
+    "cat /sys/fs/cgroup/pids.max /sys/fs/cgroup/memory.max "
+    "/sys/fs/cgroup/memory.swap.max"
 )
 OVERFLOW_BYTES = 1048576
 OVERFLOW_LINE = b"abcdefg\n"
@@ -128,6 +156,7 @@ def _grant(
     credentials: Mapping[str, EnvMount | FileMount] | None = None,
     timeout: str | None = None,
     env: Mapping[str, str] | None = None,
+    memory: str | None = None,
 ) -> Grant:
     document: dict[str, object] = {
         "roots": list(roots),
@@ -136,6 +165,8 @@ def _grant(
     }
     if timeout is not None:
         document["timeout"] = timeout
+    if memory is not None:
+        document["memory"] = memory
     if env is not None:
         document["env"] = dict(env)
     return Grant.model_validate(document)
@@ -336,6 +367,56 @@ def test_the_cage_passes_the_hardening_probes(cages: _Cages) -> None:
     assert outcome.content["stdout"] == (
         "root=refused\ntmp=written\ncapeff=0000000000000000\nnonewprivs=1\n"
     )
+
+
+def test_a_cage_runs_under_the_default_process_and_memory_limits(
+    cages: _Cages,
+) -> None:
+    """The cage's cgroup caps it at 1024 processes and 4 GiB, with no swap."""
+    outcome = cages.run(_shell(CGROUP_LIMITS_PROBE), {}, _grant())
+
+    assert outcome.content["stdout"] == f"1024\n{4 * 2**30}\n0\n"
+
+
+def test_a_cage_runs_under_its_grant_s_memory_limit(cages: _Cages) -> None:
+    """A grant's memory of 256m sets the cgroup's memory limit, with no swap."""
+    outcome = cages.run(_shell(CGROUP_LIMITS_PROBE), {}, _grant(memory="256m"))
+
+    assert outcome.content["stdout"] == f"1024\n{256 * 2**20}\n0\n"
+
+
+def test_the_daemon_reports_it_enforces_both_cage_limits(
+    docker_client: DockerClient,
+) -> None:
+    """The daemon's info names both limits as enforced, so the start warns of none."""
+    assert runner.limit_warnings(docker_client) == ()
+
+
+def test_a_cage_cannot_make_a_setid_file_in_a_rw_root(
+    cages: _Cages, tmp_path: Path
+) -> None:
+    """Every route to either bit fails; a plain mode, a mkdir, and a read work.
+
+    The host finds no entry with either bit under the root afterwards.
+    """
+    root = tmp_path / "roots" / "rw"
+    root.mkdir(parents=True)
+    # A setgid parent would pass its bit to the probe's mkdir.
+    root.chmod(0o755)
+    refused = [
+        f"{route} {mode} {'ENOSYS' if route == 'openat2' else 'EPERM'}"
+        for mode in SETID_MODES
+        for route in SETID_ROUTES
+    ]
+
+    outcome = cages.run(
+        SETID_PROBE, {"dir": str(root)}, _grant(Root(path=str(root), mode="rw"))
+    )
+
+    assert str(outcome.content["stdout"]).splitlines() == [*refused, *SETID_CONTROLS]
+    assert [
+        path for path in [root, *root.rglob("*")] if path.lstat().st_mode & SETID_BITS
+    ] == []
 
 
 def test_a_timed_out_cage_leaves_no_container(
