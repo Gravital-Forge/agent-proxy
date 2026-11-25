@@ -606,11 +606,10 @@ class Instance:
         cage it removed. The instance holds one cache of provided values, and
         each reload drops every value whose definition it changed. The
         control socket serves reloads of the live config and the gateway's
-        checks. A step that fails closes what the steps
-        before it started, then its error propagates. The instance's warnings
-        are one for each cage limit the daemon cannot enforce, then one for
-        each left cage that could not be removed, then those of the first
-        snapshot.
+        checks. A step that fails closes what the steps before it started,
+        then its error propagates. The instance's warnings are one for each
+        cage limit the daemon cannot enforce, then one for each left cage that
+        could not be removed, then those of the first snapshot.
 
         Raises:
             PluginImageError: a verifier pinned by digest cannot be looked up
